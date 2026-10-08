@@ -53,6 +53,8 @@
 #define CMD_BLE_SET_NAME           0x23  // Set BLE device name (persisted to Flash) or reset to default
 #define CMD_SYSTEM_RESET           0x31  // Trigger system reset/reboot; payload 0x00 resets BLE name
 #define CMD_USB_WORK_MODE          0x30  // Query/change USB personality (HID+ACM, HID+UAC+ACM, bridges)
+#define CMD_SET_ECM_IP_CONFIG      0x26  // Set ECM bridge IP configuration (persisted to Flash)
+#define CMD_GET_ECM_IP_CONFIG      0x27  // Get ECM bridge IP configuration (from RAM cache)
 // ACK Status Codes
 #define STATUS_SUCCESS             0x00  // Operation completed successfully
 #define STATUS_ERR_TIMEOUT         0xE1  // Operation timed out (no response within expected window)
