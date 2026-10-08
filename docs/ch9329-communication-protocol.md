@@ -508,6 +508,84 @@ For host software, the safest mental model is:
 
 This means the protocol is not a raw HID tunnel. It is a small command protocol whose output side happens to be USB HID.
 
+
+## 0x26 — Set ECM IP Configuration
+
+Set the ECM bridge's host-side and target-side IP addresses. Changes are
+persisted to Flash and take effect immediately (no reboot required).
+
+**Request:**
+
+```
+57 AB <addr> 26 <len> <sub_cmd> <data...> <checksum>
+```
+
+**Sub-commands:**
+
+| sub_cmd | Name | Data | Description |
+|---------|------|------|-------------|
+| 0x00 | Set All | host_ip(4) + dev_ip(4) + subnet(4) + target_host_ip(4) + target_dev_ip(4) = 20B | Set all IP config |
+| 0x01 | Set Host Side | host_ip(4) + dev_ip(4) + subnet(4) = 12B | Set host-side config only |
+| 0x02 | Set Target Side | target_host_ip(4) + target_dev_ip(4) = 8B | Set target-side config only |
+| 0x03 | Reset to Default | (none) | Reset to 192.168.11.x defaults |
+
+**Response:**
+
+```
+57 AB <addr> A6 01 <status> <checksum>
+```
+
+**Status codes:**
+- `0x00`: Success (config persisted, bridge reconfigured)
+- `0xE5`: Parameter error (wrong length, invalid IP, invalid subnet mask,
+          IPs not in same subnet, duplicate IPs)
+- `0xE9`: Flash erase failed
+- `0xEA`: Flash program failed
+- `0xEB`: Flash verify failed (read-back mismatch)
+
+**Validation rules:**
+- All IPs must be in the same subnet
+- IPs must not be 0.0.0.0 or 255.255.255.255
+- Subnet mask must be contiguous (e.g., 255.255.255.0 valid, 255.0.255.0 invalid)
+- All four IPs must be mutually distinct
+
+**Example — Set all to 10.0.0.x subnet:**
+```
+Request:  57 AB 00 26 15 00 0A 00 00 01 0A 00 00 03 FF FF FF 00 0A 00 00 02 0A 00 00 05 <sum>
+Response: 57 AB 00 A6 01 00 <sum>
+```
+
+## 0x27 — Get ECM IP Configuration
+
+Read the current ECM bridge IP configuration from RAM cache.
+
+**Request:**
+
+```
+57 AB <addr> 27 01 <sub_cmd> <checksum>
+```
+
+**Sub-commands:**
+
+| sub_cmd | Name | Response Data |
+|---------|------|---------------|
+| 0x00 | Get All | host_ip(4) + dev_ip(4) + subnet(4) + target_host_ip(4) + target_dev_ip(4) = 20B |
+| 0x01 | Get Host Side | host_ip(4) + dev_ip(4) + subnet(4) = 12B |
+| 0x02 | Get Target Side | target_host_ip(4) + target_dev_ip(4) = 8B |
+
+**Response:**
+
+```
+57 AB <addr> A7 <len> <data...> <checksum>
+```
+
+**Example — Get all config:**
+```
+Request:  57 AB 00 27 01 00 <sum>
+Response: 57 AB 00 A7 14 C0 A8 0B 01 C0 A8 0B 03 FF FF FF 00 C0 A8 0B 02 C0 A8 0B 05 <sum>
+```
+
+**Note:** Get reads from RAM cache, no Flash access — response time <1ms.
 ## Limitations And Compatibility Notes
 
 - The implementation is compatibility-oriented, not a bit-for-bit clone of every possible CH9329 feature.
