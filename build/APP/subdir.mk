@@ -15,6 +15,7 @@ C_SRCS += \
 ../APP/default_target_config.c \
 ../APP/DS18B20.c \
 ../APP/ecm_bridge.c \
+../APP/ecm_ip_config.c \
 ../APP/iwdg_auto.c \
 ../APP/keyboard_handler.c \
 ../APP/km_ring.c \
@@ -41,6 +42,7 @@ C_DEPS += \
 ./APP/default_target_config.d \
 ./APP/DS18B20.d \
 ./APP/ecm_bridge.d \
+./APP/ecm_ip_config.d \
 ./APP/iwdg_auto.d \
 ./APP/keyboard_handler.d \
 ./APP/km_ring.d \
@@ -67,6 +69,7 @@ OBJS += \
 ./APP/default_target_config.o \
 ./APP/DS18B20.o \
 ./APP/ecm_bridge.o \
+./APP/ecm_ip_config.o \
 ./APP/iwdg_auto.o \
 ./APP/keyboard_handler.o \
 ./APP/km_ring.o \
