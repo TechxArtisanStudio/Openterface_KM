@@ -1,6 +1,7 @@
 #include "include/ecm_bridge.h"
 #include "include/Version_selection.h"
 #include "include/usb_mode_config.h"
+#include "include/ecm_ip_config.h"
 
 #if USB_WORK_MODE_COMPILES_BRIDGE_ECM
 
@@ -64,20 +65,20 @@
 #define ECM_DHCP_OPT_SERVER_ID          54u
 #define ECM_DHCP_OPT_END                255u
 
-/* IP offered to the Mac (host) on the single CDC-ECM link */
-static const uint8_t ECM_HOST_IP[4]     = { 192, 168, 11, 1 };
-static const uint8_t ECM_SUBNET_MASK[4] = { 255, 255, 255, 0 };
+/* Runtime IP configuration — loaded from ECM_IPConfig module */
+static uint8_t ecm_host_ip[4];
+static uint8_t ecm_subnet_mask[4];
 
 /* Firmware-side peer identity on the CDC ECM link. The descriptor MAC
    02:00:00:00:00:02 becomes macOS's interface MAC, so ARP replies must use a
    distinct peer MAC or macOS ignores them as self-MAC replies. */
 static const uint8_t ECM_DEV_MAC[6] = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x32 };
-static const uint8_t ECM_DEV_IP[4]  = { 192, 168, 11, 3 };
+static uint8_t ecm_dev_ip[4];
 
 /* Firmware-side peer identity on the Target CDC ECM link (USBFS side). */
 static const uint8_t ECM_TARGET_DEV_MAC[6] = { 0x02, 0x00, 0x00, 0x00, 0x03, 0x00 };
-static const uint8_t ECM_TARGET_HOST_IP[4] = { 192, 168, 11, 2 };  /* IP offered to Target PC */
-static const uint8_t ECM_TARGET_DEV_IP[4]  = { 192, 168, 11, 5 };  /* Firmware's Target-side IP */
+static uint8_t ecm_target_host_ip[4];  /* IP offered to Target PC */
+static uint8_t ecm_target_dev_ip[4];  /* Firmware's Target-side IP */
 
 typedef struct {
     uint8_t data[ECM_BRIDGE_MTU_FRAME_SIZE];
@@ -222,8 +223,8 @@ static uint8_t handle_arp_frame(const uint8_t *frame, uint16_t frame_len)
 
     /* Handle ARP requests for our device IP */
     if (arp_op == 1) {  /* ARP request */
-        if (!(frame[38] == ECM_DEV_IP[0] && frame[39] == ECM_DEV_IP[1] &&
-              frame[40] == ECM_DEV_IP[2] && frame[41] == ECM_DEV_IP[3])) {
+        if (!(frame[38] == ecm_dev_ip[0] && frame[39] == ecm_dev_ip[1] &&
+              frame[40] == ecm_dev_ip[2] && frame[41] == ecm_dev_ip[3])) {
             g_ecm_led_override = 4;  /* wrong ip */
             USB_DEBUG("ARP req but wrong IP %d.%d.%d.%d\r\n",
                        frame[38], frame[39], frame[40], frame[41]);
@@ -243,7 +244,7 @@ static uint8_t handle_arp_frame(const uint8_t *frame, uint16_t frame_len)
         reply[18] = 6;  reply[19] = 4;     /* MAC len=6, IP len=4 */
         reply[20] = 0x00; reply[21] = 0x02; /* op = ARP reply */
         memcpy(&reply[22], ECM_DEV_MAC, 6);  /* sender MAC */
-        memcpy(&reply[28], ECM_DEV_IP, 4);   /* sender IP */
+        memcpy(&reply[28], ecm_dev_ip, 4);   /* sender IP */
         memcpy(&reply[32], &frame[22], 6);   /* target MAC (from request) */
         memcpy(&reply[38], &frame[28], 4);   /* target IP = requestor IP */
 
@@ -281,8 +282,8 @@ static uint8_t handle_target_arp_frame(const uint8_t *frame, uint16_t frame_len)
 
     /* Handle ARP requests for our target device IP */
     if (arp_op == 1) {  /* ARP request */
-        if (!(frame[38] == ECM_TARGET_DEV_IP[0] && frame[39] == ECM_TARGET_DEV_IP[1] &&
-              frame[40] == ECM_TARGET_DEV_IP[2] && frame[41] == ECM_TARGET_DEV_IP[3])) {
+        if (!(frame[38] == ecm_target_dev_ip[0] && frame[39] == ecm_target_dev_ip[1] &&
+              frame[40] == ecm_target_dev_ip[2] && frame[41] == ecm_target_dev_ip[3])) {
             USB_DEBUG("Target ARP req but wrong IP %d.%d.%d.%d\r\n",
                        frame[38], frame[39], frame[40], frame[41]);
             return 0;
@@ -300,7 +301,7 @@ static uint8_t handle_target_arp_frame(const uint8_t *frame, uint16_t frame_len)
         reply[18] = 6;  reply[19] = 4;     /* MAC len=6, IP len=4 */
         reply[20] = 0x00; reply[21] = 0x02; /* op = ARP reply */
         memcpy(&reply[22], ECM_TARGET_DEV_MAC, 6);  /* sender MAC */
-        memcpy(&reply[28], ECM_TARGET_DEV_IP, 4);   /* sender IP */
+        memcpy(&reply[28], ecm_target_dev_ip, 4);   /* sender IP */
         memcpy(&reply[32], &frame[22], 6);   /* target MAC (from request) */
         memcpy(&reply[38], &frame[28], 4);   /* target IP = requestor IP */
 
@@ -535,12 +536,12 @@ static uint8_t handle_dhcp_packet(const uint8_t *frame, uint16_t frame_len)
     reply[off + 8] = 64;    /* TTL */
     reply[off + 9] = ECM_IPV4_PROTO_UDP;  /* protocol = UDP */
     /* src IP = firmware device IP */
-    memcpy(&reply[off + 12], ECM_DEV_IP, 4);
+    memcpy(&reply[off + 12], ecm_dev_ip, 4);
     /* dst IP = host IP (broadcast for Discover, unicast for Request) */
     if (dhcp_msg_type == ECM_DHCP_DISCOVER) {
         memset(&reply[off + 16], 0xFF, 4);  /* broadcast */
     } else {
-        memcpy(&reply[off + 16], ECM_HOST_IP, 4);
+        memcpy(&reply[off + 16], ecm_host_ip, 4);
     }
     off += 20;
 
@@ -570,10 +571,10 @@ static uint8_t handle_dhcp_packet(const uint8_t *frame, uint16_t frame_len)
     memset(&reply[off], 0, 4);
     off += 4;
     /* yiaddr (4 bytes) - IP offered to client */
-    memcpy(&reply[off], ECM_HOST_IP, 4);
+    memcpy(&reply[off], ecm_host_ip, 4);
     off += 4;
     /* siaddr (4 bytes) - server IP */
-    memcpy(&reply[off], ECM_DEV_IP, 4);
+    memcpy(&reply[off], ecm_dev_ip, 4);
     off += 4;
     /* giaddr (4 bytes) */
     memset(&reply[off], 0, 4);
@@ -606,7 +607,7 @@ static uint8_t handle_dhcp_packet(const uint8_t *frame, uint16_t frame_len)
     /* Server identifier */
     reply[off++] = ECM_DHCP_OPT_SERVER_ID;
     reply[off++] = 0x04;
-    memcpy(&reply[off], ECM_DEV_IP, 4);
+    memcpy(&reply[off], ecm_dev_ip, 4);
     off += 4;
 
     /* Lease time: 1 hour */
@@ -620,7 +621,7 @@ static uint8_t handle_dhcp_packet(const uint8_t *frame, uint16_t frame_len)
     /* Subnet mask */
     reply[off++] = ECM_DHCP_OPT_SUBNET;
     reply[off++] = 0x04;
-    memcpy(&reply[off], ECM_SUBNET_MASK, 4);  /* Same subnet mask for both */
+    memcpy(&reply[off], ecm_subnet_mask, 4);  /* Same subnet mask for both */
     off += 4;
 
     /* DNS server - use public DNS to avoid OS trying to use firmware as DNS */
@@ -864,12 +865,12 @@ static uint8_t handle_target_dhcp_packet(const uint8_t *frame, uint16_t frame_le
     reply[off + 8] = 64;    /* TTL */
     reply[off + 9] = ECM_IPV4_PROTO_UDP;  /* protocol = UDP */
     /* src IP = firmware target device IP */
-    memcpy(&reply[off + 12], ECM_TARGET_DEV_IP, 4);
+    memcpy(&reply[off + 12], ecm_target_dev_ip, 4);
     /* dst IP = target host IP (broadcast for Discover, unicast for Request) */
     if (dhcp_msg_type == ECM_DHCP_DISCOVER) {
         memset(&reply[off + 16], 0xFF, 4);  /* broadcast */
     } else {
-        memcpy(&reply[off + 16], ECM_TARGET_HOST_IP, 4);
+        memcpy(&reply[off + 16], ecm_target_host_ip, 4);
     }
     off += 20;
 
@@ -899,10 +900,10 @@ static uint8_t handle_target_dhcp_packet(const uint8_t *frame, uint16_t frame_le
     memset(&reply[off], 0, 4);
     off += 4;
     /* yiaddr (4 bytes) - IP offered to client */
-    memcpy(&reply[off], ECM_TARGET_HOST_IP, 4);
+    memcpy(&reply[off], ecm_target_host_ip, 4);
     off += 4;
     /* siaddr (4 bytes) - server IP */
-    memcpy(&reply[off], ECM_TARGET_DEV_IP, 4);
+    memcpy(&reply[off], ecm_target_dev_ip, 4);
     off += 4;
     /* giaddr (4 bytes) */
     memset(&reply[off], 0, 4);
@@ -935,7 +936,7 @@ static uint8_t handle_target_dhcp_packet(const uint8_t *frame, uint16_t frame_le
     /* Server identifier */
     reply[off++] = ECM_DHCP_OPT_SERVER_ID;
     reply[off++] = 0x04;
-    memcpy(&reply[off], ECM_TARGET_DEV_IP, 4);
+    memcpy(&reply[off], ecm_target_dev_ip, 4);
     off += 4;
 
     /* Lease time: 1 hour */
@@ -949,7 +950,7 @@ static uint8_t handle_target_dhcp_packet(const uint8_t *frame, uint16_t frame_le
     /* Subnet mask */
     reply[off++] = ECM_DHCP_OPT_SUBNET;
     reply[off++] = 0x04;
-    memcpy(&reply[off], ECM_SUBNET_MASK, 4);
+    memcpy(&reply[off], ecm_subnet_mask, 4);
     off += 4;
 
     /* DNS server - use public DNS to avoid OS trying to use firmware as DNS */
@@ -1498,9 +1499,9 @@ static void poll_target_tx(void)
         garp[18] = 6;  garp[19] = 4;
         garp[20] = 0x00; garp[21] = 0x02;
         memcpy(&garp[22], ECM_TARGET_DEV_MAC, 6);
-        memcpy(&garp[28], ECM_TARGET_DEV_IP, 4);
+        memcpy(&garp[28], ecm_target_dev_ip, 4);
         memcpy(&garp[32], ECM_TARGET_DEV_MAC, 6);
-        memcpy(&garp[38], ECM_TARGET_DEV_IP, 4);
+        memcpy(&garp[38], ecm_target_dev_ip, 4);
         queue_push(&g_host_to_target, garp, sizeof(garp));
         g_target_garp_sent = 1;
     }
@@ -1567,9 +1568,9 @@ static void poll_host_tx(void)
         garp[18] = 6;  garp[19] = 4;
         garp[20] = 0x00; garp[21] = 0x02;
         memcpy(&garp[22], ECM_DEV_MAC, 6);
-        memcpy(&garp[28], ECM_DEV_IP, 4);
+        memcpy(&garp[28], ecm_dev_ip, 4);
         memcpy(&garp[32], ECM_DEV_MAC, 6);
-        memcpy(&garp[38], ECM_DEV_IP, 4);
+        memcpy(&garp[38], ecm_dev_ip, 4);
         queue_push(&g_target_to_host, garp, sizeof(garp));
         g_host_garp_sent = 1;
         g_ecm_tx_state = 1;
@@ -1636,6 +1637,26 @@ static void poll_host_tx(void)
     }
 }
 
+
+/**
+ * @brief Reload IP configuration from the ECM_IPConfig module.
+ *
+ * Reads current config from RAM cache (no Flash access) and updates
+ * the local IP arrays used by the bridge. Called on successful
+ * CMD_SET_ECM_IP_CONFIG to apply changes without reboot.
+ */
+void ECM_Bridge_Reconfigure(void)
+{
+    ECM_IPConfig_GetHostIP(ecm_host_ip);
+    ECM_IPConfig_GetDevIP(ecm_dev_ip);
+    ECM_IPConfig_GetSubnetMask(ecm_subnet_mask);
+    ECM_IPConfig_GetTargetHostIP(ecm_target_host_ip);
+    ECM_IPConfig_GetTargetDevIP(ecm_target_dev_ip);
+
+    LOG_INFO("ECM bridge: IPs reconfigured
+");
+}
+
 void ECM_Bridge_Init(void)
 {
 #if USB_WORK_MODE_COMPILES_TARGET_CDC_ECM
@@ -1658,6 +1679,9 @@ void ECM_Bridge_Init(void)
     g_target_garp_sent = 0;
     g_target_ecm_data_if_active = 0;
 #endif
+
+    /* Load IP configuration (ECM_IPConfig_Init already called in main) */
+    ECM_Bridge_Reconfigure();
 
 #if USB_WORK_MODE_COMPILES_TARGET_CDC_ECM
     /* Only configure USBFS EP6/EP7 if the active mode actually uses
