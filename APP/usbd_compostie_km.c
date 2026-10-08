@@ -14,6 +14,10 @@
 #include "Version_selection.h"
 #include "include/usb_mode_config.h"
 #include "include/ble_name_config.h"
+#include "include/ecm_ip_config.h"
+/* Forward declaration - will be properly declared in ecm_bridge.h in Task 4 */
+void ECM_Bridge_Reconfigure(void);
+#include "include/ecm_bridge.h"
 
 #if USB_WORK_MODE_COMPILES_BRIDGE_ACM || USB_WORK_MODE_COMPILES_BRIDGE_ECM || USB_WORK_MODE_HAS_HOST_ACM_AND_ECM || USB_WORK_MODE_HAS_HOST_CDC_ACM
 /* External function from usb_endp.c - validates CH9329 command frames */
@@ -428,6 +432,130 @@ void CH9329_DispatchCommand(uint8_t addr, uint8_t cmd_code, uint8_t* pdata, uint
             CH9329_SendResponse(addr, cmd_code, response, sizeof(response), 1);
         }
         break;
+#if USB_WORK_MODE_COMPILES_BRIDGE_ECM
+        case CMD_SET_ECM_IP_CONFIG:
+        {
+            uint8_t status = STATUS_SUCCESS;
+            uint8_t sub_cmd;
+            ECM_IPConfig_Status_t cfg_status = ECM_IP_CONFIG_OK;
+
+            if (data_len < 1) {
+                status = STATUS_ERR_PARAM;
+            } else {
+                sub_cmd = pdata[0];
+
+                switch (sub_cmd) {
+                case 0x00: /* Set All: 20 bytes */
+                    if (data_len == 21) {
+                        ECM_IPConfig_t cfg;
+                        cfg.version = ECM_IP_CONFIG_VERSION;
+                        memcpy(cfg.host_ip,        &pdata[1],  4);
+                        memcpy(cfg.dev_ip,         &pdata[5],  4);
+                        memcpy(cfg.subnet_mask,    &pdata[9],  4);
+                        memcpy(cfg.target_host_ip, &pdata[13], 4);
+                        memcpy(cfg.target_dev_ip,  &pdata[17], 4);
+                        cfg.reserved[0] = 0;
+                        cfg.reserved[1] = 0;
+                        cfg.padding = 0;
+                        cfg_status = ECM_IPConfig_Set(&cfg);
+                    } else {
+                        status = STATUS_ERR_PARAM;
+                    }
+                    break;
+
+                case 0x01: /* Set Host Side: 12 bytes */
+                    if (data_len == 13) {
+                        cfg_status = ECM_IPConfig_SetHostSide(&pdata[1], &pdata[5], &pdata[9]);
+                    } else {
+                        status = STATUS_ERR_PARAM;
+                    }
+                    break;
+
+                case 0x02: /* Set Target Side: 8 bytes */
+                    if (data_len == 9) {
+                        cfg_status = ECM_IPConfig_SetTargetSide(&pdata[1], &pdata[5]);
+                    } else {
+                        status = STATUS_ERR_PARAM;
+                    }
+                    break;
+
+                case 0x03: /* Reset to Default */
+                    cfg_status = ECM_IPConfig_Reset();
+                    break;
+
+                default:
+                    status = STATUS_ERR_PARAM;
+                    break;
+                }
+            }
+
+            /* Map ECM_IPConfig_Status_t to CH9329 status codes */
+            if (status == STATUS_SUCCESS) {
+                switch (cfg_status) {
+                case ECM_IP_CONFIG_OK:                status = STATUS_SUCCESS;          break;
+                case ECM_IP_CONFIG_ERR_PARAM:         status = STATUS_ERR_PARAM;        break;
+                case ECM_IP_CONFIG_ERR_FLASH_ERASE:   status = STATUS_ERR_FLASH_ERASE;  break;
+                case ECM_IP_CONFIG_ERR_FLASH_PROGRAM: status = STATUS_ERR_FLASH_PROGRAM;break;
+                case ECM_IP_CONFIG_ERR_FLASH_VERIFY:  status = STATUS_ERR_FLASH_VERIFY; break;
+                default:                              status = STATUS_ERR_FLASH_VERIFY; break;
+                }
+            }
+
+            CH9329_SendResponse(addr, CMD_SET_ECM_IP_CONFIG, &status, 1, 1);
+
+            /* Immediately reconfigure ECM bridge on success */
+            if (status == STATUS_SUCCESS) {
+                ECM_Bridge_Reconfigure();
+            }
+        }
+        break;
+
+        case CMD_GET_ECM_IP_CONFIG:
+        {
+            uint8_t sub_cmd;
+            uint8_t status = STATUS_SUCCESS;
+            uint8_t response[21]; /* max: 20 data + 1 status */
+
+            if (data_len < 1) {
+                status = STATUS_ERR_PARAM;
+                CH9329_SendResponse(addr, CMD_GET_ECM_IP_CONFIG, &status, 1, 1);
+            } else {
+                sub_cmd = pdata[0];
+                ECM_IPConfig_t cfg;
+                ECM_IPConfig_Get(&cfg);
+
+                switch (sub_cmd) {
+                case 0x00: /* Get All: 20 bytes */
+                    memcpy(&response[0], cfg.host_ip, 4);
+                    memcpy(&response[4], cfg.dev_ip, 4);
+                    memcpy(&response[8], cfg.subnet_mask, 4);
+                    memcpy(&response[12], cfg.target_host_ip, 4);
+                    memcpy(&response[16], cfg.target_dev_ip, 4);
+                    CH9329_SendResponse(addr, CMD_GET_ECM_IP_CONFIG, response, 20, 1);
+                    break;
+
+                case 0x01: /* Get Host Side: 12 bytes */
+                    memcpy(&response[0], cfg.host_ip, 4);
+                    memcpy(&response[4], cfg.dev_ip, 4);
+                    memcpy(&response[8], cfg.subnet_mask, 4);
+                    CH9329_SendResponse(addr, CMD_GET_ECM_IP_CONFIG, response, 12, 1);
+                    break;
+
+                case 0x02: /* Get Target Side: 8 bytes */
+                    memcpy(&response[0], cfg.target_host_ip, 4);
+                    memcpy(&response[4], cfg.target_dev_ip, 4);
+                    CH9329_SendResponse(addr, CMD_GET_ECM_IP_CONFIG, response, 8, 1);
+                    break;
+
+                default:
+                    status = STATUS_ERR_PARAM;
+                    CH9329_SendResponse(addr, CMD_GET_ECM_IP_CONFIG, &status, 1, 1);
+                    break;
+                }
+            }
+        }
+        break;
+#endif /* USB_WORK_MODE_COMPILES_BRIDGE_ECM */
 
         default:
         {
