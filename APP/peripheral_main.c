@@ -26,6 +26,7 @@
 #include "include/ecm_bridge.h"
 #include "include/usb_mode_config.h"
 #include "include/default_target_config.h"
+#include "include/ecm_ip_config.h"
 #include "include/pwm_led.h"
 
 /*********************************************************************
@@ -228,6 +229,9 @@ int main(void) {
     Delay_Init();
     USB_ModeConfig_Init();
     DefaultTargetConfig_Init();
+#if USB_WORK_MODE_COMPILES_BRIDGE_ECM
+    ECM_IPConfig_Init();
+#endif
     //usbd_init
     USART_Printf_Init(115200);
     Set_USBConfig();
