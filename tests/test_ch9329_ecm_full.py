@@ -31,6 +31,11 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
+if __package__:
+    from . import test_ch9329_ecm as ecm_cli
+else:
+    import test_ch9329_ecm as ecm_cli
+
 
 # ===================================================================
 # Import or duplicate the frame-building logic from test_ch9329_ecm.py
@@ -138,7 +143,6 @@ def build_ch9329_keyboard(modifier: int = 0, keys: Optional[list] = None) -> byt
     payload = bytes([modifier, 0])
     payload += bytes(keys[:6])
     payload += bytes(max(0, 6 - len(keys[:6])))  # pad key slots to 6
-    payload += bytes(2)  # trailing reserved padding (CH9329 expects 10-byte payload)
     return build_ch9329_frame(0x00, CH9329_CMD_KB_GENERAL, payload)
 
 
@@ -147,12 +151,12 @@ def build_ch9329_media(modifier: int = 0) -> bytes:
 
 
 def build_ch9329_abs_mouse(buttons: int = 0, x: int = 0, y: int = 0) -> bytes:
-    payload = struct.pack("<BHH", buttons & 0x07, x & 0xFFFF, y & 0xFFFF)
+    payload = struct.pack("<BBHHB", 0, buttons & 0x07, x & 0xFFFF, y & 0xFFFF, 0)
     return build_ch9329_frame(0x00, CH9329_CMD_MS_ABS, payload)
 
 
 def build_ch9329_rel_mouse(buttons: int = 0, dx: int = 0, dy: int = 0, wheel: int = 0) -> bytes:
-    payload = struct.pack("<BbbB", buttons & 0x07, dx & 0xFF if dx >= 0 else -((-dx) & 0xFF),
+    payload = struct.pack("<BBbbB", 0, buttons & 0x07, dx & 0xFF if dx >= 0 else -((-dx) & 0xFF),
                           dy & 0xFF if dy >= 0 else -((-dy) & 0xFF), wheel & 0xFF)
     return build_ch9329_frame(0x00, CH9329_CMD_MS_REL, payload)
 
@@ -273,47 +277,43 @@ def test_unit_ch9329_frame(runner: TestRunner):
 
 
 def test_unit_keyboard_report(runner: TestRunner):
+    # Literal wire vectors from the protocol contract also cover the CLI helpers.
     def test_single_key():
-        frame = build_ch9329_keyboard(0, [0x04])  # 'a'
-        # 5 header + 10 payload (modifier+reserved+6keys+2pad) + 1 checksum = 16
-        assert len(frame) == 16
-        assert frame[3] == CH9329_CMD_KB_GENERAL
-        assert frame[-1] == _checksum(frame[:-1])
+        for builder in (build_ch9329_keyboard, ecm_cli.build_ch9329_keyboard):
+            assert builder(0, [0x04]) == bytes.fromhex("57ab000208000004000000000010"), builder.__module__
     runner.run("Keyboard report: single key", test_single_key)
 
     def test_modifier():
-        frame = build_ch9329_keyboard(0x03, [0x04])  # Ctrl+Shift+A
-        assert frame[5] == 0x03  # modifier byte
+        for builder in (build_ch9329_keyboard, ecm_cli.build_ch9329_keyboard):
+            assert builder(0x03, [0x04]) == bytes.fromhex("57ab000208030004000000000013"), builder.__module__
     runner.run("Keyboard report: modifier bits", test_modifier)
 
     def test_six_keys():
-        frame = build_ch9329_keyboard(0, [0x04, 0x05, 0x06, 0x07, 0x08, 0x09])
-        assert frame[7:13] == bytes([0x04, 0x05, 0x06, 0x07, 0x08, 0x09])
-    runner.run("Keyboard report: 6 keys", test_six_keys)
+        for builder in (build_ch9329_keyboard, ecm_cli.build_ch9329_keyboard):
+            for keys in ([0x04, 0x05, 0x06, 0x07, 0x08, 0x09],
+                         [0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A]):
+                assert builder(0, keys) == bytes.fromhex("57ab000208000004050607080933"), builder.__module__
+    runner.run("Keyboard report: 6 keys and truncation", test_six_keys)
 
     def test_no_keys_release():
-        frame = build_ch9329_keyboard()
-        assert frame[5:15] == bytes(10)  # all zeros = release
+        for builder in (build_ch9329_keyboard, ecm_cli.build_ch9329_keyboard):
+            assert builder() == bytes.fromhex("57ab00020800000000000000000c"), builder.__module__
     runner.run("Keyboard report: no keys (release)", test_no_keys_release)
 
 
 def test_unit_mouse_reports(runner: TestRunner):
     def test_abs_mouse():
-        frame = build_ch9329_abs_mouse(1, 100, 200)
-        assert frame[3] == CH9329_CMD_MS_ABS
-        assert frame[5] == 0x01  # buttons
-        payload = frame[5:10]
-        x = struct.unpack("<H", payload[1:3])[0]
-        y = struct.unpack("<H", payload[3:5])[0]
-        assert x == 100
-        assert y == 200
-        assert frame[-1] == _checksum(frame[:-1])
+        for builder in (build_ch9329_abs_mouse, ecm_cli.build_ch9329_abs_mouse):
+            assert builder(1, 100, 200) == bytes.fromhex("57ab00040700016400c800003a"), builder.__module__
+            assert builder() == bytes.fromhex("57ab000407000000000000000d"), builder.__module__
+            assert builder(0xFF, 0x12345, 0x16789) == bytes.fromhex("57ab000407000745238967006c"), builder.__module__
     runner.run("Abs mouse report", test_abs_mouse)
 
     def test_rel_mouse():
-        frame = build_ch9329_rel_mouse(2, -10, 5, 1)
-        assert frame[3] == CH9329_CMD_MS_REL
-        assert frame[-1] == _checksum(frame[:-1])
+        for builder in (build_ch9329_rel_mouse, ecm_cli.build_ch9329_rel_mouse):
+            assert builder(2, -10, 5, 1) == bytes.fromhex("57ab0005050002f605010a"), builder.__module__
+            assert builder() == bytes.fromhex("57ab00050500000000000c"), builder.__module__
+            assert builder(0xFF, -128, 127, -1) == bytes.fromhex("57ab0005050007807fff11"), builder.__module__
     runner.run("Rel mouse report", test_rel_mouse)
 
 
