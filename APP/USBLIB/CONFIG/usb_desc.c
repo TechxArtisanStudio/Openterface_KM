@@ -122,7 +122,11 @@ const uint8_t  USBD_ConfigDescriptor[] = {
     0x05,                           // bDescriptorType (Endpoint)
     0x83,                           // bEndpointAddress (IN/D2H)
     0x02,                           // bmAttributes (Bulk)
+#if USB_WORK_MODE_HAS_HOST_CDC_ACM && USB_WORK_MODE_HAS_HOST_CDC_ECM
+    0x40, 0x00,                     // wMaxPacketSize 64 (ACM+ECM mode: 64 bytes for CH9329 responses)
+#else
     0x10, 0x00,                     // wMaxPacketSize 16 (PMA reserved for double-buffered UAC audio)
+#endif
     0x00,                           // bInterval 0
 
 #if USB_WORK_MODE_HAS_HOST_CDC_ECM

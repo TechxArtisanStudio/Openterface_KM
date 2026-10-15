@@ -1,7 +1,0 @@
-Device not found
-Traceback (most recent call last):
-  File "/Users/txa/project/Openterface_KM/read_debug_pyusb.py", line 98, in <module>
-    read_debug_messages()
-  File "/Users/txa/project/Openterface_KM/read_debug_pyusb.py", line 91, in read_debug_messages
-    if debug_chars:
-UnboundLocalError: local variable 'debug_chars' referenced before assignment

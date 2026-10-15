@@ -40,8 +40,10 @@ static bool validate_subnet_mask(const uint8_t mask[4])
     uint32_t m = ((uint32_t)mask[0] << 24) | ((uint32_t)mask[1] << 16)
                | ((uint32_t)mask[2] << 8)  |  (uint32_t)mask[3];
     if (m == 0u || m == 0xFFFFFFFFu) return false;
-    /* Contiguous mask satisfies (~m + 1) & m == 0 */
-    return ((~m + 1u) & m) == 0u;
+    /* Contiguous mask: inverted mask (~m) must be of form 2^n - 1
+     * i.e., (~m) & ((~m) + 1) == 0 */
+    uint32_t inv = ~m;
+    return (inv & (inv + 1u)) == 0u;
 }
 
 /* Validate IP: cannot be 0.0.0.0 or 255.255.255.255 */
@@ -287,11 +289,13 @@ uint8_t ECM_IPConfig_SetHostSide(const uint8_t host_ip[4],
                                   const uint8_t dev_ip[4],
                                   const uint8_t subnet[4])
 {
-    ECM_IPConfig_t new_config = s_ram_cache;
-
+    ECM_IPConfig_t new_config;
+    memset(&new_config, 0, sizeof(new_config)); // Zero-init to avoid uninitialized padding
+    memcpy(&new_config, &s_ram_cache, sizeof(s_ram_cache)); // Copy current config
     memcpy(new_config.host_ip, host_ip, 4);
     memcpy(new_config.dev_ip, dev_ip, 4);
     memcpy(new_config.subnet_mask, subnet, 4);
+    // reserved and padding already zero from memset
 
     return ECM_IPConfig_Set(&new_config);
 }
@@ -299,10 +303,12 @@ uint8_t ECM_IPConfig_SetHostSide(const uint8_t host_ip[4],
 uint8_t ECM_IPConfig_SetTargetSide(const uint8_t target_host_ip[4],
                                    const uint8_t target_dev_ip[4])
 {
-    ECM_IPConfig_t new_config = s_ram_cache;
-
+    ECM_IPConfig_t new_config;
+    memset(&new_config, 0, sizeof(new_config)); // Zero-init to avoid uninitialized padding
+    memcpy(&new_config, &s_ram_cache, sizeof(s_ram_cache)); // Copy current config
     memcpy(new_config.target_host_ip, target_host_ip, 4);
     memcpy(new_config.target_dev_ip, target_dev_ip, 4);
+    // reserved and padding already zero from memset
 
     return ECM_IPConfig_Set(&new_config);
 }

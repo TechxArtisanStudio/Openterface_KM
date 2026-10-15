@@ -642,20 +642,101 @@ static void USBFS_BuildRuntimeConfigDescriptor(void)
     }
 
     memcpy(USBFS_RuntimeConfigDescriptor, USBFS_RuntimeHidConfigBase, USBFS_RUNTIME_HID_CONFIG_DESC_SIZE);
-    if (USB_ModeConfig_ModeHasTargetUac(mode)) {
+    if (USB_ModeConfig_ModeHasHostUac(mode)) {
         memcpy(&USBFS_RuntimeConfigDescriptor[total_len], USBFS_RuntimeUacBlock, USBFS_RUNTIME_UAC_BLOCK_SIZE);
         total_len = (uint16_t)(total_len + USBFS_RUNTIME_UAC_BLOCK_SIZE);
         num_interfaces = 7u;
+
+        // Adjust interface and endpoint numbers in subsequent blocks if needed
+        if (USB_ModeConfig_ModeHasHostCdcAcm(mode)) {
+            // ACM block should start after UAC's interfaces (4,5,6)
+            uint16_t acm_block_start = total_len;
+            memcpy(&USBFS_RuntimeConfigDescriptor[total_len], USBFS_RuntimeAcmBlock, USBFS_RUNTIME_ACM_BLOCK_SIZE);
+            total_len = (uint16_t)(total_len + USBFS_RUNTIME_ACM_BLOCK_SIZE);
+            // Patch ACM block interface numbers: +3 (to start at interface 7 instead of 4)
+            for (uint16_t i = 0; i < USBFS_RUNTIME_ACM_BLOCK_SIZE; i += 9) {
+                // Interface descriptor is 9 bytes: 0x09, 0x04, interface_num, ...
+                if (i + 2 < USBFS_RUNTIME_ACM_BLOCK_SIZE) {
+                    USBFS_RuntimeConfigDescriptor[acm_block_start + i + 2] += 3;
+                }
+            }
+            // Patch ACM block endpoint addresses: +2 (to start at endpoint 7 instead of 5)
+            // UAC uses endpoints 5-6, so ACM should start at 7
+            for (uint16_t i = 0; i < USBFS_RUNTIME_ACM_BLOCK_SIZE - 2; i++) {
+                if (USBFS_RuntimeConfigDescriptor[acm_block_start + i] == 0x07 &&
+                    USBFS_RuntimeConfigDescriptor[acm_block_start + i + 1] == 0x05) {
+                    // This is an endpoint descriptor, patch the address
+                    uint8_t addr = USBFS_RuntimeConfigDescriptor[acm_block_start + i + 2];
+                    uint8_t ep_num = addr & 0x0F;
+                    uint8_t direction = addr & 0x80;
+                    USBFS_RuntimeConfigDescriptor[acm_block_start + i + 2] = direction | (ep_num + 2);
+                }
+            }
+            num_interfaces = 9u;
+        }
+        else if (USB_ModeConfig_ModeHasHostCdcEcm(mode)) {
+            // ECM block should start after UAC's interfaces (4,5,6)
+            uint16_t ecm_block_start = total_len;
+            memcpy(&USBFS_RuntimeConfigDescriptor[total_len], USBFS_RuntimeEcmBlock, USBFS_RUNTIME_ECM_BLOCK_SIZE);
+            total_len = (uint16_t)(total_len + USBFS_RUNTIME_ECM_BLOCK_SIZE);
+            // Patch ECM block interface numbers: +3 (to start at interface 7 instead of 4)
+            for (uint16_t i = 0; i < USBFS_RUNTIME_ECM_BLOCK_SIZE; i += 9) {
+                // Interface descriptor is 9 bytes: 0x09, 0x04, interface_num, ...
+                if (i + 2 < USBFS_RUNTIME_ECM_BLOCK_SIZE) {
+                    USBFS_RuntimeConfigDescriptor[ecm_block_start + i + 2] += 3;
+                }
+            }
+            // Patch ECM block endpoint addresses: +2 (to start at endpoint 7 instead of 5)
+            // UAC uses endpoints 5-6, so ECM should start at 7
+            for (uint16_t i = 0; i < USBFS_RUNTIME_ECM_BLOCK_SIZE - 2; i++) {
+                if (USBFS_RuntimeConfigDescriptor[ecm_block_start + i] == 0x07 &&
+                    USBFS_RuntimeConfigDescriptor[ecm_block_start + i + 1] == 0x05) {
+                    // This is an endpoint descriptor, patch the address
+                    uint8_t addr = USBFS_RuntimeConfigDescriptor[ecm_block_start + i + 2];
+                    uint8_t ep_num = addr & 0x0F;
+                    uint8_t direction = addr & 0x80;
+                    USBFS_RuntimeConfigDescriptor[ecm_block_start + i + 2] = direction | (ep_num + 2);
+                }
+            }
+            num_interfaces = 9u;
+        }
     }
-    else if (USB_ModeConfig_ModeHasTargetCdcAcm(mode)) {
-        memcpy(&USBFS_RuntimeConfigDescriptor[total_len], USBFS_RuntimeAcmBlock, USBFS_RUNTIME_ACM_BLOCK_SIZE);
-        total_len = (uint16_t)(total_len + USBFS_RUNTIME_ACM_BLOCK_SIZE);
-        num_interfaces = 6u;
-    }
-    else if (USB_ModeConfig_ModeHasTargetCdcEcm(mode)) {
-        memcpy(&USBFS_RuntimeConfigDescriptor[total_len], USBFS_RuntimeEcmBlock, USBFS_RUNTIME_ECM_BLOCK_SIZE);
-        total_len = (uint16_t)(total_len + USBFS_RUNTIME_ECM_BLOCK_SIZE);
-        num_interfaces = 6u;
+    else {
+        if (USB_ModeConfig_ModeHasHostCdcAcm(mode)) {
+            memcpy(&USBFS_RuntimeConfigDescriptor[total_len], USBFS_RuntimeAcmBlock, USBFS_RUNTIME_ACM_BLOCK_SIZE);
+            total_len = (uint16_t)(total_len + USBFS_RUNTIME_ACM_BLOCK_SIZE);
+            num_interfaces = 6u;
+        }
+        if (USB_ModeConfig_ModeHasHostCdcEcm(mode)) {
+            memcpy(&USBFS_RuntimeConfigDescriptor[total_len], USBFS_RuntimeEcmBlock, USBFS_RUNTIME_ECM_BLOCK_SIZE);
+            total_len = (uint16_t)(total_len + USBFS_RUNTIME_ECM_BLOCK_SIZE);
+
+            // Adjust interface and endpoint numbers in ECM block if ACM block was also added
+            if (USB_ModeConfig_ModeHasHostCdcAcm(mode)) {
+                // ECM block starts at offset total_len - USBFS_RUNTIME_ECM_BLOCK_SIZE
+                uint16_t ecm_block_start = total_len - USBFS_RUNTIME_ECM_BLOCK_SIZE;
+                // Patch ECM block interface numbers: +2 (to start at interface 6 instead of 4)
+                for (uint16_t i = 0; i < USBFS_RUNTIME_ECM_BLOCK_SIZE; i += 9) {
+                    // Interface descriptor is 9 bytes: 0x09, 0x04, interface_num, ...
+                    if (i + 2 < USBFS_RUNTIME_ECM_BLOCK_SIZE) {
+                        USBFS_RuntimeConfigDescriptor[ecm_block_start + i + 2] += 2;
+                    }
+                }
+                // Patch ECM block endpoint addresses: +2 (to start at endpoint 7 instead of 5)
+                // ACM uses endpoints 5-6, so ECM should start at 7
+                for (uint16_t i = 0; i < USBFS_RUNTIME_ECM_BLOCK_SIZE - 2; i++) {
+                    if (USBFS_RuntimeConfigDescriptor[ecm_block_start + i] == 0x07 &&
+                        USBFS_RuntimeConfigDescriptor[ecm_block_start + i + 1] == 0x05) {
+                        // This is an endpoint descriptor, patch the address
+                        uint8_t addr = USBFS_RuntimeConfigDescriptor[ecm_block_start + i + 2];
+                        uint8_t ep_num = addr & 0x0F;
+                        uint8_t direction = addr & 0x80;
+                        USBFS_RuntimeConfigDescriptor[ecm_block_start + i + 2] = direction | (ep_num + 2);
+                    }
+                }
+                num_interfaces = 8u;
+            }
+        }
     }
 
     USBFS_RuntimeConfigDescriptor[2] = (uint8_t)total_len;
