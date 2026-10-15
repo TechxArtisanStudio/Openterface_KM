@@ -102,6 +102,7 @@ build_firmware() {
     local board_version=$2
     local enable_oscillator=$3
     local ble_name=$4
+    local usb_work_mode=$5
 
     echo ""
     echo -e "${BLUE}========================================${NC}"
@@ -111,6 +112,7 @@ build_firmware() {
     echo "  ENABLE_BLE:        ${ENABLE_BLE}"
     echo "  ENABLE_OSCILLATOR: ${enable_oscillator}"
     echo "  BLE_NAME:          ${ble_name}"
+    echo "  USB_WORK_MODE:     ${usb_work_mode}"
     echo ""
 
     cd "${BUILD_DIR}"
@@ -122,6 +124,9 @@ build_firmware() {
     local make_args="BOARD_VERSION=${board_version} ENABLE_BLE=${ENABLE_BLE} BLE_NAME=${ble_name} USE_LTO=${USE_LTO}"
     if [ -n "${enable_oscillator}" ]; then
         make_args="${make_args} ENABLE_OSCILLATOR=${enable_oscillator}"
+    fi
+    if [ -n "${usb_work_mode}" ]; then
+        make_args="${make_args} USB_WORK_MODE=${usb_work_mode}"
     fi
 
     # Compile
@@ -206,8 +211,9 @@ build_one() {
     local board_version=$2
     local enable_oscillator=$3
     local ble_name=$4
+    local usb_work_mode=$5
 
-    if build_firmware "${target}" "${board_version}" "${enable_oscillator}" "${ble_name}"; then
+    if build_firmware "${target}" "${board_version}" "${enable_oscillator}" "${ble_name}" "${usb_work_mode}"; then
         BUILD_SUCCESS=$((BUILD_SUCCESS + 1))
     else
         BUILD_FAILED=$((BUILD_FAILED + 1))
@@ -218,32 +224,32 @@ case ${TARGET} in
     kvmgo)
         ENABLE_BLE=1
         USE_LTO=1
-        build_one "kvmgo" "1" "" "KVM-GO"
+        build_one "kvmgo" "1" "" "KVM-GO" "hid_acm_ecm"
         ;;
     minikvm)
         ENABLE_BLE=0
         USE_LTO=1
-        build_one "minikvm" "2" "" "Mini-KVM"
+        build_one "minikvm" "2" "" "Mini-KVM" "hid_acm_ecm"
         ;;
     keymod-plus)
         ENABLE_BLE=1
         USE_LTO=1
-        build_one "keymod-plus" "3" "1" "KeyMod"
+        build_one "keymod-plus" "3" "1" "KeyMod" "hid_acm_ecm"
         ;;
     keymod-mini)
         ENABLE_BLE=1
         USE_LTO=1
-        build_one "keymod-mini" "3" "0" "KeyMod"
+        build_one "keymod-mini" "3" "0" "KeyMod" "hid_acm_ecm"
         ;;
     all)
         ENABLE_BLE=1
         USE_LTO=1
-        build_one "kvmgo" "1" "" "KVM-GO"
+        build_one "kvmgo" "1" "" "KVM-GO" "hid_acm_ecm"
         ENABLE_BLE=0
-        build_one "minikvm" "2" "" "Mini-KVM"
+        build_one "minikvm" "2" "" "Mini-KVM" "hid_acm_ecm"
         ENABLE_BLE=1
-        build_one "keymod-plus" "3" "1" "KeyMod"
-        build_one "keymod-mini" "3" "0" "KeyMod"
+        build_one "keymod-plus" "3" "1" "KeyMod" "hid_acm_ecm"
+        build_one "keymod-mini" "3" "0" "KeyMod" "hid_acm_ecm"
         ;;
 esac
 

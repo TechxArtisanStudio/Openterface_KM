@@ -451,16 +451,16 @@ void CH9329_DispatchCommand(uint8_t addr, uint8_t cmd_code, uint8_t* pdata, uint
                     if (data_len != 21) { // 1 byte sub_cmd + 20 bytes data
                         status = STATUS_ERR_PARAM;
                     } else {
-                        ECM_IPConfig_t config;
-                        config.record_version = 1;
-                        memcpy(config.host_ip, &pdata[1], 4);
-                        memcpy(config.dev_ip, &pdata[5], 4);
-                        memcpy(config.subnet_mask, &pdata[9], 4);
-                        memcpy(config.target_host_ip, &pdata[13], 4);
-                        memcpy(config.target_dev_ip, &pdata[17], 4);
-                        config.reserved[0] = 0;
-                        config.reserved[1] = 0;
-                        config.padding = 0;
+                        ECM_IPConfig_t config = {
+                            .record_version = ECM_IP_CONFIG_VERSION,
+                            .host_ip = { pdata[1], pdata[2], pdata[3], pdata[4] },
+                            .dev_ip = { pdata[5], pdata[6], pdata[7], pdata[8] },
+                            .subnet_mask = { pdata[9], pdata[10], pdata[11], pdata[12] },
+                            .target_host_ip = { pdata[13], pdata[14], pdata[15], pdata[16] },
+                            .target_dev_ip = { pdata[17], pdata[18], pdata[19], pdata[20] },
+                            .reserved = { 0, 0 },
+                            .padding = 0
+                        };
 
                         uint8_t result = ECM_IPConfig_Set(&config);
                         status = (result == ECM_IP_CONFIG_OK) ? STATUS_SUCCESS : result;
