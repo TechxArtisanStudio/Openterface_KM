@@ -72,6 +72,12 @@ void ECM_IPConfig_GetSubnetMask(uint8_t mask[4]);
 void ECM_IPConfig_GetTargetHostIP(uint8_t ip[4]);
 void ECM_IPConfig_GetTargetDevIP(uint8_t ip[4]);
 
+/* Validate config (check if parameters are valid before setting) */
+bool ECM_IPConfig_Validate(const ECM_IPConfig_t *config);
+
+/* Get current config from RAM cache (for building partial updates) */
+void ECM_IPConfig_GetCurrent(ECM_IPConfig_t *config);
+
 /* Set config (validate + write to Flash, dual-page wear leveling) */
 /* Returns ECM_IP_CONFIG_OK on success, or error code */
 uint8_t ECM_IPConfig_Set(const ECM_IPConfig_t *config);
@@ -94,6 +100,8 @@ uint8_t ECM_IPConfig_Reset(void);
 #define ECM_IPConfig_GetSubnetMask(mask)     ((void)0)
 #define ECM_IPConfig_GetTargetHostIP(ip)     ((void)0)
 #define ECM_IPConfig_GetTargetDevIP(ip)      ((void)0)
+#define ECM_IPConfig_Validate(config)        (true)
+#define ECM_IPConfig_GetCurrent(config)      ((void)0)
 #define ECM_IPConfig_Set(config)             (0x00)
 #define ECM_IPConfig_SetHostSide(h, d, s)    (0x00)
 #define ECM_IPConfig_SetTargetSide(th, td)   (0x00)

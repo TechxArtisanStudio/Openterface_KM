@@ -437,69 +437,133 @@ void CH9329_DispatchCommand(uint8_t addr, uint8_t cmd_code, uint8_t* pdata, uint
         {
 #if USB_WORK_MODE_COMPILES_BRIDGE_ECM
             uint8_t status = STATUS_SUCCESS;
+            bool send_response_now = true;
 
             if (data_len < 1) {
                 status = STATUS_ERR_PARAM;
-                CH9329_SendResponse(addr, cmd_code, &status, 1, 0);
-                break;
+                send_response_now = false;
+            } else {
+                uint8_t sub_cmd = pdata[0];
+
+                switch (sub_cmd) {
+                    case 0x00: // Set All
+                        if (data_len != 21) { // 1 byte sub_cmd + 20 bytes data
+                            status = STATUS_ERR_PARAM;
+                            send_response_now = false;
+                        } else {
+                            ECM_IPConfig_t config = {
+                                .record_version = ECM_IP_CONFIG_VERSION,
+                                .host_ip = { pdata[1], pdata[2], pdata[3], pdata[4] },
+                                .dev_ip = { pdata[5], pdata[6], pdata[7], pdata[8] },
+                                .subnet_mask = { pdata[9], pdata[10], pdata[11], pdata[12] },
+                                .target_host_ip = { pdata[13], pdata[14], pdata[15], pdata[16] },
+                                .target_dev_ip = { pdata[17], pdata[18], pdata[19], pdata[20] },
+                                .reserved = { 0, 0 },
+                                .padding = 0
+                            };
+
+                            // Validate config first
+                            if (!ECM_IPConfig_Validate(&config)) {
+                                status = STATUS_ERR_PARAM;
+                                send_response_now = false;
+                            } else {
+                                // Send success response immediately
+                                CH9329_SendResponse(addr, cmd_code, &status, 1, 1);
+                                // Then perform Flash write operation
+                                uint8_t result = ECM_IPConfig_Set(&config);
+                                status = (result == ECM_IP_CONFIG_OK) ? STATUS_SUCCESS : result;
+                                // Note: We don't send another response here as we already sent success
+                                // Flash errors will need to be detected by user via GET commands
+                                send_response_now = false; // Already sent response
+                            }
+                        }
+                        break;
+
+                    case 0x01: // Set Host Side
+                        if (data_len != 13) { // 1 byte sub_cmd + 12 bytes data
+                            status = STATUS_ERR_PARAM;
+                            send_response_now = false;
+                        } else {
+                            // Create temporary config to validate
+                            ECM_IPConfig_t temp_config;
+                            ECM_IPConfig_GetCurrent(&temp_config);
+                            memcpy(temp_config.host_ip, &pdata[1], 4);
+                            memcpy(temp_config.dev_ip, &pdata[5], 4);
+                            memcpy(temp_config.subnet_mask, &pdata[9], 4);
+
+                            // Validate config first
+                            if (!ECM_IPConfig_Validate(&temp_config)) {
+                                status = STATUS_ERR_PARAM;
+                                send_response_now = false;
+                            } else {
+                                // Send success response immediately
+                                CH9329_SendResponse(addr, cmd_code, &status, 1, 1);
+                                // Then perform Flash write operation
+                                uint8_t result = ECM_IPConfig_SetHostSide(&pdata[1], &pdata[5], &pdata[9]);
+                                status = (result == ECM_IP_CONFIG_OK) ? STATUS_SUCCESS : result;
+                                // Note: We don't send another response here as we already sent success
+                                // Flash errors will need to be detected by user via GET commands
+                                send_response_now = false; // Already sent response
+                            }
+                        }
+                        break;
+
+                    case 0x02: // Set Target Side
+                        if (data_len != 9) { // 1 byte sub_cmd + 8 bytes data
+                            status = STATUS_ERR_PARAM;
+                            send_response_now = false;
+                        } else {
+                            // Create temporary config to validate
+                            ECM_IPConfig_t temp_config;
+                            ECM_IPConfig_GetCurrent(&temp_config);
+                            memcpy(temp_config.target_host_ip, &pdata[1], 4);
+                            memcpy(temp_config.target_dev_ip, &pdata[5], 4);
+
+                            // Validate config first
+                            if (!ECM_IPConfig_Validate(&temp_config)) {
+                                status = STATUS_ERR_PARAM;
+                                send_response_now = false;
+                            } else {
+                                // Send success response immediately
+                                CH9329_SendResponse(addr, cmd_code, &status, 1, 1);
+                                // Then perform Flash write operation
+                                uint8_t result = ECM_IPConfig_SetTargetSide(&pdata[1], &pdata[5]);
+                                status = (result == ECM_IP_CONFIG_OK) ? STATUS_SUCCESS : result;
+                                // Note: We don't send another response here as we already sent success
+                                // Flash errors will need to be detected by user via GET commands
+                                send_response_now = false; // Already sent response
+                            }
+                        }
+                        break;
+
+                    case 0x03: // Reset to Default
+                        if (data_len != 1) {
+                            status = STATUS_ERR_PARAM;
+                            send_response_now = false;
+                        } else {
+                            // Reset to default is always valid (we know the default config is valid)
+                            // Send success response immediately
+                            CH9329_SendResponse(addr, cmd_code, &status, 1, 1);
+                            // Then perform Flash write operation
+                            uint8_t result = ECM_IPConfig_Reset();
+                            status = (result == ECM_IP_CONFIG_OK) ? STATUS_SUCCESS : result;
+                            // Note: We don't send another response here as we already sent success
+                            // Flash errors will need to be detected by user via GET commands
+                            send_response_now = false; // Already sent response
+                        }
+                        break;
+
+                    default:
+                        status = STATUS_ERR_PARAM;
+                        send_response_now = false;
+                        break;
+                }
             }
 
-            uint8_t sub_cmd = pdata[0];
-
-            switch (sub_cmd) {
-                case 0x00: // Set All
-                    if (data_len != 21) { // 1 byte sub_cmd + 20 bytes data
-                        status = STATUS_ERR_PARAM;
-                    } else {
-                        ECM_IPConfig_t config = {
-                            .record_version = ECM_IP_CONFIG_VERSION,
-                            .host_ip = { pdata[1], pdata[2], pdata[3], pdata[4] },
-                            .dev_ip = { pdata[5], pdata[6], pdata[7], pdata[8] },
-                            .subnet_mask = { pdata[9], pdata[10], pdata[11], pdata[12] },
-                            .target_host_ip = { pdata[13], pdata[14], pdata[15], pdata[16] },
-                            .target_dev_ip = { pdata[17], pdata[18], pdata[19], pdata[20] },
-                            .reserved = { 0, 0 },
-                            .padding = 0
-                        };
-
-                        uint8_t result = ECM_IPConfig_Set(&config);
-                        status = (result == ECM_IP_CONFIG_OK) ? STATUS_SUCCESS : result;
-                    }
-                    break;
-
-                case 0x01: // Set Host Side
-                    if (data_len != 13) { // 1 byte sub_cmd + 12 bytes data
-                        status = STATUS_ERR_PARAM;
-                    } else {
-                        uint8_t result = ECM_IPConfig_SetHostSide(&pdata[1], &pdata[5], &pdata[9]);
-                        status = (result == ECM_IP_CONFIG_OK) ? STATUS_SUCCESS : result;
-                    }
-                    break;
-
-                case 0x02: // Set Target Side
-                    if (data_len != 9) { // 1 byte sub_cmd + 8 bytes data
-                        status = STATUS_ERR_PARAM;
-                    } else {
-                        uint8_t result = ECM_IPConfig_SetTargetSide(&pdata[1], &pdata[5]);
-                        status = (result == ECM_IP_CONFIG_OK) ? STATUS_SUCCESS : result;
-                    }
-                    break;
-
-                case 0x03: // Reset to Default
-                    if (data_len != 1) {
-                        status = STATUS_ERR_PARAM;
-                    } else {
-                        uint8_t result = ECM_IPConfig_Reset();
-                        status = (result == ECM_IP_CONFIG_OK) ? STATUS_SUCCESS : result;
-                    }
-                    break;
-
-                default:
-                    status = STATUS_ERR_PARAM;
-                    break;
+            // Send response if we haven't sent it yet (for error cases or if we deferred sending)
+            if (send_response_now) {
+                CH9329_SendResponse(addr, cmd_code, &status, 1, (status == STATUS_SUCCESS) ? 1 : 0);
             }
-
-            CH9329_SendResponse(addr, cmd_code, &status, 1, (status == STATUS_SUCCESS) ? 1 : 0);
 #else
             uint8_t st = STATUS_ERR_CMD;
             CH9329_SendResponse(addr, cmd_code, &st, 1, 0);

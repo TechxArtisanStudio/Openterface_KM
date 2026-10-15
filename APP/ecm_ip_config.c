@@ -318,4 +318,16 @@ uint8_t ECM_IPConfig_Reset(void)
     return ECM_IPConfig_Set(&ECM_IP_CONFIG_DEFAULT);
 }
 
+/* Validate config (check if parameters are valid before setting) */
+bool ECM_IPConfig_Validate(const ECM_IPConfig_t *config)
+{
+    return validate_config(config);
+}
+
+/* Get current config from RAM cache (for building partial updates) */
+void ECM_IPConfig_GetCurrent(ECM_IPConfig_t *config)
+{
+    *config = s_ram_cache;
+}
+
 #endif /* USB_WORK_MODE_COMPILES_BRIDGE_ECM */
