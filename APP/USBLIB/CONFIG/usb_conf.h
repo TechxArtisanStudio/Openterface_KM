@@ -68,10 +68,25 @@
 #define USBD_SERIAL_BUSY       USBD_Endp3_Busy
 
 
-/* Combined ACM+ECM mode uses different endpoints for ECM to avoid conflicts:
- *   ACM: EP1 INT, EP5 BULK OUT, EP3 BULK IN (same as standard ACM)
- *   ECM: EP2 INT, EP4 BULK IN,  EP6 BULK OUT (shifted to avoid EP1/3/5 conflict) */
+/* Combined ACM+ECM mode endpoint configuration:
+ * For USBLIB stack (no HID):
+ *   ACM: EP1 INT, EP5 BULK OUT, EP3 BULK IN
+ *   ECM: EP2 INT, EP4 BULK IN,  EP6 BULK OUT
+ * For USBFS stack (with HID, reduced HID interfaces):
+ *   ACM: EP5 INT, EP6 BULK OUT, EP7 BULK IN
+ *   ECM: EP3 BULK OUT, EP4 BULK IN (no interrupt endpoint) */
 #if USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
+#ifdef USBFS_DEVICE
+/* USBFS stack with HID interfaces */
+#define ECM_USBD_INT_ENDP        ENDP0  /* No interrupt endpoint in USBFS combined mode */
+#define ECM_USBD_BULK_IN_ENDP    ENDP4
+#define ECM_USBD_BULK_OUT_ENDP   ENDP3
+#define ECM_USBD_INT_BUSY        USBD_Endp0_Busy  /* Dummy - not used */
+#define ECM_USBD_BULK_IN_BUSY    USBD_Endp4_Busy
+#define ECM_USBD_EP_INT_IN       0  /* Not used */
+#define ECM_USBD_EP_BULK_IN      EP4_IN
+#else
+/* USBLIB stack without HID interfaces */
 #define ECM_USBD_INT_ENDP        ENDP2
 #define ECM_USBD_BULK_IN_ENDP    ENDP4
 #define ECM_USBD_BULK_OUT_ENDP   ENDP6
@@ -79,6 +94,7 @@
 #define ECM_USBD_BULK_IN_BUSY    USBD_Endp4_Busy
 #define ECM_USBD_EP_INT_IN       EP2_IN
 #define ECM_USBD_EP_BULK_IN      EP4_IN
+#endif
 #else
 #define ECM_USBD_INT_ENDP        ENDP1
 #define ECM_USBD_BULK_IN_ENDP    ENDP3

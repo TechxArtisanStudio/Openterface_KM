@@ -375,12 +375,27 @@ void USBFS_RCC_Init( void )
  */
 void USBFS_Device_Endp_Init( void )
 {
+#if USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
+    /* Combined ACM+ECM mode with USBFS stack:
+     * EP1: Keyboard HID IN (TX)
+     * EP2: Mouse HID IN (TX)
+     * EP3: ECM data OUT (RX) - host to device
+     * EP4: ECM data IN (TX) - device to host
+     * EP5: ACM interrupt IN (TX)
+     * EP6: ACM data OUT (RX) - host to device
+     * EP7: ACM data IN (TX) - device to host
+     */
+    USBFSD->UEP4_1_MOD = USBFS_UEP1_TX_EN | USBFS_UEP4_TX_EN;
+    USBFSD->UEP2_3_MOD = USBFS_UEP2_TX_EN | USBFS_UEP3_RX_EN;
+#else
     USBFSD->UEP4_1_MOD = USBFS_UEP1_TX_EN | USBFS_UEP4_TX_EN;
     USBFSD->UEP2_3_MOD = USBFS_UEP2_TX_EN | USBFS_UEP3_TX_EN;
+#endif
 
-#if defined(ENABLE_UAC) || USB_WORK_MODE_COMPILES_TARGET_CDC_ACM || USB_WORK_MODE_COMPILES_TARGET_CDC_ECM
-    /* EP5: ISO IN  (Target→Host audio).  Single buffer (BUF_MOD=0).
-     * EP6: ISO OUT (Host→Target audio).  Single buffer (BUF_MOD=0).
+#if defined(ENABLE_UAC) || USB_WORK_MODE_COMPILES_TARGET_CDC_ACM || USB_WORK_MODE_COMPILES_TARGET_CDC_ECM || USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
+    /* EP5: ISO IN  (Target→Host audio) or ACM interrupt IN (Host→Target).
+     * EP6: ISO OUT (Host→Target audio) or ACM data OUT (Host→Target).
+     * EP7: ACM data IN (Host→Target).
      *
      * NOTE: WCH USBFS BUF_MOD ping-pong hard-wires the second-half offset to
      * 64 bytes regardless of TX_LEN.  For 192-byte ISO packets this would alias
@@ -398,18 +413,30 @@ void USBFS_Device_Endp_Init( void )
         USBFSD->UEP5_6_MOD = USBFS_UEP5_TX_EN | USBFS_UEP6_RX_EN;
         USBFSD_UEP_MOD( 3 ) = USBFS_UEP7_TX_EN;
     }
+#if USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
+    else {
+        /* Host CDC ACM: EP5 INT IN, EP6 BULK OUT, EP7 BULK IN */
+        USBFSD->UEP5_6_MOD = USBFS_UEP5_TX_EN | USBFS_UEP6_RX_EN;
+        USBFSD_UEP_MOD( 3 ) = USBFS_UEP7_TX_EN;
+    }
+#else
     else {
         USBFSD->UEP5_6_MOD = 0;
         USBFSD_UEP_MOD( 3 ) = 0;
     }
 #endif
+#endif
 
     USBFSD->UEP0_DMA = (uint32_t)USBFS_EP0_Buf;
     USBFSD->UEP1_DMA = (uint32_t)USBFS_EP1_Buf;
     USBFSD->UEP2_DMA = (uint32_t)USBFS_EP2_Buf;
+#if USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
+    USBFSD->UEP3_DMA = (uint32_t)EP3_DatabufHD;  /* ECM host-side data OUT */
+#else
     USBFSD->UEP3_DMA = (uint32_t)USBFS_EP3_Buf;
+#endif
     USBFSD->UEP4_DMA = (uint32_t)USBFS_EP4_Buf;
-#if defined(ENABLE_UAC) || USB_WORK_MODE_COMPILES_TARGET_CDC_ACM || USB_WORK_MODE_COMPILES_TARGET_CDC_ECM
+#if defined(ENABLE_UAC) || USB_WORK_MODE_COMPILES_TARGET_CDC_ACM || USB_WORK_MODE_COMPILES_TARGET_CDC_ECM || USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
 #ifdef ENABLE_UAC
     if (USB_ModeConfig_ActiveModeHasTargetUac() && !USB_ModeConfig_ActiveModeHasTargetCdcEcm()) {
         USBFSD->UEP5_DMA = (uint32_t)USBFS_EP5_Buf;
@@ -423,15 +450,27 @@ void USBFS_Device_Endp_Init( void )
         USBFSD->UEP6_DMA = (uint32_t)EP6_DatabufHD;
         USBFSD->UEP7_DMA = (uint32_t)EP7_DatabufHD;
     }
+#if USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
+    else {
+        /* Host CDC ACM: EP5 INT IN, EP6 BULK OUT, EP7 BULK IN */
+        USBFSD->UEP5_DMA = (uint32_t)EP5_DatabufHD;
+        USBFSD->UEP6_DMA = (uint32_t)EP6_DatabufHD;
+        USBFSD->UEP7_DMA = (uint32_t)EP7_DatabufHD;
+    }
+#endif
 #endif
 
     USBFSD->UEP0_RX_CTRL = USBFS_UEP_R_RES_ACK;
     USBFSD->UEP0_TX_CTRL = USBFS_UEP_T_RES_NAK;
     USBFSD->UEP1_TX_CTRL = USBFS_UEP_T_RES_NAK;
     USBFSD->UEP2_TX_CTRL = USBFS_UEP_T_RES_NAK;
+#if USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
+    USBFSD->UEP3_RX_CTRL = USBFS_UEP_R_RES_ACK;  /* ECM host-side data OUT */
+#else
     USBFSD->UEP3_TX_CTRL = USBFS_UEP_T_RES_NAK;
+#endif
     USBFSD->UEP4_TX_CTRL = USBFS_UEP_T_RES_NAK;
-#if defined(ENABLE_UAC) || USB_WORK_MODE_COMPILES_TARGET_CDC_ACM || USB_WORK_MODE_COMPILES_TARGET_CDC_ECM
+#if defined(ENABLE_UAC) || USB_WORK_MODE_COMPILES_TARGET_CDC_ACM || USB_WORK_MODE_COMPILES_TARGET_CDC_ECM || USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
     /* EP5 ISO IN: NAK until alt-setting 1 activated; TX_LEN=0 initially */
 #ifdef ENABLE_UAC
     if (USB_ModeConfig_ActiveModeHasTargetUac() && !USB_ModeConfig_ActiveModeHasTargetCdcEcm()) {
@@ -449,6 +488,16 @@ void USBFS_Device_Endp_Init( void )
         USBFSD->UEP7_TX_LEN  = 0;
         USBFSD->UEP7_TX_CTRL = USBFS_UEP_T_RES_NAK;
     }
+#if USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
+    else {
+        /* Host CDC ACM: EP5 INT IN, EP6 BULK OUT, EP7 BULK IN */
+        USBFSD->UEP5_TX_LEN  = 0;
+        USBFSD->UEP5_TX_CTRL = USBFS_UEP_T_RES_NAK;
+        USBFSD->UEP6_RX_CTRL = USBFS_UEP_R_RES_ACK;
+        USBFSD->UEP7_TX_LEN  = 0;
+        USBFSD->UEP7_TX_CTRL = USBFS_UEP_T_RES_NAK;
+    }
+#endif
 #endif
 
     /* Clear End-points Busy Status */
@@ -843,6 +892,18 @@ void USBFS_IRQHandler( void )
                         USBFSD->UEP6_RX_CTRL = ( USBFSD->UEP6_RX_CTRL & ~USBFS_UEP_R_RES_MASK ) | USBFS_UEP_R_RES_ACK;
                         }
                         break;
+
+#if USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
+                    case USBFS_UIS_TOKEN_OUT | DEF_UEP3:
+                        /* ECM host-side data OUT (host to device) - combined ACM+ECM mode */
+                        if( intst & USBFS_UIS_TOG_OK )
+                        {
+                            ECM_Bridge_HostRxDone( EP3_DatabufHD, USBFSD->RX_LEN );
+                            USBFSD->UEP3_RX_CTRL ^= USBFS_UEP_R_TOG;
+                        }
+                        USBFSD->UEP3_RX_CTRL = ( USBFSD->UEP3_RX_CTRL & ~USBFS_UEP_R_RES_MASK ) | USBFS_UEP_R_RES_ACK;
+                        break;
+#endif
 #endif
 
                     default:

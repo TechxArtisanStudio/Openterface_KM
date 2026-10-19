@@ -24,10 +24,14 @@
    descriptor advertises 64-byte max packet for EP5/EP3 bulk endpoints. */
 #define ECM_BRIDGE_USBD_PACKET_SIZE     64u
 #define ECM_BRIDGE_TARGET_COMM_IF       4u
-/* In combined ACM+ECM mode, the host-side ECM comm interface is IF2.
-   Otherwise it's IF0 (standalone ECM mode). */
+/* In combined ACM+ECM mode with USBFS (HID + ACM + ECM):
+ *   IF0-IF1: HID (keyboard + mouse)
+ *   IF2-IF3: CDC ACM
+ *   IF4-IF5: CDC ECM
+ * So host-side ECM comm interface is IF4.
+ * For USBLIB stack (no HID), it would be IF2. */
 #if USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
-#define ECM_BRIDGE_HOST_COMM_IF         2u
+#define ECM_BRIDGE_HOST_COMM_IF         4u
 #else
 #define ECM_BRIDGE_HOST_COMM_IF         0u
 #endif
@@ -1683,6 +1687,29 @@ void ECM_Bridge_Init(void)
 #endif
 
     USB_DEBUG("ECM init done\r\n");
+}
+
+void ECM_Bridge_UpdateIPConfig(void)
+{
+    /* Update bridge layer IP variables from ECM_IPConfig module's RAM cache.
+       This function is called after IP configuration is modified to make
+       the changes take effect immediately without requiring USB reconnection. */
+
+    /* Load network configuration from ECM_IPConfig module */
+    ECM_IPConfig_GetHostIP(ecm_host_ip);
+    ECM_IPConfig_GetDevIP(ecm_dev_ip);
+    ECM_IPConfig_GetSubnetMask(ecm_subnet_mask);
+    ECM_IPConfig_GetTargetHostIP(ecm_target_host_ip);
+    ECM_IPConfig_GetTargetDevIP(ecm_target_dev_ip);
+
+    /* Reset GARP sent flags so that GARP packets with new IPs will be
+       sent when the interface is activated */
+    g_host_garp_sent = 0;
+#if USB_WORK_MODE_COMPILES_TARGET_CDC_ECM
+    g_target_garp_sent = 0;
+#endif
+
+    USB_DEBUG("ECM IP config updated\r\n");
 }
 
 void ECM_Bridge_SendRawFrame(const uint8_t *data, uint16_t len)

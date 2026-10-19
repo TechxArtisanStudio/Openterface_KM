@@ -135,7 +135,8 @@ function Build-Firmware {
         [string]$TargetName,
         [string]$BoardVersion,
         [string]$EnableOscillator,
-        [string]$BleName
+        [string]$BleName,
+        [string]$UsbWorkMode = ""
     )
 
     Write-Host ""
@@ -146,6 +147,9 @@ function Build-Firmware {
     Write-Host "  ENABLE_BLE:        $ENABLE_BLE" -ForegroundColor $Colors.White
     Write-Host "  ENABLE_OSCILLATOR: $EnableOscillator" -ForegroundColor $Colors.White
     Write-Host "  BLE_NAME:          $BleName" -ForegroundColor $Colors.White
+    if ($UsbWorkMode -ne "") {
+        Write-Host "  USB_WORK_MODE:     $UsbWorkMode" -ForegroundColor $Colors.White
+    }
     Write-Host ""
 
     # Set environment variables for the build
@@ -156,6 +160,10 @@ function Build-Firmware {
 
     if ($EnableOscillator -ne "") {
         $env:ENABLE_OSCILLATOR = $EnableOscillator
+    }
+
+    if ($UsbWorkMode -ne "") {
+        $env:USB_WORK_MODE = $UsbWorkMode
     }
 
     Push-Location $BuildDir
@@ -195,6 +203,9 @@ function Build-Firmware {
         $makeArgs = "BOARD_VERSION=$BoardVersion ENABLE_BLE=$ENABLE_BLE BLE_NAME=$BleName USE_LTO=$USE_LTO"
         if ($EnableOscillator -ne "") {
             $makeArgs += " ENABLE_OSCILLATOR=$EnableOscillator"
+        }
+        if ($UsbWorkMode -ne "") {
+            $makeArgs += " USB_WORK_MODE=$UsbWorkMode"
         }
 
         # Compile
@@ -268,10 +279,11 @@ function Build-One {
         [string]$TargetName,
         [string]$BoardVersion,
         [string]$EnableOscillator,
-        [string]$BleName
+        [string]$BleName,
+        [string]$UsbWorkMode = ""
     )
 
-    if (Build-Firmware -TargetName $TargetName -BoardVersion $BoardVersion -EnableOscillator $EnableOscillator -BleName $BleName) {
+    if (Build-Firmware -TargetName $TargetName -BoardVersion $BoardVersion -EnableOscillator $EnableOscillator -BleName $BleName -UsbWorkMode $UsbWorkMode) {
         $script:BUILD_SUCCESS++
     } else {
         $script:BUILD_FAILED++
@@ -283,7 +295,7 @@ switch ($Target) {
     'kvmgo' {
         $ENABLE_BLE = 1
         $USE_LTO = 1
-        Build-One "kvmgo" "1" "" "KVM-GO"
+        Build-One "kvmgo" "1" "" "KVM-GO" "hid_acm_ecm"
     }
     'minikvm' {
         $ENABLE_BLE = 0
@@ -303,7 +315,7 @@ switch ($Target) {
     'all' {
         $ENABLE_BLE = 1
         $USE_LTO = 1
-        Build-One "kvmgo" "1" "" "KVM-GO"
+        Build-One "kvmgo" "1" "" "KVM-GO" "hid_acm_ecm"
 
         $ENABLE_BLE = 0
         Build-One "minikvm" "2" "" "Mini-KVM"

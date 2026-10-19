@@ -3,6 +3,7 @@
 #if USB_WORK_MODE_COMPILES_BRIDGE_ECM
 
 #include "ch32v20x_flash.h"
+#include "include/ecm_bridge.h"
 #include <string.h>
 
 /* Default configuration */
@@ -282,6 +283,10 @@ uint8_t ECM_IPConfig_Set(const ECM_IPConfig_t *config)
 
     /* 7. Update RAM cache */
     s_ram_cache = *config;
+
+    /* 8. Immediately update bridge layer IP variables to make changes take effect */
+    ECM_Bridge_UpdateIPConfig();
+
     return ECM_IP_CONFIG_OK;
 }
 
