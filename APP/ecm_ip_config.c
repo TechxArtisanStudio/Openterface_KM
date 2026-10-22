@@ -264,27 +264,38 @@ uint8_t ECM_IPConfig_Set(const ECM_IPConfig_t *config)
     to_write.footer_magic   = ECM_IP_CONFIG_MAGIC;
 
     /* 4. Erase target page */
+    USB_DEBUG("IPConfig_Set: erasing page at 0x%08X\r\n", (unsigned int)target_addr);
     if (!flash_erase_page(target_addr)) {
+        USB_DEBUG("IPConfig_Set: erase failed!\r\n");
         return ECM_IP_CONFIG_ERR_FLASH_ERASE;
     }
+    USB_DEBUG("IPConfig_Set: erase OK\r\n");
 
     /* 5. Program write */
+    USB_DEBUG("IPConfig_Set: programming %d bytes...\r\n", (int)sizeof(to_write));
     if (!flash_write_page(target_addr, &to_write, sizeof(to_write))) {
+        USB_DEBUG("IPConfig_Set: program failed!\r\n");
         return ECM_IP_CONFIG_ERR_FLASH_PROG;
     }
+    USB_DEBUG("IPConfig_Set: program OK\r\n");
 
     /* 6. Read-back verification */
     if (!flash_read_page(target_addr, &verify, sizeof(verify))) {
+        USB_DEBUG("IPConfig_Set: verify read failed!\r\n");
         return ECM_IP_CONFIG_ERR_FLASH_VERIFY;
     }
     if (verify.crc32 != to_write.crc32
         || verify.footer_magic != ECM_IP_CONFIG_MAGIC
         || memcmp(&verify.config, &to_write.config, sizeof(ECM_IPConfig_t)) != 0) {
+        USB_DEBUG("IPConfig_Set: verify mismatch! crc32=0x%08X vs 0x%08X\r\n",
+                  (unsigned int)verify.crc32, (unsigned int)to_write.crc32);
         return ECM_IP_CONFIG_ERR_FLASH_VERIFY;
     }
+    USB_DEBUG("IPConfig_Set: verify OK\r\n");
 
     /* 7. Update RAM cache */
     s_ram_cache = *config;
+    USB_DEBUG("IPConfig_Set: RAM cache updated\r\n");
 
     /* 8. Immediately update bridge layer IP variables to make changes take effect */
     ECM_Bridge_UpdateIPConfig();

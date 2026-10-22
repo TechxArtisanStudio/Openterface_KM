@@ -405,6 +405,24 @@ static uint8_t handle_icmp_packet(const uint8_t *frame, uint16_t frame_len)
         return 0;
     }
 
+    /* Check if destination IP is one of our configured IPs */
+    const uint8_t *dst_ip = &ip[16];
+    uint8_t is_our_ip = 0;
+
+    /* Check against all configured IP addresses */
+    if (memcmp(dst_ip, ecm_host_ip, 4) == 0 ||
+        memcmp(dst_ip, ecm_dev_ip, 4) == 0 ||
+        memcmp(dst_ip, ecm_target_host_ip, 4) == 0 ||
+        memcmp(dst_ip, ecm_target_dev_ip, 4) == 0) {
+        is_our_ip = 1;
+    }
+
+    if (!is_our_ip) {
+        USB_DEBUG("ICMP: dst IP %d.%d.%d.%d not ours, ignoring\r\n",
+                  dst_ip[0], dst_ip[1], dst_ip[2], dst_ip[3]);
+        return 0;
+    }
+
     /* Parse ICMP header */
     icmp = &ip[ip_header_len];
     icmp_len = (uint16_t)(ip_total_len - ip_header_len);
@@ -917,6 +935,24 @@ static uint8_t handle_target_icmp_packet(const uint8_t *frame, uint16_t frame_le
 
     /* Check if ICMP */
     if (ip[9] != ECM_IPV4_PROTO_ICMP) {
+        return 0;
+    }
+
+    /* Check if destination IP is one of our configured IPs */
+    const uint8_t *dst_ip = &ip[16];
+    uint8_t is_our_ip = 0;
+
+    /* Check against all configured IP addresses */
+    if (memcmp(dst_ip, ecm_host_ip, 4) == 0 ||
+        memcmp(dst_ip, ecm_dev_ip, 4) == 0 ||
+        memcmp(dst_ip, ecm_target_host_ip, 4) == 0 ||
+        memcmp(dst_ip, ecm_target_dev_ip, 4) == 0) {
+        is_our_ip = 1;
+    }
+
+    if (!is_our_ip) {
+        USB_DEBUG("ICMP: dst IP %d.%d.%d.%d not ours, ignoring\r\n",
+                  dst_ip[0], dst_ip[1], dst_ip[2], dst_ip[3]);
         return 0;
     }
 
@@ -1506,6 +1542,10 @@ static uint8_t handle_host_control_frame(const uint8_t *frame, uint16_t frame_le
     /* Set flag to indicate we're processing CH9329 commands via ECM bridge.
      * This prevents CH9329_RxBuffer_Add from pushing responses to the USB queue,
      * since we'll handle them here by wrapping in Ethernet frames. */
+    USB_DEBUG("HCF: CH9329 frame valid, payload_len=%d\r\n", payload_len);
+    USB_DEBUG("HCF: First 8 bytes: %02X %02X %02X %02X %02X %02X %02X %02X\r\n",
+              payload[0], payload[1], payload[2], payload[3],
+              payload[4], payload[5], payload[6], payload[7]);
     g_ecm_bridge_processing_ch9329 = 1;
     CH9329_RxBuffer_Add((uint8_t *)payload, payload_len);
     g_ecm_bridge_processing_ch9329 = 0;
@@ -2086,7 +2126,12 @@ void ECM_Bridge_UpdateIPConfig(void)
     g_target_garp_sent = 0;
 #endif
 
-    USB_DEBUG("ECM IP config updated\r\n");
+    USB_DEBUG("ECM IP config updated:\r\n");
+    USB_DEBUG("  Host IP: %d.%d.%d.%d\r\n", ecm_host_ip[0], ecm_host_ip[1], ecm_host_ip[2], ecm_host_ip[3]);
+    USB_DEBUG("  Dev IP: %d.%d.%d.%d\r\n", ecm_dev_ip[0], ecm_dev_ip[1], ecm_dev_ip[2], ecm_dev_ip[3]);
+    USB_DEBUG("  Subnet: %d.%d.%d.%d\r\n", ecm_subnet_mask[0], ecm_subnet_mask[1], ecm_subnet_mask[2], ecm_subnet_mask[3]);
+    USB_DEBUG("  Target Host IP: %d.%d.%d.%d\r\n", ecm_target_host_ip[0], ecm_target_host_ip[1], ecm_target_host_ip[2], ecm_target_host_ip[3]);
+    USB_DEBUG("  Target Dev IP: %d.%d.%d.%d\r\n", ecm_target_dev_ip[0], ecm_target_dev_ip[1], ecm_target_dev_ip[2], ecm_target_dev_ip[3]);
 }
 
 void ECM_Bridge_SendRawFrame(const uint8_t *data, uint16_t len)

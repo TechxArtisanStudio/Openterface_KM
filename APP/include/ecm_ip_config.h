@@ -26,11 +26,11 @@ extern "C" {
 #define ECM_IP_CONFIG_PAGE_SIZE    0x1000u       /* 4KB */
 
 /* Default network configuration */
-#define ECM_IP_CONFIG_DEFAULT_HOST_IP        { 192, 168, 11, 1 }
-#define ECM_IP_CONFIG_DEFAULT_DEV_IP         { 192, 168, 11, 3 }
+#define ECM_IP_CONFIG_DEFAULT_HOST_IP        { 192, 168, 20, 1 }
+#define ECM_IP_CONFIG_DEFAULT_DEV_IP         { 192, 168, 20, 3 }
 #define ECM_IP_CONFIG_DEFAULT_SUBNET_MASK    { 255, 255, 255, 0 }
-#define ECM_IP_CONFIG_DEFAULT_TARGET_HOST_IP { 192, 168, 11, 2 }
-#define ECM_IP_CONFIG_DEFAULT_TARGET_DEV_IP  { 192, 168, 11, 5 }
+#define ECM_IP_CONFIG_DEFAULT_TARGET_HOST_IP { 192, 168, 20, 2 }
+#define ECM_IP_CONFIG_DEFAULT_TARGET_DEV_IP  { 192, 168, 20, 5 }
 
 /* User-visible network configuration (24 bytes, 4-byte aligned) */
 typedef struct {
