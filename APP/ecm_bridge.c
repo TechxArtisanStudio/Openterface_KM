@@ -2126,12 +2126,17 @@ void ECM_Bridge_UpdateIPConfig(void)
     g_target_garp_sent = 0;
 #endif
 
-    USB_DEBUG("ECM IP config updated:\r\n");
-    USB_DEBUG("  Host IP: %d.%d.%d.%d\r\n", ecm_host_ip[0], ecm_host_ip[1], ecm_host_ip[2], ecm_host_ip[3]);
-    USB_DEBUG("  Dev IP: %d.%d.%d.%d\r\n", ecm_dev_ip[0], ecm_dev_ip[1], ecm_dev_ip[2], ecm_dev_ip[3]);
-    USB_DEBUG("  Subnet: %d.%d.%d.%d\r\n", ecm_subnet_mask[0], ecm_subnet_mask[1], ecm_subnet_mask[2], ecm_subnet_mask[3]);
-    USB_DEBUG("  Target Host IP: %d.%d.%d.%d\r\n", ecm_target_host_ip[0], ecm_target_host_ip[1], ecm_target_host_ip[2], ecm_target_host_ip[3]);
-    USB_DEBUG("  Target Dev IP: %d.%d.%d.%d\r\n", ecm_target_dev_ip[0], ecm_target_dev_ip[1], ecm_target_dev_ip[2], ecm_target_dev_ip[3]);
+    /* Trigger link state change to force host to re-negotiate DHCP.
+       Set notification state to trigger a link down/up sequence:
+       - First notification (state 1): link down
+       - Second notification (state 2): link up with speed change
+       This causes the host to detect a link change and renew DHCP. */
+    g_host_notify_state = 1;
+#if USB_WORK_MODE_COMPILES_TARGET_CDC_ECM
+    g_target_notify_state = 1;
+#endif
+
+    USB_DEBUG("ECM IP config updated, triggering link state change\r\n");
 }
 
 void ECM_Bridge_SendRawFrame(const uint8_t *data, uint16_t len)

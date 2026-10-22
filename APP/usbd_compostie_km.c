@@ -441,7 +441,7 @@ void CH9329_DispatchCommand(uint8_t addr, uint8_t cmd_code, uint8_t* pdata, uint
 
             if (data_len < 1) {
                 status = STATUS_ERR_PARAM;
-                send_response_now = false;
+                // send_response_now remains true to send error response
             } else {
                 uint8_t sub_cmd = pdata[0];
 
@@ -449,7 +449,7 @@ void CH9329_DispatchCommand(uint8_t addr, uint8_t cmd_code, uint8_t* pdata, uint
                     case 0x00: // Set All
                         if (data_len != 21) { // 1 byte sub_cmd + 20 bytes data
                             status = STATUS_ERR_PARAM;
-                            send_response_now = false;
+                            // send_response_now remains true to send error response
                         } else {
                             ECM_IPConfig_t config = {
                                 .record_version = ECM_IP_CONFIG_VERSION,
@@ -462,16 +462,31 @@ void CH9329_DispatchCommand(uint8_t addr, uint8_t cmd_code, uint8_t* pdata, uint
                                 .padding = 0
                             };
 
+                            USB_DEBUG("SET_ECM_IP: sub_cmd=0x00 (Set All)\r\n");
+                            USB_DEBUG("  New Host IP: %d.%d.%d.%d\r\n", config.host_ip[0], config.host_ip[1], config.host_ip[2], config.host_ip[3]);
+                            USB_DEBUG("  New Dev IP: %d.%d.%d.%d\r\n", config.dev_ip[0], config.dev_ip[1], config.dev_ip[2], config.dev_ip[3]);
+                            USB_DEBUG("  New Target Host IP: %d.%d.%d.%d\r\n", config.target_host_ip[0], config.target_host_ip[1], config.target_host_ip[2], config.target_host_ip[3]);
+                            USB_DEBUG("  New Target Dev IP: %d.%d.%d.%d\r\n", config.target_dev_ip[0], config.target_dev_ip[1], config.target_dev_ip[2], config.target_dev_ip[3]);
+
                             // Validate config first
                             if (!ECM_IPConfig_Validate(&config)) {
+                                USB_DEBUG("SET_ECM_IP: validation failed!\r\n");
                                 status = STATUS_ERR_PARAM;
-                                send_response_now = false;
+                                // send_response_now remains true to send error response
                             } else {
+                                USB_DEBUG("SET_ECM_IP: validation passed, sending response\r\n");
                                 // Send success response immediately
                                 CH9329_SendResponse(addr, cmd_code, &status, 1, 1);
                                 // Then perform Flash write operation
+                                USB_DEBUG("SET_ECM_IP: writing to Flash...\r\n");
                                 uint8_t result = ECM_IPConfig_Set(&config);
                                 status = (result == ECM_IP_CONFIG_OK) ? STATUS_SUCCESS : result;
+                                USB_DEBUG("SET_ECM_IP: Flash write result=%d\r\n", result);
+                                // Update ECM bridge with new IP config
+                                if (result == ECM_IP_CONFIG_OK) {
+                                    USB_DEBUG("SET_ECM_IP: updating bridge IP config\r\n");
+                                    ECM_Bridge_UpdateIPConfig();
+                                }
                                 // Note: We don't send another response here as we already sent success
                                 // Flash errors will need to be detected by user via GET commands
                                 send_response_now = false; // Already sent response
@@ -482,7 +497,7 @@ void CH9329_DispatchCommand(uint8_t addr, uint8_t cmd_code, uint8_t* pdata, uint
                     case 0x01: // Set Host Side
                         if (data_len != 13) { // 1 byte sub_cmd + 12 bytes data
                             status = STATUS_ERR_PARAM;
-                            send_response_now = false;
+                            // send_response_now remains true to send error response
                         } else {
                             // Create temporary config to validate
                             ECM_IPConfig_t temp_config;
@@ -494,13 +509,17 @@ void CH9329_DispatchCommand(uint8_t addr, uint8_t cmd_code, uint8_t* pdata, uint
                             // Validate config first
                             if (!ECM_IPConfig_Validate(&temp_config)) {
                                 status = STATUS_ERR_PARAM;
-                                send_response_now = false;
+                                // send_response_now remains true to send error response
                             } else {
                                 // Send success response immediately
                                 CH9329_SendResponse(addr, cmd_code, &status, 1, 1);
                                 // Then perform Flash write operation
                                 uint8_t result = ECM_IPConfig_SetHostSide(&pdata[1], &pdata[5], &pdata[9]);
                                 status = (result == ECM_IP_CONFIG_OK) ? STATUS_SUCCESS : result;
+                                // Update ECM bridge with new IP config
+                                if (result == ECM_IP_CONFIG_OK) {
+                                    ECM_Bridge_UpdateIPConfig();
+                                }
                                 // Note: We don't send another response here as we already sent success
                                 // Flash errors will need to be detected by user via GET commands
                                 send_response_now = false; // Already sent response
@@ -511,7 +530,7 @@ void CH9329_DispatchCommand(uint8_t addr, uint8_t cmd_code, uint8_t* pdata, uint
                     case 0x02: // Set Target Side
                         if (data_len != 9) { // 1 byte sub_cmd + 8 bytes data
                             status = STATUS_ERR_PARAM;
-                            send_response_now = false;
+                            // send_response_now remains true to send error response
                         } else {
                             // Create temporary config to validate
                             ECM_IPConfig_t temp_config;
@@ -522,13 +541,17 @@ void CH9329_DispatchCommand(uint8_t addr, uint8_t cmd_code, uint8_t* pdata, uint
                             // Validate config first
                             if (!ECM_IPConfig_Validate(&temp_config)) {
                                 status = STATUS_ERR_PARAM;
-                                send_response_now = false;
+                                // send_response_now remains true to send error response
                             } else {
                                 // Send success response immediately
                                 CH9329_SendResponse(addr, cmd_code, &status, 1, 1);
                                 // Then perform Flash write operation
                                 uint8_t result = ECM_IPConfig_SetTargetSide(&pdata[1], &pdata[5]);
                                 status = (result == ECM_IP_CONFIG_OK) ? STATUS_SUCCESS : result;
+                                // Update ECM bridge with new IP config
+                                if (result == ECM_IP_CONFIG_OK) {
+                                    ECM_Bridge_UpdateIPConfig();
+                                }
                                 // Note: We don't send another response here as we already sent success
                                 // Flash errors will need to be detected by user via GET commands
                                 send_response_now = false; // Already sent response
@@ -539,7 +562,7 @@ void CH9329_DispatchCommand(uint8_t addr, uint8_t cmd_code, uint8_t* pdata, uint
                     case 0x03: // Reset to Default
                         if (data_len != 1) {
                             status = STATUS_ERR_PARAM;
-                            send_response_now = false;
+                            // send_response_now remains true to send error response
                         } else {
                             // Reset to default is always valid (we know the default config is valid)
                             // Send success response immediately
@@ -555,7 +578,7 @@ void CH9329_DispatchCommand(uint8_t addr, uint8_t cmd_code, uint8_t* pdata, uint
 
                     default:
                         status = STATUS_ERR_PARAM;
-                        send_response_now = false;
+                        // send_response_now remains true to send error response
                         break;
                 }
             }
@@ -686,12 +709,18 @@ int CH9329_DataParser(uint8_t* buf, uint16_t len)
         sum += buf[i];
     }
 
+    USB_DEBUG("CH9329: cmd=0x%02X, addr=0x%02X, data_len=%d, frame_len=%d\r\n",
+              cmd_code, addr, data_len, frame_total_len);
+    USB_DEBUG("CH9329: checksum calc=0x%02X, recv=0x%02X\r\n", sum, recv_sum);
+
     if (sum != recv_sum) {
         // Checksum mismatch �� treat as invalid frame, skip full length
+        USB_DEBUG("CH9329: checksum mismatch!\r\n");
         return frame_total_len;
     }
 
     // Valid frame �� dispatch command
+    USB_DEBUG("CH9329: dispatching command 0x%02X\r\n", cmd_code);
     CH9329_DispatchCommand(addr, cmd_code, pdata, data_len);
     return frame_total_len;
 }
@@ -702,6 +731,12 @@ static uint16_t rx_len = 0;    /* number of valid bytes from rx_start */
 
 void CH9329_RxBuffer_Add(uint8_t *data, uint16_t len) {
     if (len == 0 || data == NULL) return;
+
+    USB_DEBUG("CH9329_RxBuffer_Add: len=%d\r\n", len);
+    if (len >= 6) {
+        USB_DEBUG("  Header: %02X %02X %02X %02X %02X %02X\r\n",
+                  data[0], data[1], data[2], data[3], data[4], data[5]);
+    }
 
     /* NOTE: This function must ONLY be called from the main loop (USB_DataRx_To_KMHandle),
      * NEVER from interrupt context. Interrupt handlers should copy data to the ring buffer

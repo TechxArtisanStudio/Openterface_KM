@@ -12,6 +12,8 @@
 
 #include "include/ble_eth_protocol.h"
 #include "include/default_target_config.h"
+#include "include/ecm_ip_config.h"
+#include "include/ecm_bridge.h"
 #include <string.h>
 #include "debug.h"
 #include "include/pwm_led.h"
@@ -641,6 +643,128 @@ static void dispatch_frame(const ble_eth_frame_t *frame)
 
         uint8_t buf[16];
         uint16_t len = build_frame(buf, addr, BLE_ETH_CMD_GET_DEFAULT_RESP, rsp, 7);
+        tx_queue_push_front(buf, len);
+        break;
+    }
+
+    case BLE_ETH_CMD_SET_ECM_IP: {
+        /* Set ECM IP configuration
+         * Payload: [sub_cmd 1][IP data...]
+         *   sub_cmd 0x00: Set All - [host_ip 4][dev_ip 4][subnet 4][target_host 4][target_dev 4] = 21 bytes
+         *   sub_cmd 0x01: Set Host Side - [host_ip 4][dev_ip 4][subnet 4] = 13 bytes
+         *   sub_cmd 0x02: Set Target Side - [target_host 4][target_dev 4] = 9 bytes
+         *   sub_cmd 0x03: Reset to Default - 1 byte
+         * Response: [status 1 byte]
+         */
+        if (frame->payload_len < 1) {
+            uint8_t rsp[1] = { BLE_ETH_STATUS_PARAM_ERR };
+            uint8_t buf[16];
+            uint16_t len = build_frame(buf, addr, BLE_ETH_CMD_SET_ECM_IP_RESP, rsp, 1);
+            tx_queue_push_front(buf, len);
+            break;
+        }
+
+        uint8_t sub_cmd = frame->payload[0];
+        uint8_t status = BLE_ETH_STATUS_SUCCESS;
+
+        switch (sub_cmd) {
+        case 0x00: /* Set All */
+            if (frame->payload_len != 21) {
+                status = BLE_ETH_STATUS_PARAM_ERR;
+            } else {
+                ECM_IPConfig_t config = {
+                    .record_version = ECM_IP_CONFIG_VERSION,
+                    .host_ip = { frame->payload[1], frame->payload[2], frame->payload[3], frame->payload[4] },
+                    .dev_ip = { frame->payload[5], frame->payload[6], frame->payload[7], frame->payload[8] },
+                    .subnet_mask = { frame->payload[9], frame->payload[10], frame->payload[11], frame->payload[12] },
+                    .target_host_ip = { frame->payload[13], frame->payload[14], frame->payload[15], frame->payload[16] },
+                    .target_dev_ip = { frame->payload[17], frame->payload[18], frame->payload[19], frame->payload[20] },
+                    .reserved = { 0, 0 },
+                    .padding = 0
+                };
+
+                if (!ECM_IPConfig_Validate(&config)) {
+                    status = BLE_ETH_STATUS_PARAM_ERR;
+                } else {
+                    uint8_t result = ECM_IPConfig_Set(&config);
+                    status = (result == ECM_IP_CONFIG_OK) ? BLE_ETH_STATUS_SUCCESS : BLE_ETH_STATUS_INTERNAL_ERR;
+                }
+            }
+            break;
+
+        case 0x01: /* Set Host Side */
+            if (frame->payload_len != 13) {
+                status = BLE_ETH_STATUS_PARAM_ERR;
+            } else {
+                ECM_IPConfig_t temp_config;
+                ECM_IPConfig_GetCurrent(&temp_config);
+                memcpy(temp_config.host_ip, &frame->payload[1], 4);
+                memcpy(temp_config.dev_ip, &frame->payload[5], 4);
+                memcpy(temp_config.subnet_mask, &frame->payload[9], 4);
+
+                if (!ECM_IPConfig_Validate(&temp_config)) {
+                    status = BLE_ETH_STATUS_PARAM_ERR;
+                } else {
+                    uint8_t result = ECM_IPConfig_Set(&temp_config);
+                    status = (result == ECM_IP_CONFIG_OK) ? BLE_ETH_STATUS_SUCCESS : BLE_ETH_STATUS_INTERNAL_ERR;
+                }
+            }
+            break;
+
+        case 0x02: /* Set Target Side */
+            if (frame->payload_len != 9) {
+                status = BLE_ETH_STATUS_PARAM_ERR;
+            } else {
+                ECM_IPConfig_t temp_config;
+                ECM_IPConfig_GetCurrent(&temp_config);
+                memcpy(temp_config.target_host_ip, &frame->payload[1], 4);
+                memcpy(temp_config.target_dev_ip, &frame->payload[5], 4);
+
+                if (!ECM_IPConfig_Validate(&temp_config)) {
+                    status = BLE_ETH_STATUS_PARAM_ERR;
+                } else {
+                    uint8_t result = ECM_IPConfig_Set(&temp_config);
+                    status = (result == ECM_IP_CONFIG_OK) ? BLE_ETH_STATUS_SUCCESS : BLE_ETH_STATUS_INTERNAL_ERR;
+                }
+            }
+            break;
+
+        case 0x03: /* Reset to Default */
+            {
+                uint8_t result = ECM_IPConfig_Reset();
+                status = (result == ECM_IP_CONFIG_OK) ? BLE_ETH_STATUS_SUCCESS : BLE_ETH_STATUS_INTERNAL_ERR;
+            }
+            break;
+
+        default:
+            status = BLE_ETH_STATUS_PARAM_ERR;
+            break;
+        }
+
+        uint8_t rsp[1] = { status };
+        uint8_t buf[16];
+        uint16_t len = build_frame(buf, addr, BLE_ETH_CMD_SET_ECM_IP_RESP, rsp, 1);
+        tx_queue_push_front(buf, len);
+        break;
+    }
+
+    case BLE_ETH_CMD_GET_ECM_IP: {
+        /* Get ECM IP configuration
+         * Response: [status 1][host_ip 4][dev_ip 4][subnet 4][target_host 4][target_dev 4] = 21 bytes
+         */
+        uint8_t rsp[21];
+        ECM_IPConfig_t config;
+        ECM_IPConfig_Get(&config);
+
+        rsp[0] = BLE_ETH_STATUS_SUCCESS;
+        memcpy(&rsp[1], config.host_ip, 4);
+        memcpy(&rsp[5], config.dev_ip, 4);
+        memcpy(&rsp[9], config.subnet_mask, 4);
+        memcpy(&rsp[13], config.target_host_ip, 4);
+        memcpy(&rsp[17], config.target_dev_ip, 4);
+
+        uint8_t buf[32];
+        uint16_t len = build_frame(buf, addr, BLE_ETH_CMD_GET_ECM_IP_RESP, rsp, 21);
         tx_queue_push_front(buf, len);
         break;
     }

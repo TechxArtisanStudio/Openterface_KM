@@ -51,6 +51,7 @@ extern "C" {
 #define BLE_ETH_STATUS_FRAME_ERR    0xE6U
 #define BLE_ETH_STATUS_CONN_FULL    0xE7U
 #define BLE_ETH_STATUS_NO_ROUTE     0xE8U
+#define BLE_ETH_STATUS_INTERNAL_ERR 0xE9U
 
 /* ======================== Commands =======================================
  *
@@ -65,6 +66,8 @@ extern "C" {
 #define BLE_ETH_CMD_PING          0x1EU  /* Echo/ping test (no network) */
 #define BLE_ETH_CMD_SET_DEFAULT   0x20U  /* Set default target IP/port */
 #define BLE_ETH_CMD_GET_DEFAULT   0x21U  /* Get default target IP/port */
+#define BLE_ETH_CMD_SET_ECM_IP    0x22U  /* Set ECM IP configuration */
+#define BLE_ETH_CMD_GET_ECM_IP    0x23U  /* Get ECM IP configuration */
 
 /* Response / push commands */
 #define BLE_ETH_CMD_CONNECT_RESP  0x90U  /* Connect response (0x10 | 0x80) */
@@ -76,6 +79,8 @@ extern "C" {
 #define BLE_ETH_CMD_PONG          0x9EU  /* Ping response (echo) */
 #define BLE_ETH_CMD_SET_DEFAULT_RESP 0xA0U  /* Set default response */
 #define BLE_ETH_CMD_GET_DEFAULT_RESP 0xA1U  /* Get default response */
+#define BLE_ETH_CMD_SET_ECM_IP_RESP  0xA2U  /* Set ECM IP response */
+#define BLE_ETH_CMD_GET_ECM_IP_RESP  0xA3U  /* Get ECM IP response */
 #define BLE_ETH_CMD_ERROR         0xD0U  /* Generic error (cmd | 0xC0) */
 
 /* ======================== Default Target Configuration =================== */
