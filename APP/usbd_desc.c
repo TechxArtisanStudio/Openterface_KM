@@ -797,13 +797,13 @@ static void USBFS_BuildRuntimeConfigDescriptor(void)
     }
 
     memcpy(USBFS_RuntimeConfigDescriptor, USBFS_RuntimeHidConfigBase, USBFS_RUNTIME_HID_CONFIG_DESC_SIZE);
-    if (USB_ModeConfig_ModeHasHostUac(mode)) {
+    if (USB_ModeConfig_ModeHasTargetUac(mode)) {
         memcpy(&USBFS_RuntimeConfigDescriptor[total_len], USBFS_RuntimeUacBlock, USBFS_RUNTIME_UAC_BLOCK_SIZE);
         total_len = (uint16_t)(total_len + USBFS_RUNTIME_UAC_BLOCK_SIZE);
         num_interfaces = 7u;
 
         // Adjust interface and endpoint numbers in subsequent blocks if needed
-        if (USB_ModeConfig_ModeHasHostCdcAcm(mode)) {
+        if (USB_ModeConfig_ModeHasTargetCdcAcm(mode)) {
             // ACM block should start after UAC's interfaces (4,5,6)
             uint16_t acm_block_start = total_len;
             memcpy(&USBFS_RuntimeConfigDescriptor[total_len], USBFS_RuntimeAcmBlock, USBFS_RUNTIME_ACM_BLOCK_SIZE);
@@ -829,7 +829,7 @@ static void USBFS_BuildRuntimeConfigDescriptor(void)
             }
             num_interfaces = 9u;
         }
-        else if (USB_ModeConfig_ModeHasHostCdcEcm(mode)) {
+        else if (USB_ModeConfig_ModeHasTargetCdcEcm(mode)) {
             // ECM block should start after UAC's interfaces (4,5,6)
             uint16_t ecm_block_start = total_len;
             memcpy(&USBFS_RuntimeConfigDescriptor[total_len], USBFS_RuntimeEcmBlock, USBFS_RUNTIME_ECM_BLOCK_SIZE);
@@ -857,17 +857,17 @@ static void USBFS_BuildRuntimeConfigDescriptor(void)
         }
     }
     else {
-        if (USB_ModeConfig_ModeHasHostCdcAcm(mode)) {
+        if (USB_ModeConfig_ModeHasTargetCdcAcm(mode)) {
             memcpy(&USBFS_RuntimeConfigDescriptor[total_len], USBFS_RuntimeAcmBlock, USBFS_RUNTIME_ACM_BLOCK_SIZE);
             total_len = (uint16_t)(total_len + USBFS_RUNTIME_ACM_BLOCK_SIZE);
             num_interfaces = 6u;
         }
-        if (USB_ModeConfig_ModeHasHostCdcEcm(mode)) {
+        if (USB_ModeConfig_ModeHasTargetCdcEcm(mode)) {
             memcpy(&USBFS_RuntimeConfigDescriptor[total_len], USBFS_RuntimeEcmBlock, USBFS_RUNTIME_ECM_BLOCK_SIZE);
             total_len = (uint16_t)(total_len + USBFS_RUNTIME_ECM_BLOCK_SIZE);
 
             // Adjust interface and endpoint numbers in ECM block if ACM block was also added
-            if (USB_ModeConfig_ModeHasHostCdcAcm(mode)) {
+            if (USB_ModeConfig_ModeHasTargetCdcAcm(mode)) {
                 // ECM block starts at offset total_len - USBFS_RUNTIME_ECM_BLOCK_SIZE
                 uint16_t ecm_block_start = total_len - USBFS_RUNTIME_ECM_BLOCK_SIZE;
                 // Patch ECM block interface numbers: +2 (to start at interface 6 instead of 4)

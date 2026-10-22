@@ -4,6 +4,8 @@
 
 #include "ch32v20x_flash.h"
 #include "include/ecm_bridge.h"
+#include "include/default_target_config.h"
+#include "include/ble_eth_protocol.h"
 #include <string.h>
 
 /* Default configuration */
@@ -286,6 +288,10 @@ uint8_t ECM_IPConfig_Set(const ECM_IPConfig_t *config)
 
     /* 8. Immediately update bridge layer IP variables to make changes take effect */
     ECM_Bridge_UpdateIPConfig();
+
+    /* 9. Sync target host IP to BLE SSH default target configuration */
+    /* This ensures Bluetooth SSH connects to the correct target PC after IP changes */
+    DefaultTargetConfig_Set(config->target_host_ip, BLE_ETH_DEFAULT_TARGET_PORT);
 
     return ECM_IP_CONFIG_OK;
 }

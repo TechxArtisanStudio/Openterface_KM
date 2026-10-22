@@ -574,6 +574,10 @@ void CH9329_DispatchCommand(uint8_t addr, uint8_t cmd_code, uint8_t* pdata, uint
         case CMD_GET_ECM_IP_CONFIG:
         {
 #if USB_WORK_MODE_COMPILES_BRIDGE_ECM
+            extern volatile uint8_t g_host_ecm_data_if_active;
+            extern volatile uint8_t g_target_ecm_data_if_active;
+            extern volatile uint8_t USBFS_Connect;
+
             uint8_t status = STATUS_SUCCESS;
 
             if (data_len != 1) {
@@ -620,6 +624,16 @@ void CH9329_DispatchCommand(uint8_t addr, uint8_t cmd_code, uint8_t* pdata, uint
                     memcpy(&response[1], config.target_host_ip, 4);
                     memcpy(&response[5], config.target_dev_ip, 4);
                     CH9329_SendResponse(addr, cmd_code, response, 9, 1);
+                }
+                break;
+
+                case 0x03: // Get ECM Bridge Status
+                {
+                    response[0] = STATUS_SUCCESS;
+                    response[1] = USBFS_Connect;           // Target connection status
+                    response[2] = g_host_ecm_data_if_active;   // Host ECM active
+                    response[3] = g_target_ecm_data_if_active; // Target ECM active
+                    CH9329_SendResponse(addr, cmd_code, response, 4, 1);
                 }
                 break;
 
@@ -803,6 +817,14 @@ void USB_DataRx_To_KMHandle(void) {
             Uart.Tx_RemainNum--;
         }
     }
+
+    /* Re-enable EP5 OUT if it was stopped due to buffer full */
+#if USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
+    if ((Uart.USB_Down_StopFlag == 0x01) && (Uart.Tx_RemainNum < 2)) {
+        SetEPRxValid(ENDP5);
+        Uart.USB_Down_StopFlag = 0x00;
+    }
+#endif
 }
 
 

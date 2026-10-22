@@ -808,11 +808,16 @@ static void USBD_BuildRuntimeAcmEcmConfigDescriptor(void)
     USBD_RuntimeAcmEcmConfigDescriptor[3] = (uint8_t)(USBD_RUNTIME_ACM_ECM_CONFIG_DESC_SIZE >> 8);
     USBD_RuntimeAcmEcmConfigDescriptor[4] = 0x04;  /* bNumInterfaces: ACM(2) + ECM(2) */
 
-    /* Fix EP3 wMaxPacketSize from 16 to 64 bytes for CH9329 responses */
-    /* EP3 bulk IN endpoint descriptor is at offset 67 in ACM config (75B total) */
-    /* wMaxPacketSize is at offset 71-72 (little-endian: low byte first) */
-    USBD_RuntimeAcmEcmConfigDescriptor[71] = 0x40;  /* Low byte: 64 */
-    USBD_RuntimeAcmEcmConfigDescriptor[72] = 0x00;  /* High byte: 0 */
+    /* Fix EP3 and EP5 wMaxPacketSize from 16 to 64 bytes for CH9329 responses */
+    /* EP5 OUT endpoint descriptor is at offset 61-67 */
+    /* wMaxPacketSize is at offset 65-66 (little-endian: low byte first) */
+    USBD_RuntimeAcmEcmConfigDescriptor[65] = 0x40;  /* Low byte: 64 */
+    USBD_RuntimeAcmEcmConfigDescriptor[66] = 0x00;  /* High byte: 0 */
+
+    /* EP3 IN endpoint descriptor is at offset 68-74 */
+    /* wMaxPacketSize is at offset 72-73 (little-endian: low byte first) */
+    USBD_RuntimeAcmEcmConfigDescriptor[72] = 0x40;  /* Low byte: 64 */
+    USBD_RuntimeAcmEcmConfigDescriptor[73] = 0x00;  /* High byte: 0 */
 
     USBD_RuntimeAcmEcmConfigBuilt = 1u;
 }

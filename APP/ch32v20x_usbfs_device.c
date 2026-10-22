@@ -1553,39 +1553,49 @@ void USBFS_IRQHandler( void )
 #if USB_WORK_MODE_COMPILES_TARGET_CDC_ECM
                             /* CDC-ECM data interface: alt=0 disables endpoints,
                              * alt=1 enables EP6 (bulk OUT) and EP7 (bulk IN).
-                             * Interface number depends on whether UAC is present:
-                             *   without UAC: ECM data is IF5
-                             *   with UAC:    ECM data is IF4 (UAC takes IF5-IF7) */
-                            if (USB_ModeConfig_ActiveModeHasTargetCdcEcm() &&
-                                (USBFS_SetupReqIndex == 5 || USBFS_SetupReqIndex == 4) &&
-                                /* Skip IF5 when UAC is active — IF5 belongs to UAC AS_IN */
-                                !(USB_ModeConfig_ActiveModeHasTargetUac() && USBFS_SetupReqIndex == 5)) {
-                                uint8_t alt = (uint8_t)(USBFS_SetupReqValue & 0xFF);
-                                if (alt == 1) {
-                                    /* Enable EP6 bulk OUT (ACK, DATA0) and EP7 bulk IN (NAK, DATA0).
-                                     * Do NOT set UEP_R_TOG/UEP_T_TOG — bulk endpoints start at
-                                     * DATA0; setting TOG would make the hardware expect DATA1
-                                     * and reject the host's first DATA0 packet. */
-                                    USBFSD->UEP6_RX_CTRL = USBFS_UEP_R_RES_ACK;
-                                    USBFSD->UEP7_TX_CTRL = USBFS_UEP_T_RES_NAK;
-                                    USBFSD->UEP7_TX_LEN  = 0;
-                                    USBFS_Endp_Busy[DEF_UEP7] = 0;
-                                    /* Reset GARP flag so it gets re-queued on every activation. */
-                                    g_target_garp_sent = 0;
-                                    /* Externally visible flag — ecm_bridge.c checks this
-                                     * before sending through USBFS EP7. */
-                                    g_target_ecm_data_if_active = 1;
+                             * Interface number depends on configuration:
+                             *   HID+ECM only: ECM data is IF4/IF5
+                             *   HID+ACM+ECM:  ECM data is IF6/IF7 (ACM takes IF4/IF5)
+                             *   HID+UAC+ECM:  ECM data is IF7/IF8 (UAC takes IF4-IF6)
+                             *   HID+UAC+ACM+ECM: ECM data is IF8/IF9 */
+                            if (USB_ModeConfig_ActiveModeHasTargetCdcEcm()) {
+                                /* Determine which interface number is the ECM data interface */
+                                uint8_t ecm_data_if = 4;  /* Default: HID+ECM only */
+                                if (USB_ModeConfig_ActiveModeHasTargetCdcAcm()) {
+                                    ecm_data_if += 2;  /* ACM adds 2 interfaces (4,5) */
                                 }
-                                else {
-                                    /* Keep EP6 RX active even on alt=0 — macOS CDC ECM
-                                       may deactivate then immediately reactivate, and we
-                                       need to receive ARP requests during this window. */
-                                    USBFSD->UEP6_RX_CTRL = USBFS_UEP_R_RES_ACK;
-                                    USBFSD->UEP7_TX_CTRL = USBFS_UEP_T_RES_NAK;
-                                    USBFSD->UEP7_TX_LEN  = 0;
-                                    USBFS_Endp_Busy[DEF_UEP7] = 0;
-                                    /* Keep active so GARP/ARP-reply TX path stays open */
-                                    g_target_ecm_data_if_active = 1;
+                                if (USB_ModeConfig_ActiveModeHasTargetUac()) {
+                                    ecm_data_if += 3;  /* UAC adds 3 interfaces (4,5,6 or 7,8,9) */
+                                }
+
+                                if (USBFS_SetupReqIndex == ecm_data_if) {
+                                    uint8_t alt = (uint8_t)(USBFS_SetupReqValue & 0xFF);
+                                    if (alt == 1) {
+                                        /* Enable EP6 bulk OUT (ACK, DATA0) and EP7 bulk IN (NAK, DATA0).
+                                         * Do NOT set UEP_R_TOG/UEP_T_TOG — bulk endpoints start at
+                                         * DATA0; setting TOG would make the hardware expect DATA1
+                                         * and reject the host's first DATA0 packet. */
+                                        USBFSD->UEP6_RX_CTRL = USBFS_UEP_R_RES_ACK;
+                                        USBFSD->UEP7_TX_CTRL = USBFS_UEP_T_RES_NAK;
+                                        USBFSD->UEP7_TX_LEN  = 0;
+                                        USBFS_Endp_Busy[DEF_UEP7] = 0;
+                                        /* Reset GARP flag so it gets re-queued on every activation. */
+                                        g_target_garp_sent = 0;
+                                        /* Externally visible flag — ecm_bridge.c checks this
+                                         * before sending through USBFS EP7. */
+                                        g_target_ecm_data_if_active = 1;
+                                    }
+                                    else {
+                                        /* Keep EP6 RX active even on alt=0 — macOS CDC ECM
+                                           may deactivate then immediately reactivate, and we
+                                           need to receive ARP requests during this window. */
+                                        USBFSD->UEP6_RX_CTRL = USBFS_UEP_R_RES_ACK;
+                                        USBFSD->UEP7_TX_CTRL = USBFS_UEP_T_RES_NAK;
+                                        USBFSD->UEP7_TX_LEN  = 0;
+                                        USBFS_Endp_Busy[DEF_UEP7] = 0;
+                                        /* Keep active so GARP/ARP-reply TX path stays open */
+                                        g_target_ecm_data_if_active = 1;
+                                    }
                                 }
                             }
 #endif /* USB_WORK_MODE_COMPILES_TARGET_CDC_ECM */

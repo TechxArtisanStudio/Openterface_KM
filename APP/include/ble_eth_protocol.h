@@ -84,7 +84,7 @@ extern "C" {
  * These are used for auto-connect on BLE link-up.
  */
 #ifndef BLE_ETH_DEFAULT_TARGET_IP
-#define BLE_ETH_DEFAULT_TARGET_IP       { 192, 168, 11, 1 }
+#define BLE_ETH_DEFAULT_TARGET_IP       { 192, 168, 11, 2 }
 #endif
 
 #ifndef BLE_ETH_DEFAULT_TARGET_PORT

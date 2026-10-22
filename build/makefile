@@ -214,7 +214,7 @@ CFLAGS += -DUSB_WORK_MODE=$(USB_WORK_MODE_ID)
 
 # All firmware versions: disable runtime profile switching to prevent
 # accidental mode changes. Each board uses its compiled work mode.
-CFLAGS += -DUSB_WORK_MODE_RUNTIME_PROFILES=0
+CFLAGS += -DUSB_WORK_MODE_RUNTIME_PROFILES=1
 
 ifeq ($(ENABLE_OSCILLATOR),1)
 CFLAGS += -DCLK_OSC32K=0
