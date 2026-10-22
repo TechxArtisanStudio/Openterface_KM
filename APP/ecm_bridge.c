@@ -1815,21 +1815,37 @@ static void put_u32(uint8_t *data, uint32_t value)
 static uint8_t make_notification(uint8_t state, uint8_t interface, uint8_t *packet)
 {
     packet[0] = 0xA1;
+
     if (state == 1) {
+        /* Link down notification (NETWORK_CONNECTION = 0) */
         packet[1] = 0x00;
-        put_u16(&packet[2], 1);
+        put_u16(&packet[2], 0);  /* value = 0 (disconnected) */
         put_u16(&packet[4], interface);
         put_u16(&packet[6], 0);
         return 8;
     }
 
-    packet[1] = 0x2A;
-    put_u16(&packet[2], 0);
-    put_u16(&packet[4], interface);
-    put_u16(&packet[6], 8);
-    put_u32(&packet[8], ECM_BRIDGE_LINK_SPEED_BPS);
-    put_u32(&packet[12], ECM_BRIDGE_LINK_SPEED_BPS);
-    return 16;
+    if (state == 2) {
+        /* Link up notification (NETWORK_CONNECTION = 1) */
+        packet[1] = 0x00;
+        put_u16(&packet[2], 1);  /* value = 1 (connected) */
+        put_u16(&packet[4], interface);
+        put_u16(&packet[6], 0);
+        return 8;
+    }
+
+    if (state == 3) {
+        /* Connection speed change notification */
+        packet[1] = 0x2A;
+        put_u16(&packet[2], 0);
+        put_u16(&packet[4], interface);
+        put_u16(&packet[6], 8);
+        put_u32(&packet[8], ECM_BRIDGE_LINK_SPEED_BPS);
+        put_u32(&packet[12], ECM_BRIDGE_LINK_SPEED_BPS);
+        return 16;
+    }
+
+    return 0;
 }
 
 #if USB_WORK_MODE_COMPILES_TARGET_CDC_ECM
@@ -1850,10 +1866,10 @@ static void poll_target_notification(void)
     }
 
     len = make_notification(g_target_notify_state, ECM_BRIDGE_TARGET_COMM_IF, packet);
-    if (USBFS_Endp_DataUp(DEF_UEP5, packet, len, DEF_UEP_CPY_LOAD) == READY) {
+    if (len > 0 && USBFS_Endp_DataUp(DEF_UEP5, packet, len, DEF_UEP_CPY_LOAD) == READY) {
         USB_DEBUG("ECM: notif sent state=%d len=%d\r\n", g_target_notify_state, len);
         g_target_notify_state++;
-        if (g_target_notify_state > 2) {
+        if (g_target_notify_state > 3) {
             g_target_notify_state = 0;
         }
     }
@@ -1873,9 +1889,9 @@ static void poll_host_notification(void)
     }
 
     len = make_notification(g_host_notify_state, ECM_BRIDGE_HOST_COMM_IF, packet);
-    if (USBD_ENDPx_DataUp(ECM_USBD_INT_ENDP, packet, len) == USB_SUCCESS) {
+    if (len > 0 && USBD_ENDPx_DataUp(ECM_USBD_INT_ENDP, packet, len) == USB_SUCCESS) {
         g_host_notify_state++;
-        if (g_host_notify_state > 2) {
+        if (g_host_notify_state > 3) {
             g_host_notify_state = 0;
         }
     }
