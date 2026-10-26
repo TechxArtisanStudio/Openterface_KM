@@ -83,6 +83,8 @@ The response payload is usually a 1-byte status for write-like commands, or a st
 | `0x18` | Temperature | board-specific | board-specific | DS18B20 extension |
 | `0x22` | BLE security | 1-byte sub-command | status + sub-command data | Openterface extension for BLE pairing/bond management |
 | `0x23` | BLE set name | 1-20 bytes name or `0x00` | 1-byte status | Openterface extension for BLE device name configuration |
+| `0x26` | Set ECM IP config | sub-command + data | 1-byte status | Openterface extension for ECM network IP configuration |
+| `0x27` | Get ECM IP config | none | 21-byte config block | Openterface extension for reading ECM network configuration |
 | `0x30` | USB work mode | optional control payload | 12-byte status block | Openterface extension for runtime USB personality selection |
 | `0x31` | System reset | none | 1-byte status | Openterface extension for system reboot |
 
@@ -238,6 +240,134 @@ After sending a successful `0x23` command, the device will reboot automatically.
 4. After reboot, scan for the device with the new name
 ```
 
+### `0x26` Set ECM IP Configuration
+
+This is an Openterface extension for configuring the ECM network IP addresses. Changes take effect immediately without requiring USB reconnection or device reboot. The configuration is persisted to flash and survives power cycles.
+
+**Availability:** Only available when the firmware is built with ECM bridge support (modes 4, 5, 6, 7). If ECM is not compiled in, the command returns `0xE3` (unsupported command).
+
+**Payload format:**
+
+The payload starts with a sub-command byte followed by data depending on the sub-command:
+
+| Sub-cmd | Name | Payload length | Description |
+| --- | --- | --- | --- |
+| `0x00` | Set All | 21 bytes | Set all IP addresses at once |
+| `0x01` | Set Host Side | 13 bytes | Set host-side IPs (host IP, dev IP, subnet) |
+| `0x02` | Set Target Side | 9 bytes | Set target-side IPs (target host IP, target dev IP) |
+| `0x03` | Reset to Default | 1 byte | Reset all IPs to factory defaults |
+
+**Sub-command `0x00` - Set All:**
+
+```text
+Payload: [0x00][host_ip(4)][dev_ip(4)][subnet(4)][target_host_ip(4)][target_dev_ip(4)]
+Total: 21 bytes
+```
+
+**Sub-command `0x01` - Set Host Side:**
+
+```text
+Payload: [0x01][host_ip(4)][dev_ip(4)][subnet(4)]
+Total: 13 bytes
+```
+
+**Sub-command `0x02` - Set Target Side:**
+
+```text
+Payload: [0x02][target_host_ip(4)][target_dev_ip(4)]
+Total: 9 bytes
+```
+
+**Sub-command `0x03` - Reset to Default:**
+
+```text
+Payload: [0x03]
+Total: 1 byte
+```
+
+**Response:**
+
+- Single byte status (`0x00` = success, `0xE5` = parameter error, `0xE9` = flash erase failed, `0xEA` = flash program failed, `0xEB` = flash verification failed)
+- Response command byte uses `cmd | 0x80` for success, `cmd | 0xC0` for error
+
+**Default IP Configuration:**
+
+| Parameter | Default Value |
+| --- | --- |
+| Host IP | 192.168.20.1 |
+| Dev IP (firmware) | 192.168.20.3 |
+| Subnet Mask | 255.255.255.0 |
+| Target Host IP | 192.168.20.2 |
+| Target Dev IP | 192.168.20.5 |
+
+**Examples:**
+
+Set all IPs to 192.168.50.x subnet:
+
+```text
+Request : 57 AB <addr> 26 15 00 C0 A8 32 01 C0 A8 32 03 FF FF FF 00 C0 A8 32 02 C0 A8 32 05 <sum>
+Response: 57 AB <addr> A6 01 00 <sum>
+```
+
+Set host side only (192.168.30.x):
+
+```text
+Request : 57 AB <addr> 26 0D 01 C0 A8 1E 01 C0 A8 1E 03 FF FF FF 00 <sum>
+Response: 57 AB <addr> A6 01 00 <sum>
+```
+
+Reset to defaults:
+
+```text
+Request : 57 AB <addr> 26 01 03 <sum>
+Response: 57 AB <addr> A6 01 00 <sum>
+```
+
+**Important notes:**
+
+1. **Immediate effect**: IP changes take effect immediately. The firmware sends GARP (Gratuitous ARP) and triggers link state change to notify the host.
+
+2. **DHCP renewal**: After IP change, the host may need to renew its DHCP lease to get the new IP. On macOS: `networksetup -setdhcp "Openterface Host"`
+
+3. **Flash wear**: Each configuration change writes to flash. Avoid frequent changes in automated scripts.
+
+4. **Validation**: The firmware validates IP addresses before writing. Invalid addresses return `0xE5` parameter error.
+
+### `0x27` Get ECM IP Configuration
+
+This is an Openterface extension for reading the current ECM network IP configuration. Returns the configuration from RAM cache without accessing flash.
+
+**Availability:** Only available when the firmware is built with ECM bridge support (modes 4, 5, 6, 7). If ECM is not compiled in, the command returns `0xE3` (unsupported command).
+
+**Payload format:**
+
+No payload required.
+
+**Response:**
+
+The response is a 21-byte configuration block:
+
+```text
+[status(1)][host_ip(4)][dev_ip(4)][subnet(4)][target_host_ip(4)][target_dev_ip(4)]
+```
+
+| Byte | Meaning |
+| --- | --- |
+| 0 | Status (`0x00` = success) |
+| 1-4 | Host IP address |
+| 5-8 | Dev IP address (firmware) |
+| 9-12 | Subnet mask |
+| 13-16 | Target host IP |
+| 17-20 | Target dev IP |
+
+**Example:**
+
+```text
+Request : 57 AB <addr> 27 00 <sum>
+Response: 57 AB <addr> A7 15 00 C0 A8 32 01 C0 A8 32 03 FF FF FF 00 C0 A8 32 02 C0 A8 32 05 <sum>
+          (192.168.50.1, 192.168.50.3, 255.255.255.0, 192.168.50.2, 192.168.50.5)
+```
+
 ### `0x30` USB Work Mode
 
 This is a newer Openterface extension for persistent USB mode selection and status reporting.
@@ -256,6 +386,9 @@ The `0x30` command uses numeric mode values defined by the firmware build:
 | `2` | `USB_WORK_MODE_HID_UAC_ACM` | HID plus target/host UAC, with the existing UAC audio bridge |
 | `3` | `USB_WORK_MODE_HID_ACM_BRIDGE` | HID plus target CDC ACM, bridged to host CDC ACM |
 | `4` | `USB_WORK_MODE_HID_ECM_BRIDGE` | HID plus target CDC ECM, bridged to host CDC ECM |
+| `5` | `USB_WORK_MODE_HID_UAC_ECM` | HID plus UAC audio plus CDC ECM |
+| `6` | `USB_WORK_MODE_HID_ACM_ECM` | Host CDC-ACM + Host CDC-ECM combined (keymod-plus) |
+| `7` | `USB_WORK_MODE_HID_ACM_ECM_BRIDGE` | Host CDC-ACM + Host CDC-ECM + Target CDC-ECM |
 
 Practical interpretation of each mode:
 
@@ -511,7 +644,7 @@ This means the protocol is not a raw HID tunnel. It is a small command protocol 
 ## Limitations And Compatibility Notes
 
 - The implementation is compatibility-oriented, not a bit-for-bit clone of every possible CH9329 feature.
-- `0x17`, `0x18`, `0x23`, `0x30`, and `0x31` are project-specific extensions.
+- `0x17`, `0x18`, `0x23`, `0x26`, `0x27`, `0x30`, and `0x31` are project-specific extensions.
 - Outbound response payloads are capped at 58 bytes by the response packet buffer.
 - The current keyboard path assumes explicit key-release reports from the sender.
 - BLE-related commands (`0x22`, `0x23`) require `ENABLE_BLE` compile-time option. If BLE is disabled, these commands return `0xE3` (unsupported command).
@@ -525,3 +658,6 @@ The authoritative implementation is in these files:
 - `APP/usbd_compostie_km.c`
 - `APP/keyboard_handler.c`
 - `APP/mouse_handler.c`
+- `APP/include/ecm_ip_config.h`
+- `APP/ecm_ip_config.c`
+- `APP/ecm_bridge.c`

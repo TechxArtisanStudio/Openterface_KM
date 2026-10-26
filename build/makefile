@@ -62,6 +62,9 @@ USB_WORK_MODE_ENABLE_UAC := 0
 else ifeq ($(USB_WORK_MODE),hid_acm_ecm)
 USB_WORK_MODE_ID := 6
 USB_WORK_MODE_ENABLE_UAC := 0
+else ifeq ($(USB_WORK_MODE),hid_acm_ecm_bridge)
+USB_WORK_MODE_ID := 7
+USB_WORK_MODE_ENABLE_UAC := 0
 else
 $(error Unsupported USB_WORK_MODE '$(USB_WORK_MODE)')
 endif

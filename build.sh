@@ -224,7 +224,7 @@ case ${TARGET} in
     kvmgo)
         ENABLE_BLE=1
         USE_LTO=1
-        build_one "kvmgo" "1" "" "KVM-GO" "hid_acm_ecm"
+        build_one "kvmgo" "1" "" "KVM-GO" "hid_acm_ecm_bridge"
         ;;
     minikvm)
         ENABLE_BLE=0
