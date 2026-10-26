@@ -28,6 +28,7 @@ uint8_t USBD_Endp1_Busy;
 uint8_t USBD_Endp3_Busy;
 uint8_t USBD_Endp2_Busy;  /* ECM INT busy (also used in ACM+ECM combined mode) */
 uint8_t USBD_Endp4_Busy;  /* ECM BULK IN busy (also used in ACM+ECM combined mode) */
+uint8_t USBD_Endp7_Busy;  /* Target ECM BULK IN busy (mode 7: ACM+ECM+Target ECM) */
 uint16_t USB_Rx_Cnt=0;
 
 /* Debug counters for EP5_OUT_Callback */
@@ -169,6 +170,25 @@ void EP4_IN_Callback(void)
 #endif
 }
 
+/*********************************************************************
+ * @fn      EP7_IN_Callback
+ *
+ * @brief  Endpoint 7 IN — Target ECM bulk IN (mode 7: ACM+ECM+Target ECM).
+ *         Called when the bulk IN transfer completes.
+ *
+ * @return  none
+ */
+#if USB_WORK_MODE_HAS_TARGET_CDC_ECM && USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
+void EP7_IN_Callback(void)
+{
+    if (USB_ModeConfig_ActiveModeHasTargetCdcEcm() &&
+        USB_ModeConfig_ActiveModeHasHostCdcAcm() &&
+        USB_ModeConfig_ActiveModeHasHostCdcEcm()) {
+        USBD_Endp7_Busy = 0;
+    }
+}
+#endif
+
 void EP4_OUT_Callback(void)
 {
 #ifdef ENABLE_UAC
@@ -234,6 +254,34 @@ void EP6_OUT_Callback(void)
         ECM_Bridge_HostRxDone( buf, (uint16_t)len );
         SetEPRxCount( ENDP6, 64 );
         SetEPRxValid( ENDP6 );
+    }
+}
+#endif
+
+#if USB_WORK_MODE_HAS_TARGET_CDC_ECM && USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
+/*********************************************************************
+ * @fn      EP7_OUT_Callback
+ *
+ * @brief  Endpoint 7 OUT — Target ECM bulk data (host → device).
+ *         Only used in combined ACM+ECM+Target ECM mode (mode 7).
+ *
+ * @return  none
+ */
+void EP7_OUT_Callback(void)
+{
+    if (USB_ModeConfig_ActiveModeHasTargetCdcEcm() &&
+        USB_ModeConfig_ActiveModeHasHostCdcAcm() &&
+        USB_ModeConfig_ActiveModeHasHostCdcEcm()) {
+        uint8_t buf[64];
+        uint32_t len;
+        len = GetEPRxCount( ENDP7 );
+        if (len > sizeof(buf)) {
+            len = sizeof(buf);
+        }
+        PMAToUserBufferCopy( buf, GetEPRxAddr( ENDP7 ), len );
+        ECM_Bridge_TargetRxDone( buf, (uint16_t)len );
+        SetEPRxCount( ENDP7, 64 );
+        SetEPRxValid( ENDP7 );
     }
 }
 #endif
@@ -311,6 +359,23 @@ uint8_t USBD_ENDPx_DataUp( uint8_t endp, uint8_t *pbuf, uint16_t len )
         USB_SIL_Write( EP4_IN, pbuf, len );
         USBD_Endp4_Busy = 1;
         SetEPTxStatus( ENDP4, EP_TX_VALID );
+    }
+#endif
+#if USB_WORK_MODE_HAS_TARGET_CDC_ECM && USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
+    else if( endp == ENDP7 )
+    {
+        /* Target ECM bulk IN (mode 7: ACM+ECM+Target ECM) */
+        if (len > 64)
+        {
+            return USB_ERROR;
+        }
+        if (USBD_Endp7_Busy)
+        {
+            return USB_ERROR;
+        }
+        USB_SIL_Write( EP7_IN, pbuf, len );
+        USBD_Endp7_Busy = 1;
+        SetEPTxStatus( ENDP7, EP_TX_VALID );
     }
 #endif
 

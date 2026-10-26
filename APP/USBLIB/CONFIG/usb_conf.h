@@ -48,7 +48,18 @@
  *   EP2 TX:  0x150~0x15F  (16B)  ECM INT IN (reuses UAC space)
  *   EP4 TX:  0x160~0x19F  (64B)  ECM bulk IN
  *   EP6 RX:  0x1A0~0x1DF  (64B)  ECM bulk OUT
- *   Total:   0x1E0 = 480B */
+ *   Total:   0x1E0 = 480B
+ *
+ * Combined ACM+ECM+Target ECM mode (mode 7) PMA layout:
+ *   EP1 TX:  0x0C0~0x0CF  (16B)  ACM INT IN
+ *   EP5 RX:  0x0D0~0x10F  (64B)  ACM bulk OUT
+ *   EP3 TX:  0x110~0x14F  (64B)  ACM bulk IN
+ *   EP2 TX:  0x150~0x15F  (16B)  Host ECM INT IN
+ *   EP4 TX:  0x160~0x17F  (32B)  Host ECM bulk IN (reduced from 64B)
+ *   EP6 RX:  0x180~0x19F  (32B)  Host ECM bulk OUT (reduced from 64B)
+ *   EP7 RX:  0x1A0~0x1BF  (32B)  Target ECM bulk OUT (reduced from 64B)
+ *   EP7 TX:  0x1C0~0x1DF  (32B)  Target ECM bulk IN (reduced from 64B)
+ *   Total:   0x1E0 = 480B (fits in 512B PMA) */
 #define ENDP1_TXADDR        (0xC0)                          /* 16B, CDC int   */
 #define ENDP5_BULK_RXADDR   (0xD0)                          /* 64B, CDC ACM bulk OUT */
 #define ENDP3_TXADDR        (0x110)                         /* 64B, CDC ACM bulk IN  */
@@ -60,8 +71,18 @@
 /* Combined ACM+ECM mode: additional endpoints for ECM (no UAC).
  * These reuse the PMA space normally occupied by UAC endpoints. */
 #define ENDP2_TX_ECM_ADDR       (0x150)                     /* 16B, ECM INT IN */
-#define ENDP4_TX_ECM_ADDR       (0x160)                     /* 64B, ECM bulk IN */
-#define ENDP6_RX_ECM_ADDR       (0x1A0)                     /* 64B, ECM bulk OUT */
+#define ENDP4_TX_ECM_ADDR       (0x160)                     /* 32B, ECM bulk IN (reduced) */
+#define ENDP6_RX_ECM_ADDR       (0x180)                     /* 32B, ECM bulk OUT (reduced) */
+
+/* Combined ACM+ECM+Target ECM mode (mode 7): additional endpoints for Target ECM.
+ * Target ECM uses EP7 OUT (0x07) and EP7 IN (0x87) — EP7 supports bidirectional.
+ * Note: CH32V20x only has EP0-EP7 (8 endpoints), no EP8.
+ * Buffer sizes reduced to 32B to fit within 512B PMA. */
+#define ENDP7_RX_TARGET_ECM_ADDR (0x1A0)                    /* 32B, Target ECM bulk OUT */
+#define ENDP7_TX_TARGET_ECM_ADDR (0x1C0)                    /* 32B, Target ECM bulk IN */
+
+/* Target ECM endpoint busy flag (mode 7) */
+#define TARGET_ECM_BULK_IN_BUSY  USBD_Endp7_Busy
 
 /* Serial data endpoint for CDC-ACM. */
 #define USBD_SERIAL_ENDP       ENDP3
@@ -135,7 +156,11 @@
 // #define  EP4_IN_Callback   NOP_Process  /* UAC ISO IN handled in uac_handler */
 #define  EP5_IN_Callback   NOP_Process
 #define  EP6_IN_Callback    NOP_Process
+#if USB_WORK_MODE_HAS_TARGET_CDC_ECM && USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
+/* EP7 IN handled in usb_endp.c for combined ACM+ECM+Target ECM mode (mode 7) */
+#else
 #define  EP7_IN_Callback    NOP_Process
+#endif
 
 #define  EP1_OUT_Callback   NOP_Process
 // #define  EP2_OUT_Callback   NOP_Process
@@ -147,7 +172,11 @@
 #else
 #define  EP6_OUT_Callback   NOP_Process
 #endif
+#if USB_WORK_MODE_HAS_TARGET_CDC_ECM && USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
+/* EP7 OUT handled in usb_endp.c for combined ACM+ECM+Target ECM mode (mode 7) */
+#else
 #define  EP7_OUT_Callback   NOP_Process
+#endif
 
 #endif /* __USB_CONF_H */
 

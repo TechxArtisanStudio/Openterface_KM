@@ -41,12 +41,14 @@ const uint8_t  USBD_DeviceDescriptor[] = {
 };
 
 /* USB Configuration Descriptors */
-const uint8_t  USBD_ConfigDescriptor[] = { 
+const uint8_t  USBD_ConfigDescriptor[] = {
     /* Configuration Descriptor */
     0x09,                           // bLength
     0x02,                           // bDescriptorType
     USBD_SIZE_CONFIG_DESC & 0xFF, USBD_SIZE_CONFIG_DESC >> 8, // wTotalLength
-#if USB_WORK_MODE_HAS_HOST_CDC_ACM && USB_WORK_MODE_HAS_HOST_CDC_ECM
+#if USB_WORK_MODE_HAS_HOST_CDC_ACM && USB_WORK_MODE_HAS_HOST_CDC_ECM && USB_WORK_MODE_HAS_TARGET_CDC_ECM
+    0x06,                           // bNumInterfaces: ACM(2) + Host ECM(2) + Target ECM(2) = 6
+#elif USB_WORK_MODE_HAS_HOST_CDC_ACM && USB_WORK_MODE_HAS_HOST_CDC_ECM
     0x04,                           // bNumInterfaces: ACM(2) + ECM(2) = 4
 #elif USB_WORK_MODE_HAS_HOST_CDC_ECM && USB_WORK_MODE_HAS_HOST_UAC
     0x05,                           // bNumInterfaces: ECM(2) + UAC(3) = 5
@@ -212,6 +214,84 @@ const uint8_t  USBD_ConfigDescriptor[] = {
     0x02,                           // bmAttributes (Bulk)
     0x40, 0x00,                     // wMaxPacketSize 64 (ECM bridge transmits 64-byte bulk packets)
     0x00,                           // bInterval
+
+#if USB_WORK_MODE_HAS_TARGET_CDC_ECM
+    /* ====== Target CDC ECM: IF4=comm + IF5=data ==========
+     * Endpoints:
+     *   EP7 OUT (0x07) — bulk data host→device (Target ECM)
+     *   EP7 IN  (0x87) — bulk data device→host (Target ECM)
+     * Note: CH32V20x only has EP0-EP7 (no EP8). EP7 supports both directions.
+     * =================================================================== */
+
+    /* IAD: Target CDC ECM (IF4=comm + IF5=data) */
+    0x08,                           // bLength
+    0x0B,                           // bDescriptorType (IAD)
+    0x04,                           // bFirstInterface: 4
+    0x02,                           // bInterfaceCount: 2
+    0x02,                           // bFunctionClass: Communications
+    0x06,                           // bFunctionSubClass: Ethernet Networking Control Model
+    0x00,                           // bFunctionProtocol
+    0x00,                           // iFunction
+
+    /* Interface 4: Target CDC ECM communication */
+    0x09,                           // bLength
+    0x04,                           // bDescriptorType (Interface)
+    0x04,                           // bInterfaceNumber 4
+    0x00,                           // bAlternateSetting
+    0x00,                           // bNumEndpoints 0 (no notification endpoint)
+    0x02,                           // bInterfaceClass (Communications)
+    0x06,                           // bInterfaceSubClass (Ethernet Networking Control Model)
+    0x00,                           // bInterfaceProtocol
+    0x00,                           // iInterface
+
+    /* Target CDC ECM Functional Descriptors */
+    0x05, 0x24, 0x00, 0x10, 0x01,   // Header, CDC 1.10
+    0x05, 0x24, 0x06, 0x04, 0x05,   // Union: control IF4, data IF5
+    0x0D, 0x24, 0x0F, 0x05,         // Ethernet Networking, iMACAddress=5
+    0x00, 0x00, 0x00, 0x00,         // bmEthernetStatistics
+    0xEA, 0x05,                     // wMaxSegmentSize: 1514
+    0x00, 0x00,                     // wNumberMCFilters: none
+    0x00,                           // bNumberPowerFilters
+
+    /* Interface 5: Target CDC ECM data, alt 0 idle */
+    0x09,                           // bLength
+    0x04,                           // bDescriptorType (Interface)
+    0x05,                           // bInterfaceNumber 5
+    0x00,                           // bAlternateSetting
+    0x00,                           // bNumEndpoints
+    0x0A,                           // bInterfaceClass (Data Interface)
+    0x00,                           // bInterfaceSubClass
+    0x00,                           // bInterfaceProtocol
+    0x00,                           // iInterface
+
+    /* Interface 5: Target CDC ECM data, alt 1 active */
+    0x09,                           // bLength
+    0x04,                           // bDescriptorType (Interface)
+    0x05,                           // bInterfaceNumber 5
+    0x01,                           // bAlternateSetting
+    0x02,                           // bNumEndpoints
+    0x0A,                           // bInterfaceClass (Data Interface)
+    0x00,                           // bInterfaceSubClass
+    0x00,                           // bInterfaceProtocol
+    0x00,                           // iInterface
+
+    /* Endpoint descriptor — Target CDC ECM bulk OUT — EP7 OUT (0x07) */
+    0x07,                           // bLength
+    0x05,                           // bDescriptorType (Endpoint)
+    0x07,                           // bEndpointAddress (OUT/H2D)
+    0x02,                           // bmAttributes (Bulk)
+    0x40, 0x00,                     // wMaxPacketSize 64
+    0x00,                           // bInterval
+
+    /* Endpoint descriptor — Target CDC ECM bulk IN — EP7 IN (0x87) */
+    0x07,                           // bLength
+    0x05,                           // bDescriptorType (Endpoint)
+    0x87,                           // bEndpointAddress (IN/D2H)
+    0x02,                           // bmAttributes (Bulk)
+    0x40, 0x00,                     // wMaxPacketSize 64
+    0x00,                           // bInterval
+#endif /* USB_WORK_MODE_HAS_TARGET_CDC_ECM (inside ACM+ECM block) */
+
 #endif /* USB_WORK_MODE_HAS_HOST_CDC_ECM (inside ACM block) */
 
 #elif USB_WORK_MODE_HAS_HOST_CDC_ECM
@@ -781,10 +861,10 @@ static const uint8_t USBD_RuntimeCombinedEcmBlock[USBD_RUNTIME_COMBINED_ECM_BLOC
     0x09, 0x04, 0x03, 0x00, 0x00, 0x0A, 0x00, 0x00, 0x00,
     /* Interface 3: CDC ECM data, alt 1 active */
     0x09, 0x04, 0x03, 0x01, 0x02, 0x0A, 0x00, 0x00, 0x00,
-    /* EP6 OUT (0x06) bulk: 64 bytes */
-    0x07, 0x05, 0x06, 0x02, 0x40, 0x00, 0x00,
-    /* EP4 IN (0x84) bulk: 64 bytes */
-    0x07, 0x05, 0x84, 0x02, 0x40, 0x00, 0x00,
+    /* EP6 OUT (0x06) bulk: 32 bytes (reduced to fit 512B PMA) */
+    0x07, 0x05, 0x06, 0x02, 0x20, 0x00, 0x00,
+    /* EP4 IN (0x84) bulk: 32 bytes (reduced to fit 512B PMA) */
+    0x07, 0x05, 0x84, 0x02, 0x20, 0x00, 0x00,
 };
 
 typedef char USBD_RuntimeCombinedEcmBlock_SizeCheck[
@@ -821,11 +901,73 @@ static void USBD_BuildRuntimeAcmEcmConfigDescriptor(void)
 
     USBD_RuntimeAcmEcmConfigBuilt = 1u;
 }
+
+/* ====== Target ECM runtime block (for mode 7: ACM+Host ECM+Target ECM) ======
+ * Target ECM uses: EP7 OUT (0x07) + EP7 IN (0x87)  (IF4=comm + IF5=data)
+ * Note: EP7 supports both IN and OUT directions. CH32V20x only has EP0-EP7 (no EP8).
+ * Size: 8(IAD) + 9(IF4) + 23(func) + 9(IF5 alt0) + 9(IF5 alt1) + 7(EP7 OUT) + 7(EP7 IN) = 72B */
+#define USBD_RUNTIME_TARGET_ECM_BLOCK_SIZE 72u
+#define USBD_RUNTIME_ACM_ECM_BRIDGE_CONFIG_DESC_SIZE 226u
+
+static const uint8_t USBD_RuntimeTargetEcmBlock[USBD_RUNTIME_TARGET_ECM_BLOCK_SIZE] = {
+    /* IAD: Target CDC ECM (IF4=comm + IF5=data) */
+    0x08, 0x0B, 0x04, 0x02, 0x02, 0x06, 0x00, 0x00,
+    /* Interface 4: Target CDC ECM communication */
+    0x09, 0x04, 0x04, 0x00, 0x00, 0x02, 0x06, 0x00, 0x00,
+    /* Functional descriptors */
+    0x05, 0x24, 0x00, 0x10, 0x01,
+    0x05, 0x24, 0x06, 0x04, 0x05,   /* Union: control IF4, data IF5 */
+    0x0D, 0x24, 0x0F, 0x05,         /* Ethernet Networking, iMACAddress=5 */
+    0x00, 0x00, 0x00, 0x00,
+    0xEA, 0x05,
+    0x00, 0x00,
+    0x00,
+    /* Interface 5: Target CDC ECM data, alt 0 idle */
+    0x09, 0x04, 0x05, 0x00, 0x00, 0x0A, 0x00, 0x00, 0x00,
+    /* Interface 5: Target CDC ECM data, alt 1 active */
+    0x09, 0x04, 0x05, 0x01, 0x02, 0x0A, 0x00, 0x00, 0x00,
+    /* EP7 OUT (0x07) bulk: 32 bytes (reduced to fit 512B PMA) */
+    0x07, 0x05, 0x07, 0x02, 0x20, 0x00, 0x00,
+    /* EP7 IN (0x87) bulk: 32 bytes (reduced to fit 512B PMA) */
+    0x07, 0x05, 0x87, 0x02, 0x20, 0x00, 0x00,
+};
+
+typedef char USBD_RuntimeTargetEcmBlock_SizeCheck[
+    (sizeof(USBD_RuntimeTargetEcmBlock) == USBD_RUNTIME_TARGET_ECM_BLOCK_SIZE) ? 1 : -1
+];
+
+static uint8_t USBD_RuntimeAcmEcmBridgeConfigDescriptor[USBD_RUNTIME_ACM_ECM_BRIDGE_CONFIG_DESC_SIZE];
+static uint8_t USBD_RuntimeAcmEcmBridgeConfigBuilt;
+
+static void USBD_BuildRuntimeAcmEcmBridgeConfigDescriptor(void)
+{
+    if (USBD_RuntimeAcmEcmBridgeConfigBuilt) {
+        return;
+    }
+    /* Start with the ACM+ECM config descriptor (154B), then append Target ECM block (72B) */
+    USBD_BuildRuntimeAcmEcmConfigDescriptor();
+    memcpy(USBD_RuntimeAcmEcmBridgeConfigDescriptor, USBD_RuntimeAcmEcmConfigDescriptor, USBD_RUNTIME_ACM_ECM_CONFIG_DESC_SIZE);
+    memcpy(&USBD_RuntimeAcmEcmBridgeConfigDescriptor[USBD_RUNTIME_ACM_ECM_CONFIG_DESC_SIZE],
+           USBD_RuntimeTargetEcmBlock, USBD_RUNTIME_TARGET_ECM_BLOCK_SIZE);
+    /* Patch config header: wTotalLength and bNumInterfaces */
+    USBD_RuntimeAcmEcmBridgeConfigDescriptor[2] = (uint8_t)USBD_RUNTIME_ACM_ECM_BRIDGE_CONFIG_DESC_SIZE;
+    USBD_RuntimeAcmEcmBridgeConfigDescriptor[3] = (uint8_t)(USBD_RUNTIME_ACM_ECM_BRIDGE_CONFIG_DESC_SIZE >> 8);
+    USBD_RuntimeAcmEcmBridgeConfigDescriptor[4] = 0x06;  /* bNumInterfaces: ACM(2) + Host ECM(2) + Target ECM(2) */
+
+    USBD_RuntimeAcmEcmBridgeConfigBuilt = 1u;
+}
 #endif
 
 const uint8_t *USBD_GetActiveConfigDescriptorData(uint16_t *len)
 {
 #if USB_WORK_MODE_RUNTIME_PROFILES
+    if (USB_ModeConfig_ActiveModeHasHostCdcAcm() && USB_ModeConfig_ActiveModeHasHostCdcEcm() && USB_ModeConfig_ActiveModeHasTargetCdcEcm()) {
+        USBD_BuildRuntimeAcmEcmBridgeConfigDescriptor();
+        if (len != 0) {
+            *len = USBD_RUNTIME_ACM_ECM_BRIDGE_CONFIG_DESC_SIZE;
+        }
+        return USBD_RuntimeAcmEcmBridgeConfigDescriptor;
+    }
     if (USB_ModeConfig_ActiveModeHasHostCdcAcm() && USB_ModeConfig_ActiveModeHasHostCdcEcm()) {
         USBD_BuildRuntimeAcmEcmConfigDescriptor();
         if (len != 0) {
@@ -928,6 +1070,14 @@ const uint8_t USBD_StringEcmMac[USBD_SIZE_STRING_ECM_MAC] = {
     USB_STRING_DESCRIPTOR_TYPE,
     '0', 0, '2', 0, '0', 0, '0', 0, '0', 0, '0', 0,
     '0', 0, '0', 0, '0', 0, '0', 0, '0', 0, '2', 0
+};
+
+/* Target ECM MAC string descriptor (different from Host ECM MAC) */
+const uint8_t USBD_StringTargetEcmMac[USBD_SIZE_STRING_TARGET_ECM_MAC] = {
+    USBD_SIZE_STRING_TARGET_ECM_MAC,
+    USB_STRING_DESCRIPTOR_TYPE,
+    '0', 0, '2', 0, '0', 0, '0', 0, '0', 0, '0', 0,
+    '0', 0, '0', 0, '0', 0, '0', 0, '0', 0, '3', 0
 };
 
 

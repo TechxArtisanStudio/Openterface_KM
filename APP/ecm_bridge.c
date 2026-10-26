@@ -8,6 +8,13 @@
 #include "ch32v20x_usbfs_device.h"
 #include "usb_lib.h"
 #include "usb_conf.h"
+
+/* External systick_ms from RGB.c (1ms timer tick) */
+extern volatile uint32_t systick_ms;
+
+/* External USBD endpoint busy flags from usb_endp.c */
+extern uint8_t USBD_Endp7_Busy;
+
 #include "usb_desc.h"
 #include "usb_prop.h"
 #include "usb_pwr.h"
@@ -19,10 +26,10 @@
 #define ECM_BRIDGE_MTU_FRAME_SIZE       1514u
 #define ECM_BRIDGE_QUEUE_DEPTH          2u
 #define ECM_BRIDGE_USBFS_PACKET_SIZE    64u
-/* ECM bridge uses 64-byte bulk packets on both USBD and USBFS sides.
+/* ECM bridge uses 32-byte bulk packets on USBD side (reduced to fit 512B PMA).
    Note: DEF_USBD_MAX_PACK_SIZE is 16 (legacy ACM), but the runtime ECM
-   descriptor advertises 64-byte max packet for EP5/EP3 bulk endpoints. */
-#define ECM_BRIDGE_USBD_PACKET_SIZE     64u
+   descriptor advertises 32-byte max packet for EP4/EP6 bulk endpoints. */
+#define ECM_BRIDGE_USBD_PACKET_SIZE     32u
 #define ECM_BRIDGE_TARGET_COMM_IF       4u
 /* In combined ACM+ECM mode with USBFS (HID + ACM + ECM):
  *   IF0-IF1: HID (keyboard + mouse)
@@ -137,6 +144,7 @@ static uint8_t g_target_notify_state;
 static uint16_t g_host_tx_offset;
 static uint8_t g_host_zlp_pending;
 static uint8_t g_host_notify_state;
+static uint32_t g_host_notify_last_send_ms;  /* Timestamp of last notification send */
 
 /* Diagnostic variables moved to after #endif (always defined, see bottom of file) */
 
@@ -805,11 +813,9 @@ static uint8_t handle_dhcp_packet(const uint8_t *frame, uint16_t frame_len)
     memcpy(&reply[off], public_dns, 4);
     off += 4;
 
-    /* Router (default gateway) - use firmware device IP */
-    reply[off++] = ECM_DHCP_OPT_ROUTER;
-    reply[off++] = 0x04;
-    memcpy(&reply[off], ecm_dev_ip, 4);
-    off += 4;
+    /* Router (default gateway) - intentionally omitted to avoid interfering
+       with the host's other network interfaces (e.g., Wi-Fi). For a point-to-point
+       USB Ethernet link, no default gateway is needed. */
 
     /* End option */
     reply[off++] = ECM_DHCP_OPT_END;
@@ -1319,11 +1325,9 @@ static uint8_t handle_target_dhcp_packet(const uint8_t *frame, uint16_t frame_le
     memcpy(&reply[off], public_dns, 4);
     off += 4;
 
-    /* Router (default gateway) - use firmware target device IP */
-    reply[off++] = ECM_DHCP_OPT_ROUTER;
-    reply[off++] = 0x04;
-    memcpy(&reply[off], ecm_target_dev_ip, 4);
-    off += 4;
+    /* Router (default gateway) - intentionally omitted to avoid interfering
+       with the target's other network interfaces. For a point-to-point
+       USB Ethernet link, no default gateway is needed. */
 
     /* End option */
     reply[off++] = ECM_DHCP_OPT_END;
@@ -1888,8 +1892,16 @@ static void poll_host_notification(void)
         return;
     }
 
+    /* Enforce minimum 50ms delay between consecutive notifications so the
+       host has time to process each one before the next arrives. */
+    uint32_t now = systick_ms;
+    if (now - g_host_notify_last_send_ms < 50) {
+        return;
+    }
+
     len = make_notification(g_host_notify_state, ECM_BRIDGE_HOST_COMM_IF, packet);
     if (len > 0 && USBD_ENDPx_DataUp(ECM_USBD_INT_ENDP, packet, len) == USB_SUCCESS) {
+        g_host_notify_last_send_ms = now;
         g_host_notify_state++;
         if (g_host_notify_state > 3) {
             g_host_notify_state = 0;
@@ -1924,17 +1936,26 @@ static void poll_target_tx(void)
         g_target_garp_sent = 1;
     }
 
-    /* Guard against EP7 being in use — poll_host_tx() also drives EP7.
-     * Without this busy check, poll_target_tx() and poll_host_tx() can
-     * overwrite each other's data or send out-of-order fragments. */
-    if (USBFS_Endp_Busy[DEF_UEP7] != 0) {
-        return;
-    }
-
     frame = queue_peek(&g_host_to_target);
     if (frame == 0) {
         g_target_tx_offset = 0;
         g_target_zlp_pending = 0;
+        return;
+    }
+
+    /* Only attempt TX after the Target has activated the CDC ECM data interface
+       via SET_INTERFACE(IF5, alt=1). Without this, USBD_ENDPx_DataUp returns
+       SUCCESS but the endpoint never responds to host IN tokens. */
+    if (!g_target_ecm_data_if_active) {
+        return;
+    }
+
+#ifdef USBFS_DEVICE
+    /* USBFS stack: use USBFS_Endp_DataUp for EP7 */
+    /* Guard against EP7 being in use — poll_host_tx() also drives EP7.
+     * Without this busy check, poll_target_tx() and poll_host_tx() can
+     * overwrite each other's data or send out-of-order fragments. */
+    if (USBFS_Endp_Busy[DEF_UEP7] != 0) {
         return;
     }
 
@@ -1964,6 +1985,39 @@ static void poll_target_tx(void)
             }
         }
     }
+#else
+    /* USBLIB stack: use USBD_ENDPx_DataUp for ENDP7 */
+    if (USBD_Endp7_Busy != 0) {
+        return;
+    }
+
+    if (g_target_zlp_pending) {
+        if (USBD_ENDPx_DataUp(ENDP7, frame->data, 0) == USB_SUCCESS) {
+            g_target_zlp_pending = 0;
+            g_target_tx_offset = 0;
+            queue_pop(&g_host_to_target);
+        }
+        return;
+    }
+
+    len = (uint16_t)(frame->len - g_target_tx_offset);
+    if (len > 64) {
+        len = 64;
+    }
+
+    if (USBD_ENDPx_DataUp(ENDP7, &frame->data[g_target_tx_offset], len) == USB_SUCCESS) {
+        g_target_tx_offset = (uint16_t)(g_target_tx_offset + len);
+        if (g_target_tx_offset >= frame->len) {
+            if (len == 64) {
+                g_target_zlp_pending = 1;
+            }
+            else {
+                g_target_tx_offset = 0;
+                queue_pop(&g_host_to_target);
+            }
+        }
+    }
+#endif
 }
 #endif
 
@@ -2135,24 +2189,45 @@ void ECM_Bridge_UpdateIPConfig(void)
     ECM_IPConfig_GetTargetHostIP(ecm_target_host_ip);
     ECM_IPConfig_GetTargetDevIP(ecm_target_dev_ip);
 
-    /* Reset GARP sent flags so that GARP packets with new IPs will be
-       sent when the interface is activated */
-    g_host_garp_sent = 0;
+    USB_DEBUG("ECM IP config updated:\r\n");
+    USB_DEBUG("  Host IP: %d.%d.%d.%d\r\n", ecm_host_ip[0], ecm_host_ip[1], ecm_host_ip[2], ecm_host_ip[3]);
+    USB_DEBUG("  Dev IP: %d.%d.%d.%d\r\n", ecm_dev_ip[0], ecm_dev_ip[1], ecm_dev_ip[2], ecm_dev_ip[3]);
+
+    /* Step 1: Send GARP (Gratuitous ARP) to update host's ARP cache immediately.
+       This tells the host "I'm now at this new IP address". */
+    if (g_host_ecm_data_if_active) {
+        USB_DEBUG("Sending GARP for new IP...\r\n");
+        uint8_t garp[42];
+        memset(garp, 0xFF, 6);  // Broadcast destination
+        memcpy(&garp[6], ECM_DEV_MAC, 6);  // Source MAC
+        garp[12] = 0x08; garp[13] = 0x06;  // EtherType: ARP
+        garp[14] = 0x00; garp[15] = 0x01;  // Hardware type: Ethernet
+        garp[16] = 0x08; garp[17] = 0x00;  // Protocol type: IPv4
+        garp[18] = 6;  garp[19] = 4;        // Hardware/protocol addr len
+        garp[20] = 0x00; garp[21] = 0x02;  // Opcode: Reply (GARP uses reply)
+        memcpy(&garp[22], ECM_DEV_MAC, 6);  // Sender MAC
+        memcpy(&garp[28], ecm_dev_ip, 4);   // Sender IP (new IP)
+        memcpy(&garp[32], ECM_DEV_MAC, 6);  // Target MAC (same as sender for GARP)
+        memcpy(&garp[38], ecm_dev_ip, 4);   // Target IP (same as sender for GARP)
+        queue_push(&g_host_to_target, garp, sizeof(garp));
+        g_host_garp_sent = 1;
+    } else {
+        /* If interface not active yet, reset flag so GARP will be sent when it activates */
+        g_host_garp_sent = 0;
+    }
+
 #if USB_WORK_MODE_COMPILES_TARGET_CDC_ECM
     g_target_garp_sent = 0;
 #endif
 
-    /* Trigger link state change to force host to re-negotiate DHCP.
-       Set notification state to trigger a link down/up sequence:
-       - First notification (state 1): link down
-       - Second notification (state 2): link up with speed change
-       This causes the host to detect a link change and renew DHCP. */
-    g_host_notify_state = 1;
+    /* Step 2: Trigger link state change to force host to re-negotiate DHCP.
+       Send link down → link up sequence. This causes the host to detect a
+       link change and automatically run DHCP to get the new IP. */
+    USB_DEBUG("Triggering link state change (down → up)...\r\n");
+    g_host_notify_state = 1;  // Will send: link down, then link up, then speed change
 #if USB_WORK_MODE_COMPILES_TARGET_CDC_ECM
     g_target_notify_state = 1;
 #endif
-
-    USB_DEBUG("ECM IP config updated, triggering link state change\r\n");
 }
 
 void ECM_Bridge_SendRawFrame(const uint8_t *data, uint16_t len)

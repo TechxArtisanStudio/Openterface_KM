@@ -31,7 +31,10 @@
 #define DEF_USBD_MAX_PACK_SIZE      16
        
 #define USBD_SIZE_DEVICE_DESC        18
-#if USB_WORK_MODE_HAS_HOST_CDC_ACM && USB_WORK_MODE_HAS_HOST_CDC_ECM
+#if USB_WORK_MODE_HAS_HOST_CDC_ACM && USB_WORK_MODE_HAS_HOST_CDC_ECM && USB_WORK_MODE_HAS_TARGET_CDC_ECM
+/* Combined ACM+Host ECM+Target ECM: 9(cfg) + 66(ACM) + 79(Host ECM) + 72(Target ECM) = 226 */
+#define USBD_SIZE_CONFIG_DESC        226
+#elif USB_WORK_MODE_HAS_HOST_CDC_ACM && USB_WORK_MODE_HAS_HOST_CDC_ECM
 /* Combined ACM+ECM: 9(cfg) + 66(ACM) + 79(ECM) = 154 */
 #define USBD_SIZE_CONFIG_DESC        154
 #elif USB_WORK_MODE_HAS_HOST_CDC_ECM && USB_WORK_MODE_HAS_HOST_UAC
@@ -55,6 +58,7 @@
 #define USBD_SIZE_STRING_SPEAKER     30
 #define USBD_SIZE_STRING_MICROPHONE  28
 #define USBD_SIZE_STRING_ECM_MAC     26
+#define USBD_SIZE_STRING_TARGET_ECM_MAC 26
 
 extern const uint8_t USBD_DeviceDescriptor[USBD_SIZE_DEVICE_DESC];
 extern const uint8_t USBD_ConfigDescriptor[USBD_SIZE_CONFIG_DESC];
@@ -66,6 +70,7 @@ extern const uint8_t USBD_StringAudioFunction[USBD_SIZE_STRING_AUDIO_FUNC];
 extern const uint8_t USBD_StringSpeaker[USBD_SIZE_STRING_SPEAKER];
 extern const uint8_t USBD_StringMicrophone[USBD_SIZE_STRING_MICROPHONE];
 extern const uint8_t USBD_StringEcmMac[USBD_SIZE_STRING_ECM_MAC];
+extern const uint8_t USBD_StringTargetEcmMac[USBD_SIZE_STRING_TARGET_ECM_MAC];
 const uint8_t *USBD_GetActiveConfigDescriptorData(uint16_t *len);
 uint8_t USBD_GetActiveConfigAttributes(void);
 
