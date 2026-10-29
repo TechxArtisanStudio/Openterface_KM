@@ -55,8 +55,8 @@ const uint8_t MyCfgDescr[ ] =
     0x12, 0x01,                                             // wTotalLength: 274 = 0x0112 (100 HID + 9 cfg + 165 UAC)
     0x07,                                                   // bNumInterfaces: 4 HID + 1 AC + 2 AS = 7
 #elif USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
-    0xC5, 0x00,                                             // wTotalLength: 197 = 0x00C5 (50 HID + 9 cfg + 66 ACM + 72 ECM)
-    0x06,                                                   // bNumInterfaces: 2 HID + 2 ACM + 2 ECM = 6
+    0x0D, 0x01,                                             // wTotalLength: 269 = 0x010D (9 cfg + 50 HID + 66 ACM + 72 Host ECM + 72 Target ECM)
+    0x08,                                                   // bNumInterfaces: 2 HID + 2 ACM + 2 Host ECM + 2 Target ECM = 8
 #elif USB_WORK_MODE_HAS_TARGET_CDC_ACM
     0xAF, 0x00,                                             // wTotalLength: 175 = 0x00AF (100 HID + 9 cfg + 66 CDC ACM)
     0x06,                                                   // bNumInterfaces: 4 HID + 2 CDC ACM = 6
@@ -190,8 +190,9 @@ const uint8_t MyCfgDescr[ ] =
     /* Combined ACM+ECM mode: Only 2 HID interfaces (keyboard + mouse) to save endpoints
      * IF0: Keyboard (EP1 IN)
      * IF1: Mouse (EP2 IN)
-     * IF2-IF3: CDC ACM (EP5 INT, EP6 OUT, EP7 IN)
+     * IF2-IF3: CDC ACM (EP5 INT, EP6 OUT, EP6 IN - bidirectional)
      * IF4-IF5: CDC ECM (EP3 OUT, EP4 IN - no interrupt endpoint)
+     * IF6-IF7: Target CDC ECM (EP7 OUT, EP7 IN - bidirectional, mode 7 only)
      */
 
     /* IAD: CDC ACM (IF2=comm + IF3=data) */
@@ -248,10 +249,10 @@ const uint8_t MyCfgDescr[ ] =
     0x40, 0x00,                                             // wMaxPacketSize
     0x00,                                                   // bInterval
 
-    /* Endpoint Descriptor: CDC data IN EP7 */
+    /* Endpoint Descriptor: CDC data IN EP6 (bidirectional EP6) */
     0x07,                                                   // bLength
     0x05,                                                   // bDescriptorType
-    0x87,                                                   // bEndpointAddress: EP7 IN
+    0x86,                                                   // bEndpointAddress: EP6 IN (bidirectional with EP6 OUT)
     0x02,                                                   // bmAttributes: Bulk
     0x40, 0x00,                                             // wMaxPacketSize
     0x00,                                                   // bInterval
@@ -317,7 +318,7 @@ const uint8_t MyCfgDescr[ ] =
     0x05,                                                   // bDescriptorType
     0x03,                                                   // bEndpointAddress: EP3 OUT (reusing absolute mouse EP)
     0x02,                                                   // bmAttributes: Bulk
-    0x40, 0x00,                                             // wMaxPacketSize
+    0x20, 0x00,                                             // wMaxPacketSize: 32B (matches PMA buffer)
     0x00,                                                   // bInterval
 
     /* Endpoint Descriptor: CDC ECM data IN EP4 */
@@ -325,8 +326,78 @@ const uint8_t MyCfgDescr[ ] =
     0x05,                                                   // bDescriptorType
     0x84,                                                   // bEndpointAddress: EP4 IN (reusing media EP)
     0x02,                                                   // bmAttributes: Bulk
-    0x40, 0x00,                                             // wMaxPacketSize
+    0x20, 0x00,                                             // wMaxPacketSize: 32B (matches PMA buffer)
     0x00,                                                   // bInterval
+
+#if USB_WORK_MODE_HAS_TARGET_CDC_ECM
+    /* IAD: Target CDC ECM (IF6=comm + IF7=data) */
+    0x08,                                                   // bLength
+    0x0B,                                                   // bDescriptorType (IAD)
+    0x06,                                                   // bFirstInterface
+    0x02,                                                   // bInterfaceCount
+    0x02,                                                   // bFunctionClass: Communications
+    0x06,                                                   // bFunctionSubClass: Ethernet Networking Control Model
+    0x00,                                                   // bFunctionProtocol
+    0x00,                                                   // iFunction
+
+    /* Interface Descriptor: Target CDC ECM Communication (IF6) */
+    0x09,                                                   // bLength
+    0x04,                                                   // bDescriptorType
+    0x06,                                                   // bInterfaceNumber
+    0x00,                                                   // bAlternateSetting
+    0x00,                                                   // bNumEndpoints (no interrupt endpoint to save endpoints)
+    0x02,                                                   // bInterfaceClass: Communications
+    0x06,                                                   // bInterfaceSubClass: Ethernet Networking Control Model
+    0x00,                                                   // bInterfaceProtocol
+    0x00,                                                   // iInterface
+
+    /* CDC ECM Functional Descriptors */
+    0x05, 0x24, 0x00, 0x10, 0x01,                           // Header, CDC 1.10
+    0x05, 0x24, 0x06, 0x06, 0x07,                           // Union: control IF6, data IF7
+    0x0D, 0x24, 0x0F, 0x05,                                 // Ethernet Networking, iMACAddress=5 (Target MAC)
+    0x00, 0x00, 0x00, 0x00,                                 // bmEthernetStatistics
+    0xEA, 0x05,                                             // wMaxSegmentSize: 1514
+    0x00, 0x00,                                             // wNumberMCFilters: none
+    0x00,                                                   // bNumberPowerFilters
+
+    /* Interface Descriptor: Target CDC ECM Data (IF7 alt 0, idle) */
+    0x09,                                                   // bLength
+    0x04,                                                   // bDescriptorType
+    0x07,                                                   // bInterfaceNumber
+    0x00,                                                   // bAlternateSetting
+    0x00,                                                   // bNumEndpoints
+    0x0A,                                                   // bInterfaceClass: Data
+    0x00,                                                   // bInterfaceSubClass
+    0x00,                                                   // bInterfaceProtocol
+    0x00,                                                   // iInterface
+
+    /* Interface Descriptor: Target CDC ECM Data (IF7 alt 1, active) */
+    0x09,                                                   // bLength
+    0x04,                                                   // bDescriptorType
+    0x07,                                                   // bInterfaceNumber
+    0x01,                                                   // bAlternateSetting
+    0x02,                                                   // bNumEndpoints
+    0x0A,                                                   // bInterfaceClass: Data
+    0x00,                                                   // bInterfaceSubClass
+    0x00,                                                   // bInterfaceProtocol
+    0x00,                                                   // iInterface
+
+    /* Endpoint Descriptor: Target CDC ECM data OUT EP7 (0x07) */
+    0x07,                                                   // bLength
+    0x05,                                                   // bDescriptorType
+    0x07,                                                   // bEndpointAddress: EP7 OUT
+    0x02,                                                   // bmAttributes: Bulk
+    0x20, 0x00,                                             // wMaxPacketSize: 32B (matches PMA buffer)
+    0x00,                                                   // bInterval
+
+    /* Endpoint Descriptor: Target CDC ECM data IN EP7 (0x87) - bidirectional EP7 */
+    0x07,                                                   // bLength
+    0x05,                                                   // bDescriptorType
+    0x87,                                                   // bEndpointAddress: EP7 IN
+    0x02,                                                   // bmAttributes: Bulk
+    0x20, 0x00,                                             // wMaxPacketSize: 32B (matches PMA buffer)
+    0x00,                                                   // bInterval
+#endif /* USB_WORK_MODE_HAS_TARGET_CDC_ECM */
 
 #elif USB_WORK_MODE_HAS_TARGET_CDC_ACM
     /* IAD: CDC ACM (IF4=comm + IF5=data) */
@@ -679,7 +750,7 @@ const uint8_t MyCfgDescr[ ] =
 #if USB_WORK_MODE_HAS_TARGET_UAC
 typedef char MyCfgDescr_SizeCheck[(sizeof(MyCfgDescr) == 274) ? 1 : -1];
 #elif USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
-typedef char MyCfgDescr_SizeCheck[(sizeof(MyCfgDescr) == 197) ? 1 : -1];
+typedef char MyCfgDescr_SizeCheck[(sizeof(MyCfgDescr) == 269) ? 1 : -1];
 #elif USB_WORK_MODE_HAS_TARGET_CDC_ACM
 typedef char MyCfgDescr_SizeCheck[(sizeof(MyCfgDescr) == 175) ? 1 : -1];
 #elif USB_WORK_MODE_HAS_TARGET_CDC_ECM
@@ -733,12 +804,38 @@ static const uint8_t USBFS_RuntimeEcmBlock[USBFS_RUNTIME_ECM_BLOCK_SIZE] = {
     0x09, 0x04, 0x04, 0x00, 0x01, 0x02, 0x06, 0x00, 0x00,
     0x05, 0x24, 0x00, 0x10, 0x01,
     0x05, 0x24, 0x06, 0x04, 0x05,
-    0x0D, 0x24, 0x0F, 0x04, 0x00, 0x00, 0x00, 0x00, 0xEA, 0x05, 0x00, 0x00, 0x00,
+    0x0D, 0x24, 0x0F, 0x05, 0x00, 0x00, 0x00, 0x00, 0xEA, 0x05, 0x00, 0x00, 0x00,
     0x07, 0x05, 0x85, 0x03, 0x10, 0x00, 0x10,
     0x09, 0x04, 0x05, 0x00, 0x00, 0x0A, 0x00, 0x00, 0x00,
     0x09, 0x04, 0x05, 0x01, 0x02, 0x0A, 0x00, 0x00, 0x00,
-    0x07, 0x05, 0x06, 0x02, 0x40, 0x00, 0x00,
-    0x07, 0x05, 0x87, 0x02, 0x40, 0x00, 0x00,
+    0x07, 0x05, 0x06, 0x02, 0x20, 0x00, 0x00,
+    0x07, 0x05, 0x87, 0x02, 0x20, 0x00, 0x00,
+};
+
+/* Mode 7 ECM block: Target ECM uses EP5 IN (notification) + EP7 bidirectional (data).
+ * Structure: IAD + Control IF + functional descriptors + EP5 IN + Data IF alt0/alt1 + EP7 OUT/IN */
+#define USBFS_RUNTIME_ECM_MODE7_BLOCK_SIZE  (8 + 9 + 5 + 5 + 13 + 7 + 9 + 9 + 7 + 7)
+static const uint8_t USBFS_RuntimeEcmBlock_Mode7[USBFS_RUNTIME_ECM_MODE7_BLOCK_SIZE] = {
+    /* IAD: 8 bytes */
+    0x08, 0x0B, 0x04, 0x02, 0x02, 0x06, 0x00, 0x00,
+    /* Control Interface: 9 bytes, 1 endpoint */
+    0x09, 0x04, 0x04, 0x00, 0x01, 0x02, 0x06, 0x00, 0x00,
+    /* Header Functional Descriptor: 5 bytes */
+    0x05, 0x24, 0x00, 0x10, 0x01,
+    /* Union Functional Descriptor: 5 bytes */
+    0x05, 0x24, 0x06, 0x04, 0x05,
+    /* Ethernet Networking Functional Descriptor: 13 bytes, iMACAddress=5 (Target MAC) */
+    0x0D, 0x24, 0x0F, 0x05, 0x00, 0x00, 0x00, 0x00, 0xEA, 0x05, 0x00, 0x00, 0x00,
+    /* EP5 IN: interrupt notification, 16 bytes, 16 ms */
+    0x07, 0x05, 0x85, 0x03, 0x10, 0x00, 0x10,
+    /* Data Interface Alt 0 (no endpoints): 9 bytes */
+    0x09, 0x04, 0x05, 0x00, 0x00, 0x0A, 0x00, 0x00, 0x00,
+    /* Data Interface Alt 1 (EP7 OUT + EP7 IN): 9 bytes */
+    0x09, 0x04, 0x05, 0x01, 0x02, 0x0A, 0x00, 0x00, 0x00,
+    /* EP7 OUT: 7 bytes, 32 bytes max packet */
+    0x07, 0x05, 0x07, 0x02, 0x20, 0x00, 0x00,
+    /* EP7 IN: 7 bytes, 32 bytes max packet */
+    0x07, 0x05, 0x87, 0x02, 0x20, 0x00, 0x00,
 };
 
 static const uint8_t USBFS_RuntimeUacBlock[USBFS_RUNTIME_UAC_BLOCK_SIZE] = {
@@ -791,10 +888,6 @@ static void USBFS_BuildRuntimeConfigDescriptor(void)
     uint8_t mode = USB_ModeConfig_GetActiveMode();
     uint16_t total_len = USBFS_RUNTIME_HID_CONFIG_DESC_SIZE;
     uint8_t num_interfaces = 4u;
-
-    if (USBFS_RuntimeConfigMode == mode && USBFS_RuntimeConfigLen != 0u) {
-        return;
-    }
 
     memcpy(USBFS_RuntimeConfigDescriptor, USBFS_RuntimeHidConfigBase, USBFS_RUNTIME_HID_CONFIG_DESC_SIZE);
     if (USB_ModeConfig_ModeHasTargetUac(mode)) {
@@ -857,39 +950,65 @@ static void USBFS_BuildRuntimeConfigDescriptor(void)
         }
     }
     else {
+        // USBFS descriptor for Target side (Fedora): HID + Target ECM only
+        // NOTE: Host ACM/ECM are on USBD (Mac side), NOT here
         if (USB_ModeConfig_ModeHasTargetCdcAcm(mode)) {
             memcpy(&USBFS_RuntimeConfigDescriptor[total_len], USBFS_RuntimeAcmBlock, USBFS_RUNTIME_ACM_BLOCK_SIZE);
             total_len = (uint16_t)(total_len + USBFS_RUNTIME_ACM_BLOCK_SIZE);
             num_interfaces = 6u;
         }
         if (USB_ModeConfig_ModeHasTargetCdcEcm(mode)) {
-            memcpy(&USBFS_RuntimeConfigDescriptor[total_len], USBFS_RuntimeEcmBlock, USBFS_RUNTIME_ECM_BLOCK_SIZE);
-            total_len = (uint16_t)(total_len + USBFS_RUNTIME_ECM_BLOCK_SIZE);
+            uint16_t ecm_block_start = total_len;
+            /* Only combined Host ACM+ECM modes (6/7) put the Target ECM on EP5 + EP7.
+             * Other ECM-bridge modes keep the classic EP5 + EP6 OUT + EP7 IN layout. */
+            if (USB_ModeConfig_ModeHasHostCdcAcm(mode) && USB_ModeConfig_ModeHasHostCdcEcm(mode)) {
+                /* Mode 6/7: Target ECM uses EP5 notification + EP7 bidirectional */
+                memcpy(&USBFS_RuntimeConfigDescriptor[total_len], USBFS_RuntimeEcmBlock_Mode7, USBFS_RUNTIME_ECM_MODE7_BLOCK_SIZE);
+                total_len = (uint16_t)(total_len + USBFS_RUNTIME_ECM_MODE7_BLOCK_SIZE);
+            } else {
+                /* ECM-only / UAC+ECM: Target ECM uses EP5 INT + EP6 OUT + EP7 IN */
+                memcpy(&USBFS_RuntimeConfigDescriptor[total_len], USBFS_RuntimeEcmBlock, USBFS_RUNTIME_ECM_BLOCK_SIZE);
+                total_len = (uint16_t)(total_len + USBFS_RUNTIME_ECM_BLOCK_SIZE);
+            }
 
-            // Adjust interface and endpoint numbers in ECM block if ACM block was also added
             if (USB_ModeConfig_ModeHasTargetCdcAcm(mode)) {
-                // ECM block starts at offset total_len - USBFS_RUNTIME_ECM_BLOCK_SIZE
-                uint16_t ecm_block_start = total_len - USBFS_RUNTIME_ECM_BLOCK_SIZE;
-                // Patch ECM block interface numbers: +2 (to start at interface 6 instead of 4)
-                for (uint16_t i = 0; i < USBFS_RUNTIME_ECM_BLOCK_SIZE; i += 9) {
-                    // Interface descriptor is 9 bytes: 0x09, 0x04, interface_num, ...
-                    if (i + 2 < USBFS_RUNTIME_ECM_BLOCK_SIZE) {
+                /* ACM also present: shift ECM interface numbers +2 (IF4→IF6, IF5→IF7) */
+                uint16_t ecm_block_size = (USB_ModeConfig_ModeHasHostCdcAcm(mode) &&
+                                           USB_ModeConfig_ModeHasHostCdcEcm(mode))
+                                              ? USBFS_RUNTIME_ECM_MODE7_BLOCK_SIZE
+                                              : USBFS_RUNTIME_ECM_BLOCK_SIZE;
+                for (uint16_t i = 0; i < ecm_block_size; i += 9) {
+                    if (i + 2 < ecm_block_size) {
                         USBFS_RuntimeConfigDescriptor[ecm_block_start + i + 2] += 2;
                     }
                 }
-                // Patch ECM block endpoint addresses: +2 (to start at endpoint 7 instead of 5)
-                // ACM uses endpoints 5-6, so ECM should start at 7
-                for (uint16_t i = 0; i < USBFS_RUNTIME_ECM_BLOCK_SIZE - 2; i++) {
-                    if (USBFS_RuntimeConfigDescriptor[ecm_block_start + i] == 0x07 &&
-                        USBFS_RuntimeConfigDescriptor[ecm_block_start + i + 1] == 0x05) {
-                        // This is an endpoint descriptor, patch the address
-                        uint8_t addr = USBFS_RuntimeConfigDescriptor[ecm_block_start + i + 2];
-                        uint8_t ep_num = addr & 0x0F;
-                        uint8_t direction = addr & 0x80;
-                        USBFS_RuntimeConfigDescriptor[ecm_block_start + i + 2] = direction | (ep_num + 2);
+                /* Shift endpoint numbers +2 (EP5→EP7, EP6→EP8, EP7→EP9)
+                 * Only needed for non-mode7 ECM block; Mode7 block already has correct EP7 addresses */
+                if (!(USB_ModeConfig_ModeHasHostCdcAcm(mode) && USB_ModeConfig_ModeHasHostCdcEcm(mode))) {
+                    for (uint16_t i = 0; i < USBFS_RUNTIME_ECM_BLOCK_SIZE - 2; i++) {
+                        if (USBFS_RuntimeConfigDescriptor[ecm_block_start + i] == 0x07 &&
+                            USBFS_RuntimeConfigDescriptor[ecm_block_start + i + 1] == 0x05) {
+                            uint8_t addr = USBFS_RuntimeConfigDescriptor[ecm_block_start + i + 2];
+                            uint8_t ep_num = addr & 0x0F;
+                            uint8_t direction = addr & 0x80;
+                            USBFS_RuntimeConfigDescriptor[ecm_block_start + i + 2] = direction | (ep_num + 2);
+                        }
                     }
                 }
+                // Patch Union Functional Descriptor
+                if (ecm_block_start + 26 < USBFS_RUNTIME_MAX_CONFIG_DESC_SIZE) {
+                    USBFS_RuntimeConfigDescriptor[ecm_block_start + 25] += 2;
+                    USBFS_RuntimeConfigDescriptor[ecm_block_start + 26] += 2;
+                }
+                // Patch IAD
+                if (ecm_block_start + 2 < USBFS_RUNTIME_MAX_CONFIG_DESC_SIZE) {
+                    USBFS_RuntimeConfigDescriptor[ecm_block_start + 2] += 2;
+                }
                 num_interfaces = 8u;
+            }
+            else {
+                // Target ECM only (no Target ACM): IF4-IF5
+                num_interfaces = 6u;
             }
         }
     }
@@ -897,6 +1016,7 @@ static void USBFS_BuildRuntimeConfigDescriptor(void)
     USBFS_RuntimeConfigDescriptor[2] = (uint8_t)total_len;
     USBFS_RuntimeConfigDescriptor[3] = (uint8_t)(total_len >> 8);
     USBFS_RuntimeConfigDescriptor[4] = num_interfaces;
+
     USBFS_RuntimeConfigMode = mode;
     USBFS_RuntimeConfigLen = total_len;
 }
@@ -1284,4 +1404,15 @@ const uint8_t MyEcmMacInfo[ ] =
     0x03,
     '0', 0, '2', 0, '0', 0, '0', 0, '0', 0, '0', 0,
     '0', 0, '0', 0, '0', 0, '0', 0, '3', 0, '0', 0
+};
+
+/* Target CDC ECM MAC address string: ASCII hex, no separators.
+ * Different from Host ECM MAC (02:00:00:00:00:30) to avoid confusion when both are present (mode 7).
+ * Target MAC: 02:00:00:00:00:31 */
+const uint8_t MyTargetEcmMacInfo[ ] =
+{
+    0x1A,
+    0x03,
+    '0', 0, '2', 0, '0', 0, '0', 0, '0', 0, '0', 0,
+    '0', 0, '0', 0, '0', 0, '0', 0, '3', 0, '1', 0
 };

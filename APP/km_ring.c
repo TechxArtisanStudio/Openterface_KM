@@ -103,6 +103,12 @@ bool Queue_Pop_Media(Media_Report_t *out) {
 
 /* Try to send all queued packets until the endpoint is busy or queue is empty */
 void USB_SendFromQueues(void) {
+    /* The target side exposes four independent HID interfaces, each with its
+     * own endpoint and no Report IDs: EP1 keyboard, EP2 relative mouse,
+     * EP3 absolute mouse/stylus, EP4 media keys. Reports must be sent to
+     * their own endpoint verbatim — prefixing a Report ID breaks the host
+     * parser because the descriptors declare none. */
+
     while (kb_queue.head != kb_queue.tail && USBFS_Endp_Busy[DEF_UEP1] == 0) {
         KB_Report_t *pkt = &kb_queue.buf[kb_queue.head];
         if (USBFS_Endp_DataUp(DEF_UEP1, pkt->data, sizeof(pkt->data), DEF_UEP_CPY_LOAD) == READY)
@@ -178,7 +184,15 @@ void USB_SendFromQueues(void) {
     }
 }
 
-/* ====== Debug ring buffer (sends via USBFS EP2 mouse endpoint) ====== */
+/* ====== Debug ring buffer (disabled — EP2 no longer available for HID) ====== */
+
+/* Debug ring buffer is disabled because EP2 is now used for CDC endpoints.
+ * To re-enable debug output, either:
+ *   1. Add a vendor-defined Report ID (e.g., 0xFF) to the combined HID report descriptor
+ *      and send debug reports via EP1 with that Report ID.
+ *   2. Use a separate debug interface/endpoint.
+ * For now, USB_DEBUG() and USB_DEBUG_Poll() are no-ops.
+ */
 
 static struct {
     char buf[USB_DEBUG_RING_SIZE];
@@ -192,96 +206,17 @@ static struct {
 
 /* Called from USB_DEBUG() — adds string to ring buffer (caller holds lock). */
 static void debug_ring_push_str(const char *s) {
-    while (*s && (uint16_t)(g_debug_ring.tail + 1) % USB_DEBUG_RING_SIZE != g_debug_ring.head) {
-        g_debug_ring.buf[g_debug_ring.tail] = *s++;
-        g_debug_ring.tail = (uint16_t)(g_debug_ring.tail + 1) % USB_DEBUG_RING_SIZE;
-    }
+    (void)s;  // Unused - debug disabled
 }
 
-/* Call USB_DEBUG(fmt, ...) to send debug strings over USBFS EP2.
- * Each call pushes a null-terminated string into a ring buffer.
- * USB_DEBUG_Poll() in the main loop drains 2 chars at a time via EP2. */
-void USB_DEBUG(const char *fmt, ...) {
-    va_list ap;
-    char numbuf[32];
-
-    va_start(ap, fmt);
-    while (*fmt) {
-        if (*fmt != '%') {
-            debug_ring_push_str(fmt);
-            fmt++;
-            continue;
-        }
-        fmt++;
-        switch (*fmt) {
-        case 's': debug_ring_push_str(va_arg(ap, const char *)); break;
-        case 'd': {
-            int v = va_arg(ap, int);
-            if (v < 0) { debug_ring_push_str("-"); v = -v; }
-            char *p = numbuf + sizeof(numbuf) - 1; *p = 0;
-            do { p--; *p = (char)('0' + (v % 10)); v /= 10; } while (v > 0);
-            debug_ring_push_str(p);
-            break;
-        }
-        case 'u': {
-            unsigned int v = va_arg(ap, unsigned int);
-            char *p = numbuf + sizeof(numbuf) - 1; *p = 0;
-            do { p--; *p = (char)('0' + (v % 10)); v /= 10; } while (v > 0);
-            debug_ring_push_str(p);
-            break;
-        }
-        case 'x': case 'X': {
-            unsigned int v = va_arg(ap, unsigned int);
-            char *p = numbuf + sizeof(numbuf) - 1; *p = 0;
-            do { p--; *p = "0123456789abcdef"[v & 0xf]; v >>= 4; } while (v > 0);
-            debug_ring_push_str(p);
-            break;
-        }
-        case 'l': fmt++; if (*fmt == 'x' || *fmt == 'X') {
-            unsigned long v = va_arg(ap, unsigned long);
-            char *p = numbuf + sizeof(numbuf) - 1; *p = 0;
-            do { p--; *p = "0123456789abcdef"[v & 0xf]; v >>= 4; } while (v > 0);
-            debug_ring_push_str(p);
-        } break;
-        case 'p': {
-            unsigned long v = va_arg(ap, unsigned long);
-            debug_ring_push_str("0x");
-            char *p = numbuf + sizeof(numbuf) - 1; *p = 0;
-            do { p--; *p = "0123456789abcdef"[v & 0xf]; v >>= 4; } while (v > 0);
-            debug_ring_push_str(p);
-            break;
-        }
-        case '%': debug_ring_push_str("%"); break;
-        default: break;
-        }
-        if (*fmt) fmt++;
-    }
-    va_end(ap);
-}
-
-/* Drain the debug ring buffer — sends 2 chars per packet via EP2
- * (mouse relative endpoint, which macOS actively polls).
- * Format: {buttons=0xFF(debug_marker), x=char1, y=char2, wheel=0}.
- * The 0xFF buttons byte distinguishes debug reports from real mouse moves.
- * Real mouse reports have buttons in {0,1,2,3,4,5,6,7}. */
 #define USB_DEBUG_MOUSE_MARKER  0xFF
 
+void USB_DEBUG(const char *fmt, ...) {
+    (void)fmt;  // Unused - debug disabled
+    // va_list ap; ... original implementation disabled
+}
+
 void USB_DEBUG_Poll(void) {
-    if (USBFS_Endp_Busy[DEF_UEP2] != 0) return;
-    if (g_debug_ring.head == g_debug_ring.tail) return;
-
-    MS_Rel_Report_t report;
-    report.data[0] = USB_DEBUG_MOUSE_MARKER;  /* debug marker */
-    report.data[1] = g_debug_ring.buf[g_debug_ring.head];
-    g_debug_ring.head = (uint16_t)(g_debug_ring.head + 1) % USB_DEBUG_RING_SIZE;
-
-    if (g_debug_ring.head != g_debug_ring.tail) {
-        report.data[2] = g_debug_ring.buf[g_debug_ring.head];
-        g_debug_ring.head = (uint16_t)(g_debug_ring.head + 1) % USB_DEBUG_RING_SIZE;
-    } else {
-        report.data[2] = 0x00;
-    }
-    report.data[3] = 0x00;  /* wheel */
-
-    USBFS_Endp_DataUp(DEF_UEP2, report.data, sizeof(report.data), DEF_UEP_CPY_LOAD);
+    // Debug output disabled - EP2 no longer available for HID
+    // Original implementation sent via EP2 using mouse report format
 }

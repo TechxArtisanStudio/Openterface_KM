@@ -12,9 +12,6 @@
 /* External systick_ms from RGB.c (1ms timer tick) */
 extern volatile uint32_t systick_ms;
 
-/* External USBD endpoint busy flags from usb_endp.c */
-extern uint8_t USBD_Endp7_Busy;
-
 #include "usb_desc.h"
 #include "usb_prop.h"
 #include "usb_pwr.h"
@@ -25,20 +22,19 @@ extern uint8_t USBD_Endp7_Busy;
 
 #define ECM_BRIDGE_MTU_FRAME_SIZE       1514u
 #define ECM_BRIDGE_QUEUE_DEPTH          2u
-#define ECM_BRIDGE_USBFS_PACKET_SIZE    64u
+#define ECM_BRIDGE_USBFS_PACKET_SIZE    32u
 /* ECM bridge uses 32-byte bulk packets on USBD side (reduced to fit 512B PMA).
    Note: DEF_USBD_MAX_PACK_SIZE is 16 (legacy ACM), but the runtime ECM
    descriptor advertises 32-byte max packet for EP4/EP6 bulk endpoints. */
 #define ECM_BRIDGE_USBD_PACKET_SIZE     32u
 #define ECM_BRIDGE_TARGET_COMM_IF       4u
-/* In combined ACM+ECM mode with USBFS (HID + ACM + ECM):
- *   IF0-IF1: HID (keyboard + mouse)
- *   IF2-IF3: CDC ACM
- *   IF4-IF5: CDC ECM
- * So host-side ECM comm interface is IF4.
- * For USBLIB stack (no HID), it would be IF2. */
+/* Host-side ECM communication interface number on the USBLIB controller:
+ *   IF0-IF1: CDC ACM
+ *   IF2-IF3: CDC ECM (host side)
+ * So host-side ECM comm interface is IF2.
+ * ECM-only modes (no host ACM) keep the ECM at IF0/IF1. */
 #if USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
-#define ECM_BRIDGE_HOST_COMM_IF         4u
+#define ECM_BRIDGE_HOST_COMM_IF         2u
 #else
 #define ECM_BRIDGE_HOST_COMM_IF         0u
 #endif
@@ -1950,11 +1946,8 @@ static void poll_target_tx(void)
         return;
     }
 
-#ifdef USBFS_DEVICE
-    /* USBFS stack: use USBFS_Endp_DataUp for EP7 */
-    /* Guard against EP7 being in use — poll_host_tx() also drives EP7.
-     * Without this busy check, poll_target_tx() and poll_host_tx() can
-     * overwrite each other's data or send out-of-order fragments. */
+    /* Target ECM lives on the USBFS controller (EP7), regardless of which
+     * controller compiled this file for. */
     if (USBFS_Endp_Busy[DEF_UEP7] != 0) {
         return;
     }
@@ -1985,39 +1978,6 @@ static void poll_target_tx(void)
             }
         }
     }
-#else
-    /* USBLIB stack: use USBD_ENDPx_DataUp for ENDP7 */
-    if (USBD_Endp7_Busy != 0) {
-        return;
-    }
-
-    if (g_target_zlp_pending) {
-        if (USBD_ENDPx_DataUp(ENDP7, frame->data, 0) == USB_SUCCESS) {
-            g_target_zlp_pending = 0;
-            g_target_tx_offset = 0;
-            queue_pop(&g_host_to_target);
-        }
-        return;
-    }
-
-    len = (uint16_t)(frame->len - g_target_tx_offset);
-    if (len > 64) {
-        len = 64;
-    }
-
-    if (USBD_ENDPx_DataUp(ENDP7, &frame->data[g_target_tx_offset], len) == USB_SUCCESS) {
-        g_target_tx_offset = (uint16_t)(g_target_tx_offset + len);
-        if (g_target_tx_offset >= frame->len) {
-            if (len == 64) {
-                g_target_zlp_pending = 1;
-            }
-            else {
-                g_target_tx_offset = 0;
-                queue_pop(&g_host_to_target);
-            }
-        }
-    }
-#endif
 }
 #endif
 
@@ -2147,21 +2107,21 @@ void ECM_Bridge_Init(void)
 #endif
 
 #if USB_WORK_MODE_COMPILES_TARGET_CDC_ECM
-    /* Only configure USBFS EP6/EP7 if the active mode actually uses
+    /* Only configure USBFS EP7 if the active mode actually uses
        target-side CDC ECM. With runtime profiles, the compiled code
        exists but the descriptor may not advertise these endpoints. */
     if (USB_ModeConfig_ActiveModeHasTargetCdcEcm()) {
-        /* Force enable EP7 TX at the hardware level */
-        USBFSD_UEP_MOD(3) |= USBFS_UEP7_TX_EN;
+        /* Force enable EP7 TX and RX at the hardware level (bidirectional EP7) */
+        USBFSD_UEP_MOD(3) |= USBFS_UEP7_TX_EN | USBFS_UEP7_RX_EN;
 
-        /* Also configure EP6 RX to ACK so we can receive data from the Mac
-           without SET_INTERFACE. Without this, EP6 stays in NAK state and
-           the Mac's bulk OUT (ARP requests etc.) is silently dropped. */
-        USBFSD->UEP6_RX_CTRL = USBFS_UEP_R_RES_ACK;
+        /* Configure EP7 RX to ACK so we can receive data from Target PC
+           without SET_INTERFACE. Without this, EP7 RX stays in NAK state and
+           Target PC's bulk OUT (ARP requests etc.) is silently dropped. */
+        USBFSD->UEP7_RX_CTRL = USBFS_UEP_R_RES_ACK;
 
         USB_DEBUG("USBFS endpoints configured:\r\n");
-        USB_DEBUG("  EP6: Target data OUT (RX)\r\n");
-        USB_DEBUG("  EP7: Target data IN (TX)\r\n");
+        USB_DEBUG("  EP7 OUT: Target data OUT (RX) from Target PC\r\n");
+        USB_DEBUG("  EP7 IN: Target data IN (TX) to Target PC\r\n");
     }
 #endif
 

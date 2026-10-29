@@ -40,8 +40,7 @@ static volatile uint16_t USBD_CDC_ECM_PacketFilter;
 extern uint8_t USBD_Endp3_Busy;
 extern uint8_t USBD_Endp1_Busy;
 extern uint8_t USBD_Endp2_Busy;
-extern uint8_t USBD_Endp4_Busy;
-extern uint8_t USBD_Endp7_Busy;
+extern uint8_t USBD_Endp6_Busy;
 
 DEVICE Device_Table =
 {
@@ -328,24 +327,23 @@ void USBD_SetInterface_Impl(void)
 
 #if USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
     /* Combined ACM+ECM mode: IF3 = CDC-ECM Data interface.
-     * alt=0: EP4 (bulk IN) and EP6 (bulk OUT) disabled;
-     * alt=1: enable EP4/EP6. */
+     * alt=0: EP6 (bidirectional bulk) disabled;
+     * alt=1: enable EP6 in both directions. */
     if (USB_ModeConfig_ActiveModeHasHostCdcAcm() &&
         USB_ModeConfig_ActiveModeHasHostCdcEcm() && iface == 3) {
         if (alt == 1) {
-            _ClearDTOG_TX(ENDP4);
-            _ClearDTOG_RX(ENDP4);
-            SetEPTxStatus(ENDP4, EP_TX_NAK);
-            SetEPRxAddr(ENDP6, ENDP6_RX_ECM_ADDR);
-            SetEPRxCount(ENDP6, 64);
+            _ClearDTOG_TX(ENDP6);
             _ClearDTOG_RX(ENDP6);
+            SetEPTxStatus(ENDP6, EP_TX_NAK);
+            SetEPRxAddr(ENDP6, ENDP6_RX_ECM_ADDR);
+            SetEPRxCount(ENDP6, 32);
             SetEPRxStatus(ENDP6, EP_RX_VALID);
 #if USB_WORK_MODE_COMPILES_BRIDGE_ECM
             extern volatile uint8_t g_host_ecm_data_if_active;
             g_host_ecm_data_if_active = 1;
 #endif
         } else {
-            SetEPTxStatus(ENDP4, EP_TX_DIS);
+            SetEPTxStatus(ENDP6, EP_TX_DIS);
             SetEPRxStatus(ENDP6, EP_RX_DIS);
 #if USB_WORK_MODE_COMPILES_BRIDGE_ECM
             extern volatile uint8_t g_host_ecm_data_if_active;
@@ -457,24 +455,17 @@ void USBD_Reset(void)
       _ClearDTOG_TX(ENDP2);
       _ClearDTOG_RX(ENDP2);
 
-      /* EP4: ECM bulk IN (device → host) */
-      SetEPType(ENDP4, EP_BULK);
-      SetEPTxAddr(ENDP4, ENDP4_TX_ECM_ADDR);
-      SetEPRxStatus(ENDP4, EP_RX_DIS);
-      _ClearDTOG_TX(ENDP4);
-      _ClearDTOG_RX(ENDP4);
-      /* Enable IN so device can send DHCP replies without waiting for SET_INTERFACE */
-      SetEPTxStatus(ENDP4, EP_TX_NAK);
-
-      /* EP6: ECM bulk OUT (host → device) */
+      /* EP6: ECM bulk, bidirectional (device ↔ host) */
       SetEPType(ENDP6, EP_BULK);
       SetEPRxAddr(ENDP6, ENDP6_RX_ECM_ADDR);
       SetEPRxCount(ENDP6, 32);
+      SetEPTxAddr(ENDP6, ENDP6_TX_ECM_ADDR);
       _ClearDTOG_RX(ENDP6);
       _ClearDTOG_TX(ENDP6);
-      /* Enable immediately so Host can send DHCP without waiting for SET_INTERFACE */
+      /* Enable both directions immediately so the Host can send DHCP and
+       * the device can answer without waiting for SET_INTERFACE. */
       SetEPRxStatus(ENDP6, EP_RX_VALID);
-      SetEPTxStatus(ENDP6, EP_TX_DIS);
+      SetEPTxStatus(ENDP6, EP_TX_NAK);
 #if USB_WORK_MODE_COMPILES_BRIDGE_ECM
       extern volatile uint8_t g_host_ecm_data_if_active;
       g_host_ecm_data_if_active = 1;
@@ -488,10 +479,7 @@ void USBD_Reset(void)
   USBD_Endp1_Busy = 0;
 #if USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
   USBD_Endp2_Busy = 0;
-  USBD_Endp4_Busy = 0;
-#if USB_WORK_MODE_HAS_TARGET_CDC_ECM
-  USBD_Endp7_Busy = 0;
-#endif
+  USBD_Endp6_Busy = 0;
 #endif
   if (USB_ModeConfig_ActiveModeBridgeAcm())
   {
@@ -511,26 +499,6 @@ void USBD_Reset(void)
     extern volatile uint8_t g_host_ecm_data_if_active;
     g_host_ecm_data_if_active = 1;
 #endif
-  }
-#endif
-
-#if USB_WORK_MODE_HAS_TARGET_CDC_ECM && USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
-  /* Combined ACM+ECM+Target ECM mode (mode 7): initialize Target ECM endpoints (EP7 OUT + EP7 IN).
-   * Note: CH32V20x only has EP0-EP7. EP7 supports both IN and OUT directions. */
-  if (USB_ModeConfig_ActiveModeHasTargetCdcEcm() &&
-      USB_ModeConfig_ActiveModeHasHostCdcAcm() &&
-      USB_ModeConfig_ActiveModeHasHostCdcEcm()) {
-      /* EP7: Target ECM bidirectional bulk endpoint */
-      SetEPType(ENDP7, EP_BULK);
-      SetEPRxAddr(ENDP7, ENDP7_RX_TARGET_ECM_ADDR);
-      SetEPRxCount(ENDP7, 32);
-      SetEPTxAddr(ENDP7, ENDP7_TX_TARGET_ECM_ADDR);
-      _ClearDTOG_RX(ENDP7);
-      _ClearDTOG_TX(ENDP7);
-      /* Enable immediately so Target can send DHCP without waiting for SET_INTERFACE */
-      SetEPRxStatus(ENDP7, EP_RX_VALID);
-      /* Enable IN so device can send DHCP replies without waiting for SET_INTERFACE */
-      SetEPTxStatus(ENDP7, EP_TX_NAK);
   }
 #endif
 

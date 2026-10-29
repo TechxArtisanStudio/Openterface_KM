@@ -13,7 +13,7 @@
 
 /*******************************************************************************/
 /* Header File */
-#include "ch32v20x_usbfs_device.h"
+#include "include/ch32v20x_usbfs_device.h"
 #include "usbd_composite_km.h"
 #include "peripheral.h"
 #include "RingMem.h"
@@ -246,7 +246,6 @@ void USBFS_IRQHandler(void) __attribute__((interrupt("WCH-Interrupt-fast")));
 __attribute__((aligned(4))) UINT8 EP0_DatabufHD[64];      //ep0(64)
 __attribute__((aligned(4))) UINT8 EP1_DatabufHD[64 + 64]; //ep1_out(64)+ep1_in(64)
 __attribute__((aligned(4))) UINT8 EP2_DatabufHD[64 + 64]; //ep2_out(64)+ep2_in(64)
-__attribute__((aligned(4))) UINT8 EP3_DatabufHD[64 + 64]; //ep3_out(64)+ep3_in(64)
 __attribute__((aligned(4))) UINT8 EP4_DatabufHD[64 + 64]; //ep4_out(64)+ep4_in(64)
 __attribute__((aligned(4))) UINT8 EP5_DatabufHD[64 + 64]; //ep5_out(64)+ep5_in(64)
 __attribute__((aligned(4))) UINT8 EP6_DatabufHD[64 + 64]; //ep6_out(64)+ep6_in(64)
@@ -376,17 +375,17 @@ void USBFS_RCC_Init( void )
 void USBFS_Device_Endp_Init( void )
 {
 #if USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
-    /* Combined ACM+ECM mode with USBFS stack:
+    /* Combined ACM+ECM mode with USBFS stack (target-facing controller):
      * EP1: Keyboard HID IN (TX)
      * EP2: Mouse HID IN (TX)
-     * EP3: ECM data OUT (RX) - host to device
-     * EP4: ECM data IN (TX) - device to host
-     * EP5: ACM interrupt IN (TX)
-     * EP6: ACM data OUT (RX) - host to device
-     * EP7: ACM data IN (TX) - device to host
+     * EP3: Absolute mouse HID IN (TX)
+     * EP4: Media HID IN (TX)
+     * EP5: Target ECM interrupt IN (notification)
+     * EP7: Target ECM bulk OUT + bulk IN
+     * Host ACM/ECM live on the USBLIB controller and are not configured here.
      */
     USBFSD->UEP4_1_MOD = USBFS_UEP1_TX_EN | USBFS_UEP4_TX_EN;
-    USBFSD->UEP2_3_MOD = USBFS_UEP2_TX_EN | USBFS_UEP3_RX_EN;
+    USBFSD->UEP2_3_MOD = USBFS_UEP2_TX_EN | USBFS_UEP3_TX_EN;
 #else
     USBFSD->UEP4_1_MOD = USBFS_UEP1_TX_EN | USBFS_UEP4_TX_EN;
     USBFSD->UEP2_3_MOD = USBFS_UEP2_TX_EN | USBFS_UEP3_TX_EN;
@@ -406,35 +405,37 @@ void USBFS_Device_Endp_Init( void )
         USBFSD->UEP5_6_MOD = USBFS_UEP5_TX_EN | USBFS_UEP6_RX_EN;
         USBFSD_UEP_MOD( 3 ) = 0;
     }
-    else if (USB_ModeConfig_ActiveModeHasTargetCdcAcm() || USB_ModeConfig_ActiveModeHasTargetCdcEcm()) {
-#else
-    if (USB_ModeConfig_ActiveModeHasTargetCdcAcm() || USB_ModeConfig_ActiveModeHasTargetCdcEcm()) {
+    else
 #endif
-        USBFSD->UEP5_6_MOD = USBFS_UEP5_TX_EN | USBFS_UEP6_RX_EN;
-        USBFSD_UEP_MOD( 3 ) = USBFS_UEP7_TX_EN;
-    }
 #if USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
-    else {
-        /* Host CDC ACM: EP5 INT IN, EP6 BULK OUT, EP7 BULK IN */
+    if (USB_ModeConfig_ActiveModeHasHostCdcAcm() && USB_ModeConfig_ActiveModeHasHostCdcEcm()) {
+        /* Combined ACM+ECM: Host ACM/ECM are on the USBLIB controller, so USBFS
+         * only needs EP5 (Target ECM notification). EP6 is unused here.
+         * Mode 7 adds Target ECM data on bidirectional EP7. */
+        USBFSD->UEP5_6_MOD = USBFS_UEP5_TX_EN;
+#if USB_WORK_MODE_HAS_TARGET_CDC_ECM
+        USBFSD_UEP_MOD( 3 ) = USBFS_UEP7_TX_EN | USBFS_UEP7_RX_EN;  /* Target ECM: EP7 bidirectional */
+#else
+        USBFSD_UEP_MOD( 3 ) = 0;  /* Mode 6: no Target ECM, EP7 unused */
+#endif
+    }
+    else
+#endif
+    if (USB_ModeConfig_ActiveModeHasTargetCdcAcm() || USB_ModeConfig_ActiveModeHasTargetCdcEcm()) {
+        /* Target ACM/ECM only (no Host ACM+ECM): EP6 for Target data, EP7 for Target ECM IN */
         USBFSD->UEP5_6_MOD = USBFS_UEP5_TX_EN | USBFS_UEP6_RX_EN;
         USBFSD_UEP_MOD( 3 ) = USBFS_UEP7_TX_EN;
     }
-#else
     else {
         USBFSD->UEP5_6_MOD = 0;
         USBFSD_UEP_MOD( 3 ) = 0;
     }
 #endif
-#endif
 
     USBFSD->UEP0_DMA = (uint32_t)USBFS_EP0_Buf;
     USBFSD->UEP1_DMA = (uint32_t)USBFS_EP1_Buf;
     USBFSD->UEP2_DMA = (uint32_t)USBFS_EP2_Buf;
-#if USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
-    USBFSD->UEP3_DMA = (uint32_t)EP3_DatabufHD;  /* ECM host-side data OUT */
-#else
-    USBFSD->UEP3_DMA = (uint32_t)USBFS_EP3_Buf;
-#endif
+    USBFSD->UEP3_DMA = (uint32_t)USBFS_EP3_Buf;  /* HID AbsMouse IN */
     USBFSD->UEP4_DMA = (uint32_t)USBFS_EP4_Buf;
 #if defined(ENABLE_UAC) || USB_WORK_MODE_COMPILES_TARGET_CDC_ACM || USB_WORK_MODE_COMPILES_TARGET_CDC_ECM || USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
 #ifdef ENABLE_UAC
@@ -442,33 +443,30 @@ void USBFS_Device_Endp_Init( void )
         USBFSD->UEP5_DMA = (uint32_t)USBFS_EP5_Buf;
         USBFSD->UEP6_DMA = (uint32_t)USBFS_EP6_Buf;
     }
-    else if (USB_ModeConfig_ActiveModeHasTargetCdcAcm() || USB_ModeConfig_ActiveModeHasTargetCdcEcm()) {
-#else
-    if (USB_ModeConfig_ActiveModeHasTargetCdcAcm() || USB_ModeConfig_ActiveModeHasTargetCdcEcm()) {
+    else
 #endif
-        USBFSD->UEP5_DMA = (uint32_t)EP5_DatabufHD;
-        USBFSD->UEP6_DMA = (uint32_t)EP6_DatabufHD;
-        USBFSD->UEP7_DMA = (uint32_t)EP7_DatabufHD;
-    }
 #if USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
-    else {
-        /* Host CDC ACM: EP5 INT IN, EP6 BULK OUT, EP7 BULK IN */
+    if (USB_ModeConfig_ActiveModeHasHostCdcAcm() && USB_ModeConfig_ActiveModeHasHostCdcEcm()) {
+        /* Combined ACM+ECM: EP5 notification + EP7 Target ECM data.
+         * Host ACM/ECM buffers belong to the USBLIB controller. */
+        USBFSD->UEP5_DMA = (uint32_t)EP5_DatabufHD;
+        USBFSD->UEP7_DMA = (uint32_t)EP7_DatabufHD;
+    }
+    else
+#endif
+    if (USB_ModeConfig_ActiveModeHasTargetCdcAcm() || USB_ModeConfig_ActiveModeHasTargetCdcEcm()) {
+        /* Target ACM/ECM only (no Host ACM+ECM) */
         USBFSD->UEP5_DMA = (uint32_t)EP5_DatabufHD;
         USBFSD->UEP6_DMA = (uint32_t)EP6_DatabufHD;
         USBFSD->UEP7_DMA = (uint32_t)EP7_DatabufHD;
     }
-#endif
 #endif
 
     USBFSD->UEP0_RX_CTRL = USBFS_UEP_R_RES_ACK;
     USBFSD->UEP0_TX_CTRL = USBFS_UEP_T_RES_NAK;
     USBFSD->UEP1_TX_CTRL = USBFS_UEP_T_RES_NAK;
     USBFSD->UEP2_TX_CTRL = USBFS_UEP_T_RES_NAK;
-#if USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
-    USBFSD->UEP3_RX_CTRL = USBFS_UEP_R_RES_ACK;  /* ECM host-side data OUT */
-#else
-    USBFSD->UEP3_TX_CTRL = USBFS_UEP_T_RES_NAK;
-#endif
+    USBFSD->UEP3_TX_CTRL = USBFS_UEP_T_RES_NAK;  /* HID AbsMouse IN */
     USBFSD->UEP4_TX_CTRL = USBFS_UEP_T_RES_NAK;
 #if defined(ENABLE_UAC) || USB_WORK_MODE_COMPILES_TARGET_CDC_ACM || USB_WORK_MODE_COMPILES_TARGET_CDC_ECM || USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
     /* EP5 ISO IN: NAK until alt-setting 1 activated; TX_LEN=0 initially */
@@ -478,26 +476,31 @@ void USBFS_Device_Endp_Init( void )
         USBFSD->UEP5_TX_CTRL = USBFS_UEP_T_RES_NAK;
         USBFSD->UEP6_RX_CTRL = USBFS_UEP_R_RES_NAK;
     }
-    else if (USB_ModeConfig_ActiveModeHasTargetCdcAcm() || USB_ModeConfig_ActiveModeHasTargetCdcEcm()) {
-#else
-    if (USB_ModeConfig_ActiveModeHasTargetCdcAcm() || USB_ModeConfig_ActiveModeHasTargetCdcEcm()) {
+    else
 #endif
-        USBFSD->UEP5_TX_LEN  = 0;
-        USBFSD->UEP5_TX_CTRL = USBFS_UEP_T_RES_NAK;
-        USBFSD->UEP6_RX_CTRL = USBFS_UEP_R_RES_ACK;
-        USBFSD->UEP7_TX_LEN  = 0;
-        USBFSD->UEP7_TX_CTRL = USBFS_UEP_T_RES_NAK;
-    }
 #if USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
-    else {
-        /* Host CDC ACM: EP5 INT IN, EP6 BULK OUT, EP7 BULK IN */
+    if (USB_ModeConfig_ActiveModeHasHostCdcAcm() && USB_ModeConfig_ActiveModeHasHostCdcEcm()) {
+        /* Combined ACM+ECM: EP5 notification TX, EP6 unused.
+         * Mode 7 adds Target ECM data on bidirectional EP7. */
+        USBFSD->UEP5_TX_LEN  = 0;
+        USBFSD->UEP5_TX_CTRL = USBFS_UEP_T_RES_NAK;
+#if USB_WORK_MODE_HAS_TARGET_CDC_ECM
+        /* Target ECM: EP7 bidirectional */
+        USBFSD->UEP7_TX_LEN  = 0;
+        USBFSD->UEP7_TX_CTRL = USBFS_UEP_T_RES_NAK;
+        USBFSD->UEP7_RX_CTRL = USBFS_UEP_R_RES_ACK;
+#endif
+    }
+    else
+#endif
+    if (USB_ModeConfig_ActiveModeHasTargetCdcAcm() || USB_ModeConfig_ActiveModeHasTargetCdcEcm()) {
+        /* Target ACM/ECM only (no Host ACM+ECM) */
         USBFSD->UEP5_TX_LEN  = 0;
         USBFSD->UEP5_TX_CTRL = USBFS_UEP_T_RES_NAK;
         USBFSD->UEP6_RX_CTRL = USBFS_UEP_R_RES_ACK;
         USBFSD->UEP7_TX_LEN  = 0;
         USBFSD->UEP7_TX_CTRL = USBFS_UEP_T_RES_NAK;
     }
-#endif
 #endif
 
     /* Clear End-points Busy Status */
@@ -893,15 +896,15 @@ void USBFS_IRQHandler( void )
                         }
                         break;
 
-#if USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
-                    case USBFS_UIS_TOKEN_OUT | DEF_UEP3:
-                        /* ECM host-side data OUT (host to device) - combined ACM+ECM mode */
+#if USB_WORK_MODE_HAS_TARGET_CDC_ECM && USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
+                    case USBFS_UIS_TOKEN_OUT | DEF_UEP7:
+                        /* Target ECM data OUT (target to device) - mode 7: ACM+ECM+Target ECM */
                         if( intst & USBFS_UIS_TOG_OK )
                         {
-                            ECM_Bridge_HostRxDone( EP3_DatabufHD, USBFSD->RX_LEN );
-                            USBFSD->UEP3_RX_CTRL ^= USBFS_UEP_R_TOG;
+                            ECM_Bridge_TargetRxDone( EP7_DatabufHD, USBFSD->RX_LEN );
+                            USBFSD->UEP7_RX_CTRL ^= USBFS_UEP_R_TOG;
                         }
-                        USBFSD->UEP3_RX_CTRL = ( USBFSD->UEP3_RX_CTRL & ~USBFS_UEP_R_RES_MASK ) | USBFS_UEP_R_RES_ACK;
+                        USBFSD->UEP7_RX_CTRL = ( USBFSD->UEP7_RX_CTRL & ~USBFS_UEP_R_RES_MASK ) | USBFS_UEP_R_RES_ACK;
                         break;
 #endif
 #endif
@@ -1295,9 +1298,23 @@ void USBFS_IRQHandler( void )
 
 #if USB_WORK_MODE_COMPILES_TARGET_CDC_ECM
                                         case 0x04:
-                                            if( USB_ModeConfig_ActiveModeHasTargetCdcEcm() )
+                                            /* Host ECM MAC address string */
+                                            if( USB_ModeConfig_ActiveModeHasHostCdcEcm() || USB_ModeConfig_ActiveModeHasTargetCdcEcm() )
                                             {
                                                 pUSBFS_Descr = MyEcmMacInfo;
+                                                len = DEF_USBD_ECM_MAC_DESC_LEN;
+                                            }
+                                            else
+                                            {
+                                                errflag = 0xFF;
+                                            }
+                                            break;
+
+                                        case 0x05:
+                                            /* Target ECM MAC address string (mode 7 only) */
+                                            if( USB_ModeConfig_ActiveModeHasTargetCdcEcm() )
+                                            {
+                                                pUSBFS_Descr = MyTargetEcmMacInfo;
                                                 len = DEF_USBD_ECM_MAC_DESC_LEN;
                                             }
                                             else
@@ -1554,31 +1571,43 @@ void USBFS_IRQHandler( void )
                             /* CDC-ECM data interface: alt=0 disables endpoints,
                              * alt=1 enables EP6 (bulk OUT) and EP7 (bulk IN).
                              * Interface number depends on configuration:
-                             *   HID+ECM only: ECM data is IF4/IF5
-                             *   HID+ACM+ECM:  ECM data is IF6/IF7 (ACM takes IF4/IF5)
-                             *   HID+UAC+ECM:  ECM data is IF7/IF8 (UAC takes IF4-IF6)
-                             *   HID+UAC+ACM+ECM: ECM data is IF8/IF9 */
+                             *   HID+ECM only: ECM data is IF5
+                             *   HID+ACM+ECM:  ECM data is IF7 (ACM takes IF4/IF5)
+                             *   HID+UAC+ECM:  ECM data is IF8 (UAC takes IF4-IF6)
+                             *   HID+Host ACM+Host ECM+Target ECM (mode 7): Target ECM data is IF5
+                             *     (Host ACM/ECM live on the USBLIB controller, not here) */
                             if (USB_ModeConfig_ActiveModeHasTargetCdcEcm()) {
                                 /* Determine which interface number is the ECM data interface */
-                                uint8_t ecm_data_if = 4;  /* Default: HID+ECM only */
+                                uint8_t ecm_data_if = 5;  /* Default: HID+ECM only (IF4 control, IF5 data) */
                                 if (USB_ModeConfig_ActiveModeHasTargetCdcAcm()) {
-                                    ecm_data_if += 2;  /* ACM adds 2 interfaces (4,5) */
+                                    ecm_data_if += 2;  /* Target ACM adds 2 interfaces (4,5) */
                                 }
                                 if (USB_ModeConfig_ActiveModeHasTargetUac()) {
-                                    ecm_data_if += 3;  /* UAC adds 3 interfaces (4,5,6 or 7,8,9) */
+                                    ecm_data_if += 3;  /* Target UAC adds 3 interfaces (4,5,6 or 7,8,9) */
                                 }
 
                                 if (USBFS_SetupReqIndex == ecm_data_if) {
                                     uint8_t alt = (uint8_t)(USBFS_SetupReqValue & 0xFF);
                                     if (alt == 1) {
-                                        /* Enable EP6 bulk OUT (ACK, DATA0) and EP7 bulk IN (NAK, DATA0).
+                                        /* Enable Target ECM endpoints.
+                                         * Mode 7: Target ECM uses EP7 OUT (0x07) and EP7 IN (0x87) - bidirectional EP7.
+                                         * Other modes with Target ECM: use EP6 OUT and EP7 IN.
                                          * Do NOT set UEP_R_TOG/UEP_T_TOG — bulk endpoints start at
                                          * DATA0; setting TOG would make the hardware expect DATA1
                                          * and reject the host's first DATA0 packet. */
+#if USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
+                                        /* Mode 7: Target ECM uses EP7 bidirectional */
+                                        USBFSD->UEP7_RX_CTRL = USBFS_UEP_R_RES_ACK;
+                                        USBFSD->UEP7_TX_CTRL = USBFS_UEP_T_RES_NAK;
+                                        USBFSD->UEP7_TX_LEN  = 0;
+                                        USBFS_Endp_Busy[DEF_UEP7] = 0;
+#else
+                                        /* Other modes: Target ECM uses EP6 OUT + EP7 IN */
                                         USBFSD->UEP6_RX_CTRL = USBFS_UEP_R_RES_ACK;
                                         USBFSD->UEP7_TX_CTRL = USBFS_UEP_T_RES_NAK;
                                         USBFSD->UEP7_TX_LEN  = 0;
                                         USBFS_Endp_Busy[DEF_UEP7] = 0;
+#endif
                                         /* Reset GARP flag so it gets re-queued on every activation. */
                                         g_target_garp_sent = 0;
                                         /* Externally visible flag — ecm_bridge.c checks this
@@ -1586,10 +1615,16 @@ void USBFS_IRQHandler( void )
                                         g_target_ecm_data_if_active = 1;
                                     }
                                     else {
-                                        /* Keep EP6 RX active even on alt=0 — macOS CDC ECM
+                                        /* Keep RX active even on alt=0 — macOS CDC ECM
                                            may deactivate then immediately reactivate, and we
                                            need to receive ARP requests during this window. */
+#if USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
+                                        /* Mode 7: Target ECM uses EP7 bidirectional */
+                                        USBFSD->UEP7_RX_CTRL = USBFS_UEP_R_RES_ACK;
+#else
+                                        /* Other modes: Target ECM uses EP6 OUT + EP7 IN */
                                         USBFSD->UEP6_RX_CTRL = USBFS_UEP_R_RES_ACK;
+#endif
                                         USBFSD->UEP7_TX_CTRL = USBFS_UEP_T_RES_NAK;
                                         USBFSD->UEP7_TX_LEN  = 0;
                                         USBFS_Endp_Busy[DEF_UEP7] = 0;

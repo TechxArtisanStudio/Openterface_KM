@@ -5,6 +5,10 @@
 # Define the source directory
 SRC_DIR := $(abspath $(dir $(CURDIR)))
 
+# The first rule pulled in from subdir.mk would otherwise become the default
+# goal, so `make` / `make kvmgo` would only build one startup object.
+.DEFAULT_GOAL := all
+
 # Include other makefiles
 -include ../makefile.init
 
@@ -155,7 +159,7 @@ all:
 
 # KVMGo build configuration (BOARD_VERSION=1, CDC COM + ECM)
 kvmgo:
-	$(MAKE) --no-print-directory BOARD_VERSION=1 ENABLE_BLE=1 BLE_NAME=KVM-GO USB_WORK_MODE=hid_acm_ecm
+	$(MAKE) --no-print-directory BOARD_VERSION=1 ENABLE_BLE=1 BLE_NAME=KVM-GO USB_WORK_MODE=hid_acm_ecm_bridge
 	@riscv-none-embed-objcopy -O binary "openterface-km-firmware.elf" "openterface-km-firmware.bin"
 	@cp openterface-km-firmware.elf openterface-km-firmware-kvmgo.elf
 	@cp openterface-km-firmware.bin openterface-km-firmware-kvmgo.bin

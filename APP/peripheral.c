@@ -245,6 +245,14 @@ uint8_t Peripheral_IsCh9329CommandByte(uint8_t cmd)
                                         *        Flash) or reset to factory default
                                         *        "KVM-GO" (Openterface extension). */
 
+        case CMD_SET_ECM_IP_CONFIG:    /* 0x26 - Set ECM network IP configuration
+                                        *        (host IP, dev IP, subnet, target IPs).
+                                        *        Persisted to Flash (Openterface extension). */
+
+        case CMD_GET_ECM_IP_CONFIG:    /* 0x27 - Get ECM network IP configuration
+                                        *        from RAM cache, no Flash access
+                                        *        (Openterface extension). */
+
         case CMD_USB_WORK_MODE:        /* 0x30 - Query or change the active USB
                                         *        personality (HID+ACM, HID+UAC+ACM,
                                         *        HID+ACM-Bridge, HID+ECM-Bridge)
