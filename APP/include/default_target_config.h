@@ -64,6 +64,15 @@ bool DefaultTargetConfig_IsEnabled(void);
 bool DefaultTargetConfig_Set(const uint8_t ip[4], uint16_t port);
 
 /**
+ * @brief Update only the default target IP, keeping the stored port and the
+ *        auto-connect enable state unchanged.
+ *
+ * @param ip Target IP address (4 bytes, big-endian)
+ * @return true if successfully written to flash
+ */
+bool DefaultTargetConfig_SetIP(const uint8_t ip[4]);
+
+/**
  * @brief Disable auto-connect (clears flash config)
  *
  * @return true if successfully cleared

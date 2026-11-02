@@ -345,6 +345,12 @@ typedef void (*ble_eth_event_cb_t)(ble_eth_evt_t *evt);
 void BLE_Eth_Init(ble_eth_event_cb_t event_cb);
 
 /**
+ * @brief Refresh the target-side source IP used for tunneled TCP/ARP frames
+ *        from the ECM IP configuration. Call after the config changes.
+ */
+void BLE_Eth_UpdateIPConfig(void);
+
+/**
  * @brief Feed received BLE bytes into the frame parser.
  *        Call repeatedly or with bulk data; the parser maintains state.
  * @param data  Received byte buffer.
@@ -535,6 +541,7 @@ void BLE_Eth_ResetReliabilityStats(void);
 #else /* !USB_WORK_MODE_BRIDGE_ECM — stub out all BLE-Eth API as no-ops */
 
 #define BLE_Eth_Init(cb)                            ((void)0)
+#define BLE_Eth_UpdateIPConfig()                    ((void)0)
 #define BLE_Eth_Parse(data, len)                    ((void)0)
 #define BLE_Eth_BuildConnect(buf, ip, port)         (0U)
 #define BLE_Eth_BuildDisconnect(buf, id)            (0U)

@@ -190,6 +190,41 @@ static uint8_t Peripheral_IsCh9329ModeCommandFrame(const uint8_t *buf, uint16_t 
     return (sum == buf[frame_len - 1u]) ? 1u : 0u;
 }
 
+/* BLE-Eth ECM IP commands reuse the CH9329 0x22/0x23 command bytes, which are
+ * also used by CH9329 BLE-security and BLE-set-name. Disambiguate on payload
+ * shape so the BLE-Eth handlers stay reachable. CH9329 security frames carry a
+ * single sub-command byte (0x01..0x03), CH9329 name frames carry name text,
+ * whereas BLE-Eth GET carries one sub-command (0x00..0x05) and BLE-Eth SET
+ * carries 9/13/21 bytes. BLE-Eth "reset to defaults" uses sub-command 0x04:
+ * 0x03 must stay with CH9329 (bond count), otherwise a bond query would reset
+ * the stored ECM IP configuration. */
+static uint8_t Peripheral_IsBleEthEcmIpFrame(const uint8_t *buf, uint16_t len)
+{
+    if (buf == NULL || len < 6) {
+        return 0;
+    }
+    if (buf[0] != CH9329_FRAME_HEAD1 || buf[1] != CH9329_FRAME_HEAD2) {
+        return 0;
+    }
+    if (len < (uint16_t)(6u + buf[4])) {
+        return 0;
+    }
+
+    switch (buf[3]) {
+        case BLE_ETH_CMD_GET_ECM_IP:  /* 0x23 */
+            return (buf[4] == 1u && buf[5] <= 0x05u) ? 1u : 0u;
+
+        case BLE_ETH_CMD_SET_ECM_IP:  /* 0x22 */
+            if (buf[4] == 1u) {
+                return (buf[5] == 0x04u) ? 1u : 0u;
+            }
+            return (buf[4] == 9u || buf[4] == 13u || buf[4] == 21u) ? 1u : 0u;
+
+        default:
+            return 0;
+    }
+}
+
 /*********************************************************************
  * @fn      Peripheral_IsCh9329CommandByte
  *
@@ -1021,8 +1056,11 @@ void ble_usb_ServiceEvt(uint16_t connection_handle, ble_usb_evt_t *p_evt)
             /* Check if this is a CH9329 command that should be handled locally.
              * CH9329 commands (0x01-0x08, 0x17, 0x18, 0x30) are processed by the
              * device and responses are sent back via BLE notification.
-             * BLE-Eth commands (0x10-0x12, 0x1F) are handled by BLE_Eth_Parse. */
-            if (p_evt->data.length >= 6 &&
+             * BLE-Eth commands (0x10-0x12, 0x1F) are handled by BLE_Eth_Parse.
+             * The 0x22/0x23 bytes exist in both protocols, so inspect the payload
+             * shape before assuming CH9329. */
+            if (!Peripheral_IsBleEthEcmIpFrame(p_evt->data.p_data, p_evt->data.length) &&
+                p_evt->data.length >= 6 &&
                 p_evt->data.p_data[0] == CH9329_FRAME_HEAD1 &&
                 p_evt->data.p_data[1] == CH9329_FRAME_HEAD2 &&
                 Peripheral_IsCh9329CommandByte(p_evt->data.p_data[3]))

@@ -1783,7 +1783,7 @@ void USBFS_IRQHandler( void )
             ACM_Bridge_Init();
         }
         else if (USB_ModeConfig_ActiveModeBridgeEcm()) {
-            ECM_Bridge_Init();
+            ECM_Bridge_InitTarget();
         }
         USBFSD->INT_FG = USBFS_UIF_BUS_RST;
     }

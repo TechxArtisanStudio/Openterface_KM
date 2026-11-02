@@ -5,6 +5,7 @@
 
 #include "include/default_target_config.h"
 #include "include/ble_eth_protocol.h"
+#include "include/ecm_ip_config.h"
 #include "ch32v20x_flash.h"
 #include <string.h>
 
@@ -51,8 +52,17 @@ void DefaultTargetConfig_Init(void)
     const DefaultTargetConfig_Record_t *record = flash_record();
 
     /* Set compile-time defaults */
-    const uint8_t default_ip[4] = BLE_ETH_DEFAULT_TARGET_IP;
-    memcpy(g_config.ip, default_ip, 4);
+#if USB_WORK_MODE_COMPILES_BRIDGE_ECM
+    /* In ECM bridge builds the target lives on the ECM target subnet, so
+     * derive the fallback from the configured target host address instead of
+     * the legacy compile-time IP. ECM_IPConfig_Init() runs before this. */
+    ECM_IPConfig_GetTargetHostIP(g_config.ip);
+#else
+    {
+        const uint8_t default_ip[4] = BLE_ETH_DEFAULT_TARGET_IP;
+        memcpy(g_config.ip, default_ip, 4);
+    }
+#endif
     g_config.port = BLE_ETH_DEFAULT_TARGET_PORT;
     g_config.enabled = false;
 
@@ -81,7 +91,7 @@ bool DefaultTargetConfig_IsEnabled(void)
     return g_config.enabled;
 }
 
-bool DefaultTargetConfig_Set(const uint8_t ip[4], uint16_t port)
+static bool write_record(const uint8_t ip[4], uint16_t port, bool enabled)
 {
     DefaultTargetConfig_Record_t record;
     FLASH_Status status;
@@ -92,7 +102,7 @@ bool DefaultTargetConfig_Set(const uint8_t ip[4], uint16_t port)
     record.record_version = DEFAULT_TARGET_CONFIG_VERSION;
     memcpy(record.ip, ip, 4);
     record.port = port;
-    record.enabled = 1;
+    record.enabled = enabled ? 1 : 0;
     record.sequence = flash_record()->sequence + 1u;
     record.crc = config_crc(&record);
 
@@ -117,6 +127,17 @@ bool DefaultTargetConfig_Set(const uint8_t ip[4], uint16_t port)
         return true;
     }
     return false;
+}
+
+bool DefaultTargetConfig_Set(const uint8_t ip[4], uint16_t port)
+{
+    return write_record(ip, port, true);
+}
+
+bool DefaultTargetConfig_SetIP(const uint8_t ip[4])
+{
+    /* Keep the stored port and auto-connect selection; only the address moves. */
+    return write_record(ip, g_config.port, g_config.enabled);
 }
 
 bool DefaultTargetConfig_Disable(void)

@@ -6,6 +6,7 @@
 #include "include/ecm_bridge.h"
 #include "include/default_target_config.h"
 #include "include/ble_eth_protocol.h"
+#include "include/km_ring.h"
 #include <string.h>
 
 /* Default configuration */
@@ -165,17 +166,27 @@ static bool is_page_valid(const ECM_IPConfig_Flash_t *page)
 
 void ECM_IPConfig_Init(void)
 {
-    /* Read flash and validate before using */
-    const volatile ECM_IPConfig_Flash_t *page_a =
-        (const volatile ECM_IPConfig_Flash_t *)ECM_IP_CONFIG_PAGE_A_ADDR;
+    ECM_IPConfig_Flash_t page_a;
+    ECM_IPConfig_Flash_t page_b;
+    bool valid_a;
+    bool valid_b;
 
-    /* Check if flash data is valid */
-    if (page_a->magic == ECM_IP_CONFIG_MAGIC &&
-        page_a->footer_magic == ECM_IP_CONFIG_MAGIC &&
-        page_a->schema_version == ECM_IP_CONFIG_VERSION &&
-        calc_crc32((const void *)&page_a->config, sizeof(page_a->config)) == page_a->crc32) {
-        /* Valid data in flash, use it */
-        s_ram_cache = page_a->config;
+    /* Read both pages so a torn write on the newer page can fall back to the
+     * previous valid one instead of silently reverting to defaults. */
+    flash_read_page(ECM_IP_CONFIG_PAGE_A_ADDR, &page_a, sizeof(page_a));
+    flash_read_page(ECM_IP_CONFIG_PAGE_B_ADDR, &page_b, sizeof(page_b));
+
+    valid_a = is_page_valid(&page_a);
+    valid_b = is_page_valid(&page_b);
+
+    if (valid_a && valid_b) {
+        /* Both valid, use the most recently written page */
+        s_ram_cache = (page_a.write_count >= page_b.write_count)
+                      ? page_a.config : page_b.config;
+    } else if (valid_a) {
+        s_ram_cache = page_a.config;
+    } else if (valid_b) {
+        s_ram_cache = page_b.config;
     } else {
         /* Flash data invalid or uninitialized, use defaults */
         s_ram_cache = ECM_IP_CONFIG_DEFAULT;
@@ -300,9 +311,20 @@ uint8_t ECM_IPConfig_Set(const ECM_IPConfig_t *config)
     /* 8. Immediately update bridge layer IP variables to make changes take effect */
     ECM_Bridge_UpdateIPConfig();
 
-    /* 9. Sync target host IP to BLE SSH default target configuration */
-    /* This ensures Bluetooth SSH connects to the correct target PC after IP changes */
-    DefaultTargetConfig_Set(config->target_host_ip, BLE_ETH_DEFAULT_TARGET_PORT);
+    /* 9. Keep the BLE-Eth tunnel's target-side identity in sync, otherwise
+     *    tunneled TCP frames keep the stale source IP/MAC pair. */
+    BLE_Eth_UpdateIPConfig();
+
+    /* 10. Mirror the (modifiable) ECM target host into the BLE default target
+     *     record so both channels always report the same address. The stored
+     *     port and auto-connect enable state are user policy and are kept. */
+    {
+        uint8_t default_ip[4];
+        DefaultTargetConfig_GetIP(default_ip);
+        if (memcmp(default_ip, config->target_host_ip, 4) != 0) {
+            DefaultTargetConfig_SetIP(config->target_host_ip);
+        }
+    }
 
     return ECM_IP_CONFIG_OK;
 }

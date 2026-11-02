@@ -47,6 +47,8 @@ CMD_INFO = 0x1F
 CMD_PING = 0x1E
 CMD_SET_DEFAULT = 0x20
 CMD_GET_DEFAULT = 0x21
+CMD_SET_ECM_IP = 0x22
+CMD_GET_ECM_IP = 0x23
 
 CMD_CONNECT_RESP = 0x90
 CMD_DATA_RESP = 0x91
@@ -58,6 +60,8 @@ CMD_PONG = 0x9E
 CMD_ERROR = 0xD0
 CMD_SET_DEFAULT_RESP = 0xA0
 CMD_GET_DEFAULT_RESP = 0xA1
+CMD_SET_ECM_IP_RESP = 0xA2
+CMD_GET_ECM_IP_RESP = 0xA3
 
 CMD_NAMES = {
     CMD_CONNECT: "CONNECT",
@@ -67,6 +71,8 @@ CMD_NAMES = {
     CMD_PING: "PING",
     CMD_SET_DEFAULT: "SET_DEFAULT",
     CMD_GET_DEFAULT: "GET_DEFAULT",
+    CMD_SET_ECM_IP: "SET_ECM_IP",
+    CMD_GET_ECM_IP: "GET_ECM_IP",
     CMD_CONNECT_RESP: "CONNECT_RESP",
     CMD_DATA_PUSH: "DATA_PUSH",
     CMD_DISCONN_RESP: "DISCONNECT_RESP",
@@ -75,6 +81,8 @@ CMD_NAMES = {
     CMD_PONG: "PONG",
     CMD_SET_DEFAULT_RESP: "SET_DEFAULT_RESP",
     CMD_GET_DEFAULT_RESP: "GET_DEFAULT_RESP",
+    CMD_SET_ECM_IP_RESP: "SET_ECM_IP_RESP",
+    CMD_GET_ECM_IP_RESP: "GET_ECM_IP_RESP",
     CMD_ERROR: "ERROR",
 }
 
@@ -243,6 +251,77 @@ def build_set_default(remote_ip: str, remote_port: int) -> bytes:
 def build_get_default() -> bytes:
     """Build GET_DEFAULT frame to retrieve default target IP/port."""
     return build_frame(0x00, CMD_GET_DEFAULT, b"")
+
+
+def _ipv4_bytes(ip: str) -> bytes:
+    parts = [int(x) for x in ip.split(".")]
+    if len(parts) != 4 or any(not (0 <= p <= 255) for p in parts):
+        raise ValueError(f"Invalid IPv4 address: {ip!r}")
+    return bytes(parts)
+
+
+ECM_IP_GET_ALL = 0x00
+ECM_IP_GET_HOST = 0x01
+ECM_IP_GET_TARGET = 0x02
+ECM_IP_GET_STATUS = 0x03
+# 0x05: target re-enumeration / DHCP diagnostics (0x04 is unused for GET).
+ECM_IP_GET_DIAG = 0x05
+
+ECM_IP_SET_ALL = 0x00
+ECM_IP_SET_HOST = 0x01
+ECM_IP_SET_TARGET = 0x02
+# Reset uses 0x04, not 0x03: 0x03 is CH9329 bond-count on the same command byte.
+ECM_IP_SET_RESET = 0x04
+
+
+def build_get_ecm_ip(sub_cmd: int) -> bytes:
+    """Build GET_ECM_IP frame for sub_cmd 0x00..0x03 and 0x05."""
+    return build_frame(0x00, CMD_GET_ECM_IP, bytes([sub_cmd]))
+
+
+def build_set_ecm_ip_all(
+    host_ip: str,
+    dev_ip: str,
+    subnet_mask: str,
+    target_host_ip: str,
+    target_dev_ip: str,
+) -> bytes:
+    """Build SET_ECM_IP (all addresses) frame."""
+    payload = (
+        bytes([ECM_IP_SET_ALL])
+        + _ipv4_bytes(host_ip)
+        + _ipv4_bytes(dev_ip)
+        + _ipv4_bytes(subnet_mask)
+        + _ipv4_bytes(target_host_ip)
+        + _ipv4_bytes(target_dev_ip)
+    )
+    return build_frame(0x00, CMD_SET_ECM_IP, payload)
+
+
+def build_set_ecm_ip_host(host_ip: str, dev_ip: str, subnet_mask: str) -> bytes:
+    """Build SET_ECM_IP (host side) frame."""
+    payload = (
+        bytes([ECM_IP_SET_HOST])
+        + _ipv4_bytes(host_ip)
+        + _ipv4_bytes(dev_ip)
+        + _ipv4_bytes(subnet_mask)
+    )
+    return build_frame(0x00, CMD_SET_ECM_IP, payload)
+
+
+def build_set_ecm_ip_target(target_host_ip: str, target_dev_ip: str) -> bytes:
+    """Build SET_ECM_IP (target side) frame."""
+    payload = (
+        bytes([ECM_IP_SET_TARGET])
+        + _ipv4_bytes(target_host_ip)
+        + _ipv4_bytes(target_dev_ip)
+    )
+    return build_frame(0x00, CMD_SET_ECM_IP, payload)
+
+
+def build_set_ecm_ip_reset() -> bytes:
+    """Build SET_ECM_IP (reset to factory defaults) frame."""
+    return build_frame(0x00, CMD_SET_ECM_IP, bytes([ECM_IP_SET_RESET]))
 
 
 # ---------------------------------------------------------------------------
@@ -562,6 +641,9 @@ class BleEthClient:
         # Default target configuration futures
         self._default_futures: dict[str, asyncio.Future] = {}
 
+        # ECM IP configuration futures ("get" / "set")
+        self._ecm_ip_futures: dict[str, asyncio.Future] = {}
+
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._disconnecting = False
         # Reliability-hook counters for DATA response telemetry.
@@ -633,6 +715,8 @@ class BleEthClient:
         for key, future in list(self._data_ack_waiters.items()):
             self._set_future_exception_if_pending(future, error)
             self._data_ack_waiters.pop(key, None)
+
+        self._abort_ecm_ip_requests(error)
 
     def _handle_ble_disconnect(self):
         if self._disconnecting:
@@ -814,6 +898,122 @@ class BleEthClient:
             raise TimeoutError("GET_DEFAULT timed out")
 
         return result
+
+    def _abort_ecm_ip_requests(self, exc: Exception) -> None:
+        for key in ("get", "set"):
+            future = self._ecm_ip_futures.pop(key, None)
+            self._set_future_exception_if_pending(future, exc)
+
+    async def get_ecm_ip(
+        self, sub_cmd: int = ECM_IP_GET_ALL, timeout: float = 5.0
+    ) -> dict:
+        """Read the ECM IP configuration.
+
+        Returns a dict with 'status' plus, depending on sub_cmd:
+            0x00 all:    host, dev, mask, target_host, target_dev
+            0x01 host:   host, dev, mask
+            0x02 target: target_host, target_dev
+            0x03 status: host_active, target_active
+            0x05 diag:   'diag' dict with detach_dp_level, reenum_count,
+                         bus_reset_count, dhcp_count, dhcp_nak_count,
+                         target_active, host_active
+        """
+        if not self.is_connected:
+            raise ConnectionError("Not connected to BLE device")
+
+        future = asyncio.get_running_loop().create_future()
+        self._ecm_ip_futures["get"] = future
+        await self._send_frame(build_get_ecm_ip(sub_cmd))
+
+        try:
+            payload = await asyncio.wait_for(future, timeout=timeout)
+        except asyncio.TimeoutError:
+            self._ecm_ip_futures.pop("get", None)
+            raise TimeoutError("GET_ECM_IP timed out")
+
+        status = payload[0] if payload else STATUS_FRAME_ERR
+        result: dict = {"status": status}
+
+        def ip_at(offset: int) -> str:
+            return f"{payload[offset]}.{payload[offset + 1]}.{payload[offset + 2]}.{payload[offset + 3]}"
+
+        if status == STATUS_SUCCESS:
+            if len(payload) >= 21:
+                # Older firmware always answers with the full layout.
+                result.update(
+                    host=ip_at(1),
+                    dev=ip_at(5),
+                    mask=ip_at(9),
+                    target_host=ip_at(13),
+                    target_dev=ip_at(17),
+                )
+            elif sub_cmd == ECM_IP_GET_HOST and len(payload) >= 13:
+                result.update(host=ip_at(1), dev=ip_at(5), mask=ip_at(9))
+            elif sub_cmd == ECM_IP_GET_TARGET and len(payload) >= 9:
+                result.update(target_host=ip_at(1), target_dev=ip_at(5))
+            elif sub_cmd == ECM_IP_GET_STATUS and len(payload) >= 3:
+                result.update(host_active=bool(payload[1]), target_active=bool(payload[2]))
+            elif sub_cmd == ECM_IP_GET_DIAG and len(payload) >= 12:
+                result["diag"] = {
+                    "detach_dp_level": payload[1],
+                    "reenum_count": int.from_bytes(payload[2:4], "little"),
+                    "bus_reset_count": int.from_bytes(payload[4:6], "little"),
+                    "dhcp_count": int.from_bytes(payload[6:8], "little"),
+                    "dhcp_nak_count": int.from_bytes(payload[8:10], "little"),
+                    "target_active": bool(payload[10]),
+                    "host_active": bool(payload[11]),
+                }
+
+        return result
+
+    async def _set_ecm_ip_frame(self, frame: bytes, timeout: float) -> int:
+        if not self.is_connected:
+            raise ConnectionError("Not connected to BLE device")
+
+        future = asyncio.get_running_loop().create_future()
+        self._ecm_ip_futures["set"] = future
+        await self._send_frame(frame)
+
+        try:
+            return await asyncio.wait_for(future, timeout=timeout)
+        except asyncio.TimeoutError:
+            self._ecm_ip_futures.pop("set", None)
+            raise TimeoutError("SET_ECM_IP timed out")
+
+    async def set_ecm_ip_all(
+        self,
+        host_ip: str,
+        dev_ip: str,
+        subnet_mask: str,
+        target_host_ip: str,
+        target_dev_ip: str,
+        timeout: float = 5.0,
+    ) -> int:
+        """Set all ECM addresses. Returns the firmware status byte."""
+        frame = build_set_ecm_ip_all(
+            host_ip, dev_ip, subnet_mask, target_host_ip, target_dev_ip
+        )
+        return await self._set_ecm_ip_frame(frame, timeout)
+
+    async def set_ecm_ip_host(
+        self, host_ip: str, dev_ip: str, subnet_mask: str, timeout: float = 5.0
+    ) -> int:
+        """Set the host-side ECM addresses. Returns the firmware status byte."""
+        return await self._set_ecm_ip_frame(
+            build_set_ecm_ip_host(host_ip, dev_ip, subnet_mask), timeout
+        )
+
+    async def set_ecm_ip_target(
+        self, target_host_ip: str, target_dev_ip: str, timeout: float = 5.0
+    ) -> int:
+        """Set the target-side ECM addresses. Returns the firmware status byte."""
+        return await self._set_ecm_ip_frame(
+            build_set_ecm_ip_target(target_host_ip, target_dev_ip), timeout
+        )
+
+    async def reset_ecm_ip(self, timeout: float = 5.0) -> int:
+        """Reset the ECM IP configuration to factory defaults."""
+        return await self._set_ecm_ip_frame(build_set_ecm_ip_reset(), timeout)
 
     async def open_tunnel(
         self, remote_ip: str, remote_port: int, timeout: float = 10.0
@@ -1435,6 +1635,19 @@ class BleEthClient:
                     future.set_result({"ip": ip, "port": port, "enabled": enabled})
                 self._default_futures.pop("get", None)
                 logger.info(f"GET_DEFAULT response: ip={ip} port={port} enabled={enabled}")
+
+        elif cmd == CMD_SET_ECM_IP_RESP:
+            status = payload[0] if payload else STATUS_FRAME_ERR
+            future = self._ecm_ip_futures.pop("set", None)
+            if future and not future.done():
+                future.set_result(status)
+            logger.info(f"SET_ECM_IP response: status=0x{status:02X}")
+
+        elif cmd == CMD_GET_ECM_IP_RESP:
+            future = self._ecm_ip_futures.pop("get", None)
+            if future and not future.done():
+                future.set_result(bytes(payload))
+            logger.info(f"GET_ECM_IP response ({len(payload)} bytes): {payload.hex(' ')}")
 
         elif cmd == CMD_ERROR:
             self._emit_event(TunnelEvent(

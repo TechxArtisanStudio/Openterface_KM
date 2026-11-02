@@ -6,11 +6,21 @@ This guide shows how to:
 - open an interactive SSH session through that proxy
 - run a non-interactive SSH command from another program or script
 
-The examples below use the current validated target-side SSH endpoint:
+The examples below use the target-side SSH endpoint:
 
-- target IP: `192.168.11.2`
+- target IP: `192.168.20.2` (factory default; configurable, see below)
 - target port: `22`
 - BLE device name: `KVM-GO`
+
+The target IP is stored in the device's ECM IP configuration and is used by the
+BLE-Eth tunnel as both the ARP destination and the TCP destination. Read it with
+BLE-Eth command `0x23` (`GET_ECM_IP`) and change it with `0x22` (`SET_ECM_IP`);
+the tunnel picks the new identity up immediately. `tools/ssh_through_ble_eth.py`
+reads the ECM target host from the device when `--target` is omitted, so it
+follows the new address without extra flags.
+
+Use `0x23` with sub-command `0x02` to read the current target host/device
+addresses before running the commands below.
 
 ## Prerequisites
 
@@ -32,6 +42,29 @@ Make sure:
 - the firmware is running in BLE-Eth / ECM bridge mode
 - the device is advertising over BLE
 - the remote host reachable from the firmware is serving SSH on port `22`
+
+## Reachability Check: Ping vs. TCP
+
+The BLE-Eth tunnel carries **TCP only**. It does not forward ICMP, so
+`ping <target>` through the BLE proxy cannot work — there is no ICMP path in
+the protocol and no ICMP relay in the firmware.
+
+`BLE_ETH_CMD_PING` (`0x1E`) is a protocol-level echo used to measure BLE
+round-trip time; it is not a network ping.
+
+To check reachability through the tunnel, probe the TCP port instead:
+
+```bash
+# Through the local proxy
+nc -vz 127.0.0.1 18048
+
+# Direct from the host OS on the ECM side (ICMP is answered by the bridge there)
+ping 192.168.20.5
+```
+
+If the ECM interface itself must be validated, ping works on that interface
+because the bridge answers ICMP Echo on both ECM links. Only the BLE proxy path
+is TCP-only.
 
 ## Quick Interactive Login
 
@@ -66,7 +99,7 @@ python3 tools/ssh_through_ble_eth.py --proxy-only --local-port 18048
 When the proxy is ready it listens on:
 
 - local address: `127.0.0.1:18048`
-- remote address: `192.168.11.2:22`
+- remote address: `<configured target host>:22` (`192.168.20.2` by default)
 
 Leave this command running. In another terminal, connect to the local forwarded port.
 
@@ -164,7 +197,7 @@ SSH banner: SSH-2.0-OpenSSH_10.2
 For a repeatable “connect + banner + exit” check (useful for transport validation loops):
 
 ```bash
-python3 tests/test_ble_eth_ssh.py --target 192.168.11.2 --test-only --ack-window 6
+python3 tests/test_ble_eth_ssh.py --target 192.168.20.2 --test-only --ack-window 6
 ```
 
 Notes:
@@ -294,7 +327,7 @@ python3 -m pip install -r tools/requirements.txt
 
 - the tunnel open timed out before the TCP path established
 - retry the session
-- check the target-side SSH service is reachable on `192.168.11.2:22`
+- check the target-side SSH service is reachable on `<configured target host>:22` (`192.168.20.2` by default)
 
 ## Recommended Workflow
 
@@ -306,7 +339,8 @@ For manual use:
 
 For automation:
 
-1. Start `tools/ssh_through_ble_eth.py --proxy-only --local-port <port> --target 192.168.11.2`.
+1. Start `tools/ssh_through_ble_eth.py --proxy-only --local-port <port> --target <configured target>`.
+   Omitting `--target` uses the device's configured target host.
 2. Wait until the script reports the proxy is active.
 3. Run your `ssh` or `sshpass ssh` command against `127.0.0.1:<port>`.
 4. Stop the proxy when the command finishes.

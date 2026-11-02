@@ -603,13 +603,15 @@ void CH9329_DispatchCommand(uint8_t addr, uint8_t cmd_code, uint8_t* pdata, uint
 
             uint8_t status = STATUS_SUCCESS;
 
-            if (data_len != 1) {
+            /* Documented form is "no payload" and means get-all. A single byte
+             * selects a subset; anything longer is malformed. */
+            if (data_len > 1) {
                 status = STATUS_ERR_PARAM;
                 CH9329_SendResponse(addr, cmd_code, &status, 1, 0);
                 break;
             }
 
-            uint8_t sub_cmd = pdata[0];
+            uint8_t sub_cmd = (data_len == 1) ? pdata[0] : 0x00;
             uint8_t response[21]; // Max: 1 byte status + 20 bytes data
 
             switch (sub_cmd) {

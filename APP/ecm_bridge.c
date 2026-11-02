@@ -66,6 +66,7 @@ extern volatile uint32_t systick_ms;
 #define ECM_DHCP_OFFER                  2u
 #define ECM_DHCP_REQUEST                3u
 #define ECM_DHCP_ACK                    5u
+#define ECM_DHCP_NAK                    6u
 
 /* DHCP option codes */
 #define ECM_DHCP_OPT_SUBNET             1u
@@ -136,11 +137,41 @@ static ECM_RxFrame_t g_target_rx_frame;
 static uint16_t g_target_tx_offset;
 static uint8_t g_target_zlp_pending;
 static uint8_t g_target_notify_state;
+static uint32_t g_target_notify_hold_until_ms;
 #endif
 static uint16_t g_host_tx_offset;
 static uint8_t g_host_zlp_pending;
 static uint8_t g_host_notify_state;
 static uint32_t g_host_notify_last_send_ms;  /* Timestamp of last notification send */
+static uint32_t g_host_notify_hold_until_ms; /* Keep link down until this timestamp */
+
+/* Host OSes only restart DHCP when the carrier loss lasts long enough for
+ * their link debounce to fire. A single notification slot (~50 ms) is too
+ * short, so hold NETWORK_CONNECTION=0 for this long before link-up. */
+#define ECM_LINK_DOWN_HOLD_MS 800u
+
+/* Soft re-enumeration of the Mac-facing USBLIB controller after a host-side
+ * IP change. macOS keeps the ECM interface and its neighbour/route state
+ * across a carrier bounce, so the new address only becomes reachable once the
+ * device re-enumerates — which is what a physical replug does. The delay lets
+ * the CH9329 reply leave first; only the USBLIB side is cycled, so the target
+ * PC keeps its HID and ECM links. */
+#define ECM_HOST_REENUM_DELAY_MS 500u
+#define ECM_HOST_REENUM_LOW_MS   150u
+static uint8_t  g_host_reenum_state;   /* 0 idle, 1 wait to detach, 2 detached */
+static uint32_t g_host_reenum_at_ms;
+
+/* Same treatment for the target-facing USBFS controller when the target-side
+ * addresses change: the target PC must re-enumerate its ECM function before
+ * the new DHCP scope takes effect. This briefly drops Target HID too.
+ * The disconnect is held for a full second: hosts only tear the ECM netdev
+ * down (and restart DHCP) once the port has actually been absent, and a
+ * 150 ms dip was short enough that some hubs/hosts coalesced it into a port
+ * reset without re-running DHCP. */
+#define ECM_TARGET_REENUM_DELAY_MS 500u
+#define ECM_TARGET_REENUM_LOW_MS   1000u
+static uint8_t  g_target_reenum_state; /* 0 idle, 1 wait to detach, 2 detached */
+static uint32_t g_target_reenum_at_ms;
 
 /* Diagnostic variables moved to after #endif (always defined, see bottom of file) */
 
@@ -690,8 +721,20 @@ static uint8_t handle_dhcp_packet(const uint8_t *frame, uint16_t frame_len)
     memset(reply, 0, sizeof(reply));
     off = 0;
 
-    /* Ethernet header - DHCP DISCOVER/OFFER must broadcast */
-    if (dhcp_msg_type == ECM_DHCP_DISCOVER) {
+    /* RFC 2131 4.1 addressing: DISCOVER/OFFER is broadcast, and so is any
+       REQUEST that sets the broadcast flag. Everything else is unicast to the
+       client MAC. The IP destination follows ciaddr while the client is
+       renewing, otherwise the newly offered address. Without the ciaddr case
+       a host that bounces its link and re-requests its old lease would get an
+       ACK addressed to an IP it does not have yet, so an IP change would not
+       take effect until the lease expired. */
+    uint8_t ciaddr[4];
+    uint8_t broadcast_reply;
+    memcpy(ciaddr, &dhcp[12], 4);
+    broadcast_reply = (dhcp_msg_type == ECM_DHCP_DISCOVER) ||
+                      ((get_be16(&dhcp[10]) & 0x8000u) != 0);
+
+    if (broadcast_reply) {
         memset(&reply[off], 0xFF, 6);  /* dst = broadcast for OFFER */
     } else {
         memcpy(&reply[off], &frame[6], 6);  /* dst = original src for ACK */
@@ -715,9 +758,12 @@ static uint8_t handle_dhcp_packet(const uint8_t *frame, uint16_t frame_len)
     reply[off + 9] = ECM_IPV4_PROTO_UDP;  /* protocol = UDP */
     /* src IP = firmware device IP */
     memcpy(&reply[off + 12], ecm_dev_ip, 4);
-    /* dst IP = host IP (broadcast for Discover, unicast for Request) */
-    if (dhcp_msg_type == ECM_DHCP_DISCOVER) {
+    /* dst IP = ciaddr when renewing, offered IP when selecting, broadcast
+       when the client asked for it. */
+    if (broadcast_reply) {
         memset(&reply[off + 16], 0xFF, 4);  /* broadcast */
+    } else if ((ciaddr[0] | ciaddr[1] | ciaddr[2] | ciaddr[3]) != 0) {
+        memcpy(&reply[off + 16], ciaddr, 4);
     } else {
         memcpy(&reply[off + 16], ecm_host_ip, 4);
     }
@@ -1180,6 +1226,9 @@ static uint8_t handle_target_dhcp_packet(const uint8_t *frame, uint16_t frame_le
         USB_DEBUG("Target DHCP: unknown msg type=%d\r\n", dhcp_msg_type);
         return 0;
     }
+    /* Counts DISCOVER/REQUEST actually received from the target PC: this is
+     * the evidence that its ECM netdev came back and re-ran DHCP. */
+    g_target_dhcp_count++;
 
     USB_DEBUG("  DHCP msg type: %d (%s)\r\n", dhcp_msg_type,
               dhcp_msg_type == ECM_DHCP_DISCOVER ? "Discover" : "Request");
@@ -1202,9 +1251,27 @@ static uint8_t handle_target_dhcp_packet(const uint8_t *frame, uint16_t frame_le
     memset(reply, 0, sizeof(reply));
     off = 0;
 
-    /* Ethernet header - DHCP DISCOVER/OFFER must broadcast */
-    if (dhcp_msg_type == ECM_DHCP_DISCOVER) {
-        memset(&reply[off], 0xFF, 6);  /* dst = broadcast for OFFER */
+    /* RFC 2131 4.1 addressing, same rules as the host-side handler. */
+    uint8_t ciaddr[4];
+    uint8_t broadcast_reply;
+    uint8_t nak = 0;
+    memcpy(ciaddr, &dhcp[12], 4);
+
+    /* A REQUEST that names an address outside the current target scope belongs
+       to a lease from the previous IP configuration. NAK it so the client
+       drops that lease and restarts DHCP in the new scope immediately. */
+    if (dhcp_msg_type == ECM_DHCP_REQUEST) {
+        const uint8_t *wanted = has_requested_ip ? requested_ip : ciaddr;
+        if (memcmp(wanted, ecm_target_host_ip, 4) != 0) {
+            nak = 1;
+        }
+    }
+
+    broadcast_reply = (dhcp_msg_type == ECM_DHCP_DISCOVER) || nak ||
+                      ((get_be16(&dhcp[10]) & 0x8000u) != 0);
+
+    if (broadcast_reply) {
+        memset(&reply[off], 0xFF, 6);  /* dst = broadcast for OFFER/NAK */
     } else {
         memcpy(&reply[off], &frame[6], 6);  /* dst = original src for ACK */
     }
@@ -1227,9 +1294,12 @@ static uint8_t handle_target_dhcp_packet(const uint8_t *frame, uint16_t frame_le
     reply[off + 9] = ECM_IPV4_PROTO_UDP;  /* protocol = UDP */
     /* src IP = firmware target device IP */
     memcpy(&reply[off + 12], ecm_target_dev_ip, 4);
-    /* dst IP = target host IP (broadcast for Discover, unicast for Request) */
-    if (dhcp_msg_type == ECM_DHCP_DISCOVER) {
+    /* dst IP = ciaddr when renewing, offered IP when selecting, broadcast
+       when the client asked for it. */
+    if (broadcast_reply) {
         memset(&reply[off + 16], 0xFF, 4);  /* broadcast */
+    } else if ((ciaddr[0] | ciaddr[1] | ciaddr[2] | ciaddr[3]) != 0) {
+        memcpy(&reply[off + 16], ciaddr, 4);
     } else {
         memcpy(&reply[off + 16], ecm_target_host_ip, 4);
     }
@@ -1260,8 +1330,10 @@ static uint8_t handle_target_dhcp_packet(const uint8_t *frame, uint16_t frame_le
     /* ciaddr (4 bytes) */
     memset(&reply[off], 0, 4);
     off += 4;
-    /* yiaddr (4 bytes) - IP offered to client */
-    memcpy(&reply[off], ecm_target_host_ip, 4);
+    /* yiaddr (4 bytes) - IP offered to client (zero in a NAK) */
+    if (!nak) {
+        memcpy(&reply[off], ecm_target_host_ip, 4);
+    }
     off += 4;
     /* siaddr (4 bytes) - server IP */
     memcpy(&reply[off], ecm_target_dev_ip, 4);
@@ -1285,10 +1357,12 @@ static uint8_t handle_target_dhcp_packet(const uint8_t *frame, uint16_t frame_le
     reply[off++] = 0x63;
 
     /* DHCP options */
-    /* Message type: OFFER for DISCOVER, ACK for REQUEST (RFC 2131) */
+    /* Message type: OFFER for DISCOVER, ACK for REQUEST, NAK when the client
+       asked for an address from the previous configuration (RFC 2131 4.3.2) */
     {
-        uint8_t reply_type = (dhcp_msg_type == ECM_DHCP_DISCOVER)
-            ? ECM_DHCP_OFFER : ECM_DHCP_ACK;
+        uint8_t reply_type = nak ? ECM_DHCP_NAK :
+                             (dhcp_msg_type == ECM_DHCP_DISCOVER)
+                                 ? ECM_DHCP_OFFER : ECM_DHCP_ACK;
         reply[off++] = ECM_DHCP_OPT_MSG_TYPE;  // Option 53: DHCP Message Type
         reply[off++] = 0x01;
         reply[off++] = reply_type;
@@ -1300,26 +1374,29 @@ static uint8_t handle_target_dhcp_packet(const uint8_t *frame, uint16_t frame_le
     memcpy(&reply[off], ecm_target_dev_ip, 4);
     off += 4;
 
-    /* Lease time: 1 hour */
-    reply[off++] = ECM_DHCP_OPT_LEASE_TIME;
-    reply[off++] = 0x04;
-    reply[off++] = 0x00;
-    reply[off++] = 0x00;
-    reply[off++] = 0x0E;
-    reply[off++] = 0x10;  /* 3600 seconds */
+    /* A NAK carries no lease parameters. */
+    if (!nak) {
+        /* Lease time: 1 hour */
+        reply[off++] = ECM_DHCP_OPT_LEASE_TIME;
+        reply[off++] = 0x04;
+        reply[off++] = 0x00;
+        reply[off++] = 0x00;
+        reply[off++] = 0x0E;
+        reply[off++] = 0x10;  /* 3600 seconds */
 
-    /* Subnet mask */
-    reply[off++] = ECM_DHCP_OPT_SUBNET;
-    reply[off++] = 0x04;
-    memcpy(&reply[off], ecm_subnet_mask, 4);
-    off += 4;
+        /* Subnet mask */
+        reply[off++] = ECM_DHCP_OPT_SUBNET;
+        reply[off++] = 0x04;
+        memcpy(&reply[off], ecm_subnet_mask, 4);
+        off += 4;
 
-    /* DNS server - use public DNS to avoid OS trying to use firmware as DNS */
-    reply[off++] = ECM_DHCP_OPT_DNS;
-    reply[off++] = 0x04;
-    uint8_t public_dns[4] = { 8, 8, 8, 8 };  /* Google DNS */
-    memcpy(&reply[off], public_dns, 4);
-    off += 4;
+        /* DNS server - use public DNS to avoid OS trying to use firmware as DNS */
+        reply[off++] = ECM_DHCP_OPT_DNS;
+        reply[off++] = 0x04;
+        uint8_t public_dns[4] = { 8, 8, 8, 8 };  /* Google DNS */
+        memcpy(&reply[off], public_dns, 4);
+        off += 4;
+    }
 
     /* Router (default gateway) - intentionally omitted to avoid interfering
        with the target's other network interfaces. For a point-to-point
@@ -1384,6 +1461,7 @@ static uint8_t handle_target_dhcp_packet(const uint8_t *frame, uint16_t frame_le
     /* Step 6: Verify response sending */
     USB_DEBUG("DHCP response ready, len=%d\r\n", off);
     USB_DEBUG("  Response type: %s\r\n",
+              nak ? "NAK" :
               (dhcp_msg_type == ECM_DHCP_DISCOVER) ? "OFFER" : "ACK");
     USB_DEBUG("  Server ID: %d.%d.%d.%d\r\n",
               ecm_target_dev_ip[0], ecm_target_dev_ip[1],
@@ -1392,6 +1470,9 @@ static uint8_t handle_target_dhcp_packet(const uint8_t *frame, uint16_t frame_le
     queue_clear(&g_host_to_target);
     uint8_t push_result = queue_push(&g_host_to_target, reply, off);
     USB_DEBUG("  Queue push: %s\r\n", push_result ? "OK" : "FAIL");
+    if (nak) {
+        g_target_dhcp_nak_count++;
+    }
 
     return 1;
 }
@@ -1853,8 +1934,13 @@ static void poll_target_notification(void)
 {
     uint8_t packet[16];
     uint8_t len;
+    uint32_t now = systick_ms;
 
     if (g_target_notify_state == 0) {
+        return;
+    }
+
+    if ((int32_t)(now - g_target_notify_hold_until_ms) < 0) {
         return;
     }
 
@@ -1868,9 +1954,16 @@ static void poll_target_notification(void)
     len = make_notification(g_target_notify_state, ECM_BRIDGE_TARGET_COMM_IF, packet);
     if (len > 0 && USBFS_Endp_DataUp(DEF_UEP5, packet, len, DEF_UEP_CPY_LOAD) == READY) {
         USB_DEBUG("ECM: notif sent state=%d len=%d\r\n", g_target_notify_state, len);
-        g_target_notify_state++;
-        if (g_target_notify_state > 3) {
+        if (g_target_notify_state == 1) {
+            /* Hold link down so the target PC notices the carrier loss. */
+            g_target_notify_state = 2;
+            g_target_notify_hold_until_ms = now + ECM_LINK_DOWN_HOLD_MS;
+        } else if (g_target_notify_state >= 3) {
             g_target_notify_state = 0;
+            /* Link is back up: refresh the target PC's neighbour entry. */
+            g_target_garp_sent = 0;
+        } else {
+            g_target_notify_state++;
         }
     }
     else {
@@ -1888,9 +1981,16 @@ static void poll_host_notification(void)
         return;
     }
 
+    uint32_t now = systick_ms;
+
+    /* Keep NETWORK_CONNECTION=0 asserted long enough for the host to drop the
+       interface and restart DHCP before the link-up notification is sent. */
+    if ((int32_t)(now - g_host_notify_hold_until_ms) < 0) {
+        return;
+    }
+
     /* Enforce minimum 50ms delay between consecutive notifications so the
        host has time to process each one before the next arrives. */
-    uint32_t now = systick_ms;
     if (now - g_host_notify_last_send_ms < 50) {
         return;
     }
@@ -1898,9 +1998,15 @@ static void poll_host_notification(void)
     len = make_notification(g_host_notify_state, ECM_BRIDGE_HOST_COMM_IF, packet);
     if (len > 0 && USBD_ENDPx_DataUp(ECM_USBD_INT_ENDP, packet, len) == USB_SUCCESS) {
         g_host_notify_last_send_ms = now;
-        g_host_notify_state++;
-        if (g_host_notify_state > 3) {
+        if (g_host_notify_state == 1) {
+            g_host_notify_state = 2;
+            g_host_notify_hold_until_ms = now + ECM_LINK_DOWN_HOLD_MS;
+        } else if (g_host_notify_state >= 3) {
             g_host_notify_state = 0;
+            /* Link is back up: refresh the host's neighbour entry for the new IP. */
+            g_host_garp_sent = 0;
+        } else {
+            g_host_notify_state++;
         }
     }
 }
@@ -2069,14 +2175,119 @@ static void poll_host_tx(void)
     }
 }
 
-void ECM_Bridge_Init(void)
+/* Queue a USBLIB detach/attach cycle so the host re-enumerates and rebuilds
+ * its ECM interface state. No-op when the active mode has no host-side ECM. */
+static void schedule_host_reenum(void)
 {
-    /* Load network configuration from ECM_IPConfig module (populated by ECM_IPConfig_Init) */
+    if (g_host_reenum_state != 0) {
+        return;  /* already scheduled or in progress */
+    }
+    if (!USB_ModeConfig_ActiveModeHasHostCdcEcm()) {
+        return;
+    }
+    g_host_reenum_state = 1;
+    g_host_reenum_at_ms = systick_ms + ECM_HOST_REENUM_DELAY_MS;
+    USB_DEBUG("Host ECM: re-enumeration scheduled\r\n");
+}
+
+static void poll_host_reenum(void)
+{
+    if (g_host_reenum_state == 0) {
+        return;
+    }
+    if ((int32_t)(systick_ms - g_host_reenum_at_ms) < 0) {
+        return;
+    }
+
+    if (g_host_reenum_state == 1) {
+        /* Drop the D+ pull-up: the host sees a disconnect, like a replug. */
+        USB_DEBUG("Host ECM: re-enumerating (detach)\r\n");
+        USB_Port_Set(DISABLE, DISABLE);
+        g_host_reenum_at_ms = systick_ms + ECM_HOST_REENUM_LOW_MS;
+        g_host_reenum_state = 2;
+    }
+    else {
+        USB_DEBUG("Host ECM: re-enumerating (attach)\r\n");
+        USB_Port_Set(ENABLE, ENABLE);
+        g_host_reenum_state = 0;
+    }
+}
+
+#if USB_WORK_MODE_COMPILES_TARGET_CDC_ECM
+/* Queue a USBFS detach/attach cycle so the target PC re-enumerates its ECM
+ * function. No-op when the active mode has no target-side ECM. */
+static void schedule_target_reenum(void)
+{
+    if (g_target_reenum_state != 0) {
+        return;  /* already scheduled or in progress */
+    }
+    if (!USB_ModeConfig_ActiveModeHasTargetCdcEcm()) {
+        return;
+    }
+    g_target_reenum_state = 1;
+    g_target_reenum_at_ms = systick_ms + ECM_TARGET_REENUM_DELAY_MS;
+    USB_DEBUG("Target ECM: re-enumeration scheduled\r\n");
+}
+
+static void poll_target_reenum(void)
+{
+    if (g_target_reenum_state == 0) {
+        return;
+    }
+    if ((int32_t)(systick_ms - g_target_reenum_at_ms) < 0) {
+        return;
+    }
+
+    if (g_target_reenum_state == 1) {
+        USB_DEBUG("Target ECM: re-enumerating (detach)\r\n");
+        g_target_ecm_data_if_active = 0;
+        /* DEV_PU_EN=0 removes the internal D+ pull-up. BASE_CTRL is cleared
+         * again explicitly because the SIE is still held in reset by
+         * USBFS_Device_Init(DISABLE) on some library versions. */
+        USBFS_Device_Init(DISABLE);
+        USBFSD->BASE_CTRL = 0;
+        g_target_reenum_count++;
+        g_target_reenum_at_ms = systick_ms + ECM_TARGET_REENUM_LOW_MS;
+        g_target_reenum_state = 2;
+    }
+    else {
+        USB_DEBUG("Target ECM: re-enumerating (attach)\r\n");
+        /* Sample D+ at the end of the low window (PORT_EN is still set here,
+         * so UD_DP_PIN reports the physical line). It must read 0: a high
+         * level means the target host never saw a disconnect. */
+        g_target_detach_dp_level = (USBFSD->UDEV_CTRL & USBFS_UD_DP_PIN) ? 1u : 0u;
+
+        /* Frames queued for the old session carry stale addressing. */
+        queue_clear(&g_host_to_target);
+        rx_frame_clear(&g_target_rx_frame);
+        g_target_tx_offset = 0;
+        g_target_zlp_pending = 0;
+        g_target_garp_sent = 0;
+        /* Play the link-state sequence even if the host skips the bus reset. */
+        g_target_notify_state = 1;
+        g_target_notify_hold_until_ms = 0;
+        /* Fresh endpoints + D+ pull-up; blocks ~100 ms for power stability,
+         * then the target host enumerates and runs DHCP again. */
+        USBFS_Device_Init(ENABLE);
+        g_target_reenum_state = 0;
+    }
+}
+#endif
+
+static void bridge_load_ip_config(void)
+{
+    /* Load network configuration from ECM_IPConfig module (populated by
+       ECM_IPConfig_Init) into the bridge's local copies. */
     ECM_IPConfig_GetHostIP(ecm_host_ip);
     ECM_IPConfig_GetDevIP(ecm_dev_ip);
     ECM_IPConfig_GetSubnetMask(ecm_subnet_mask);
     ECM_IPConfig_GetTargetHostIP(ecm_target_host_ip);
     ECM_IPConfig_GetTargetDevIP(ecm_target_dev_ip);
+}
+
+void ECM_Bridge_Init(void)
+{
+    bridge_load_ip_config();
 
     /* Step 1: Verify compilation configuration */
 #if USB_WORK_MODE_COMPILES_TARGET_CDC_ECM
@@ -2085,45 +2296,23 @@ void ECM_Bridge_Init(void)
     USB_DEBUG("Target CDC ECM: DISABLED\r\n");
 #endif
 
-#if USB_WORK_MODE_COMPILES_TARGET_CDC_ECM
-    queue_clear(&g_host_to_target);
-#endif
+    /* Called from USBD_Reset, i.e. the Mac-facing controller has just
+       (re-)enumerated. Only host-side session state may be reset here: the
+       target-facing USBFS controller keeps running across a host-only soft
+       re-enumeration and would otherwise lose its interface activation. */
     queue_clear(&g_target_to_host);
-    rx_frame_clear(&g_host_rx_frame);
 #if USB_WORK_MODE_COMPILES_TARGET_CDC_ECM
-    rx_frame_clear(&g_target_rx_frame);
+    /* Frames queued toward the target PC belong to the old host session. */
+    queue_clear(&g_host_to_target);
     g_target_tx_offset = 0;
     g_target_zlp_pending = 0;
-    g_target_notify_state = 1;
 #endif
+    rx_frame_clear(&g_host_rx_frame);
     g_host_tx_offset = 0;
     g_host_zlp_pending = 0;
     g_host_notify_state = 1;
     g_host_garp_sent = 0;
     g_host_ecm_data_if_active = 0;
-#if USB_WORK_MODE_COMPILES_TARGET_CDC_ECM
-    g_target_garp_sent = 0;
-    g_target_ecm_data_if_active = 0;
-#endif
-
-#if USB_WORK_MODE_COMPILES_TARGET_CDC_ECM
-    /* Only configure USBFS EP7 if the active mode actually uses
-       target-side CDC ECM. With runtime profiles, the compiled code
-       exists but the descriptor may not advertise these endpoints. */
-    if (USB_ModeConfig_ActiveModeHasTargetCdcEcm()) {
-        /* Force enable EP7 TX and RX at the hardware level (bidirectional EP7) */
-        USBFSD_UEP_MOD(3) |= USBFS_UEP7_TX_EN | USBFS_UEP7_RX_EN;
-
-        /* Configure EP7 RX to ACK so we can receive data from Target PC
-           without SET_INTERFACE. Without this, EP7 RX stays in NAK state and
-           Target PC's bulk OUT (ARP requests etc.) is silently dropped. */
-        USBFSD->UEP7_RX_CTRL = USBFS_UEP_R_RES_ACK;
-
-        USB_DEBUG("USBFS endpoints configured:\r\n");
-        USB_DEBUG("  EP7 OUT: Target data OUT (RX) from Target PC\r\n");
-        USB_DEBUG("  EP7 IN: Target data IN (TX) to Target PC\r\n");
-    }
-#endif
 
     USB_DEBUG("ECM init done\r\n");
     USB_DEBUG("Network config:\r\n");
@@ -2136,11 +2325,77 @@ void ECM_Bridge_Init(void)
               ECM_TARGET_DEV_MAC[3], ECM_TARGET_DEV_MAC[4], ECM_TARGET_DEV_MAC[5]);
 }
 
+void ECM_Bridge_InitTarget(void)
+{
+    /* Called from the USBFS bus-reset ISR, i.e. the target-facing controller
+       has just (re-)enumerated. Mirrors ECM_Bridge_Init but deliberately
+       leaves host-side session state (interface activation, notifications)
+       untouched — a target-only soft re-enumeration must not disturb the
+       Mac-facing ECM link, whose host will never re-send SET_INTERFACE. */
+    bridge_load_ip_config();
+
+#if USB_WORK_MODE_COMPILES_TARGET_CDC_ECM
+    queue_clear(&g_host_to_target);
+    /* Frames for the Mac were produced by the old target session; reset the
+       matching transport offsets along with the queue. */
+    queue_clear(&g_target_to_host);
+    g_host_tx_offset = 0;
+    g_host_zlp_pending = 0;
+    rx_frame_clear(&g_target_rx_frame);
+    g_target_tx_offset = 0;
+    g_target_zlp_pending = 0;
+    g_target_notify_state = 1;
+    g_target_notify_hold_until_ms = 0;
+    g_target_garp_sent = 0;
+    g_target_ecm_data_if_active = 0;
+    /* Reaching this function means the target host reset the USBFS bus, i.e.
+     * it really did re-enumerate after the last detach. */
+    g_target_bus_reset_count++;
+
+    /* Only configure USBFS EP7 if the active mode actually uses
+       target-side CDC ECM. With runtime profiles, the compiled code
+       exists but the descriptor may not advertise these endpoints. */
+    if (USB_ModeConfig_ActiveModeHasTargetCdcEcm()) {
+        /* Force enable EP7 TX and RX at the hardware level (bidirectional EP7) */
+        USBFSD_UEP_MOD(3) |= USBFS_UEP7_TX_EN | USBFS_UEP7_RX_EN;
+
+        /* Configure EP7 RX to ACK so we can receive data from Target PC
+           without SET_INTERFACE. Without this, EP7 RX stays in NAK state and
+           Target PC's bulk OUT (ARP requests etc.) is silently dropped. */
+        USBFSD->UEP7_RX_CTRL = USBFS_UEP_R_RES_ACK;
+    }
+
+    USB_DEBUG("ECM target init done: %d.%d.%d.%d / %d.%d.%d.%d\r\n",
+              ecm_target_host_ip[0], ecm_target_host_ip[1],
+              ecm_target_host_ip[2], ecm_target_host_ip[3],
+              ecm_target_dev_ip[0], ecm_target_dev_ip[1],
+              ecm_target_dev_ip[2], ecm_target_dev_ip[3]);
+#endif
+}
+
 void ECM_Bridge_UpdateIPConfig(void)
 {
+    uint8_t old_host_ip[4];
+    uint8_t old_dev_ip[4];
+    uint8_t old_subnet[4];
+    uint8_t host_side_changed;
+#if USB_WORK_MODE_COMPILES_TARGET_CDC_ECM
+    uint8_t old_target_host_ip[4];
+    uint8_t old_target_dev_ip[4];
+    uint8_t target_side_changed;
+#endif
+
     /* Update bridge layer IP variables from ECM_IPConfig module's RAM cache.
        This function is called after IP configuration is modified to make
        the changes take effect immediately without requiring USB reconnection. */
+
+    memcpy(old_host_ip, ecm_host_ip, 4);
+    memcpy(old_dev_ip, ecm_dev_ip, 4);
+    memcpy(old_subnet, ecm_subnet_mask, 4);
+#if USB_WORK_MODE_COMPILES_TARGET_CDC_ECM
+    memcpy(old_target_host_ip, ecm_target_host_ip, 4);
+    memcpy(old_target_dev_ip, ecm_target_dev_ip, 4);
+#endif
 
     /* Load network configuration from ECM_IPConfig module */
     ECM_IPConfig_GetHostIP(ecm_host_ip);
@@ -2149,45 +2404,50 @@ void ECM_Bridge_UpdateIPConfig(void)
     ECM_IPConfig_GetTargetHostIP(ecm_target_host_ip);
     ECM_IPConfig_GetTargetDevIP(ecm_target_dev_ip);
 
+    host_side_changed = (memcmp(old_host_ip, ecm_host_ip, 4) != 0) ||
+                        (memcmp(old_dev_ip, ecm_dev_ip, 4) != 0) ||
+                        (memcmp(old_subnet, ecm_subnet_mask, 4) != 0);
+
     USB_DEBUG("ECM IP config updated:\r\n");
     USB_DEBUG("  Host IP: %d.%d.%d.%d\r\n", ecm_host_ip[0], ecm_host_ip[1], ecm_host_ip[2], ecm_host_ip[3]);
     USB_DEBUG("  Dev IP: %d.%d.%d.%d\r\n", ecm_dev_ip[0], ecm_dev_ip[1], ecm_dev_ip[2], ecm_dev_ip[3]);
 
-    /* Step 1: Send GARP (Gratuitous ARP) to update host's ARP cache immediately.
-       This tells the host "I'm now at this new IP address". */
-    if (g_host_ecm_data_if_active) {
-        USB_DEBUG("Sending GARP for new IP...\r\n");
-        uint8_t garp[42];
-        memset(garp, 0xFF, 6);  // Broadcast destination
-        memcpy(&garp[6], ECM_DEV_MAC, 6);  // Source MAC
-        garp[12] = 0x08; garp[13] = 0x06;  // EtherType: ARP
-        garp[14] = 0x00; garp[15] = 0x01;  // Hardware type: Ethernet
-        garp[16] = 0x08; garp[17] = 0x00;  // Protocol type: IPv4
-        garp[18] = 6;  garp[19] = 4;        // Hardware/protocol addr len
-        garp[20] = 0x00; garp[21] = 0x02;  // Opcode: Reply (GARP uses reply)
-        memcpy(&garp[22], ECM_DEV_MAC, 6);  // Sender MAC
-        memcpy(&garp[28], ecm_dev_ip, 4);   // Sender IP (new IP)
-        memcpy(&garp[32], ECM_DEV_MAC, 6);  // Target MAC (same as sender for GARP)
-        memcpy(&garp[38], ecm_dev_ip, 4);   // Target IP (same as sender for GARP)
-        queue_push(&g_host_to_target, garp, sizeof(garp));
-        g_host_garp_sent = 1;
-    } else {
-        /* If interface not active yet, reset flag so GARP will be sent when it activates */
-        g_host_garp_sent = 0;
+    /* Step 1: let poll_host_tx() emit the GARP for the new dev IP. It builds
+       the frame on the host-facing queue (g_target_to_host); pushing it here
+       by hand used to send it out toward the target PC instead of the Mac. */
+    g_host_garp_sent = 0;
+
+#if USB_WORK_MODE_COMPILES_TARGET_CDC_ECM
+    /* Step 2: On macOS/Windows a carrier bounce alone does not clear the cached
+       interface state, so re-enumerate the target-facing USBFS controller when
+       the target addresses changed. The target PC then re-runs DHCP against the
+       new scope. This drops Target HID for the length of the disconnect. */
+    target_side_changed = (memcmp(old_target_host_ip, ecm_target_host_ip, 4) != 0) ||
+                          (memcmp(old_target_dev_ip, ecm_target_dev_ip, 4) != 0);
+    if (target_side_changed) {
+        schedule_target_reenum();
+        if (g_target_reenum_state == 0) {
+            /* Mode without target ECM to re-enumerate — bounce the link. */
+            USB_DEBUG("Triggering target link state change (down → up)...\r\n");
+            g_target_notify_hold_until_ms = 0;
+            g_target_notify_state = 1;
+        }
     }
-
-#if USB_WORK_MODE_COMPILES_TARGET_CDC_ECM
-    g_target_garp_sent = 0;
 #endif
 
-    /* Step 2: Trigger link state change to force host to re-negotiate DHCP.
-       Send link down → link up sequence. This causes the host to detect a
-       link change and automatically run DHCP to get the new IP. */
-    USB_DEBUG("Triggering link state change (down → up)...\r\n");
-    g_host_notify_state = 1;  // Will send: link down, then link up, then speed change
-#if USB_WORK_MODE_COMPILES_TARGET_CDC_ECM
-    g_target_notify_state = 1;
-#endif
+    /* Step 3: On macOS a carrier bounce alone is not enough for the host side —
+       the old interface/neighbour state survives it and the new address stays
+       unreachable until the device is replugged. Re-enumerate the Mac-facing
+       USB controller instead; when the mode has no host ECM, keep the plain
+       carrier bounce as the fallback. */
+    if (host_side_changed) {
+        schedule_host_reenum();
+        if (g_host_reenum_state == 0) {
+            USB_DEBUG("Triggering host link state change (down → up)...\r\n");
+            g_host_notify_hold_until_ms = 0;
+            g_host_notify_state = 1;
+        }
+    }
 }
 
 void ECM_Bridge_SendRawFrame(const uint8_t *data, uint16_t len)
@@ -2293,7 +2553,9 @@ static uint8_t handle_target_frame(const uint8_t *frame, uint16_t frame_len)
 
 void ECM_Bridge_Poll(void)
 {
+    poll_host_reenum();
 #if USB_WORK_MODE_COMPILES_TARGET_CDC_ECM
+    poll_target_reenum();
     poll_target_notification();
 #endif
     poll_host_notification();
@@ -2316,6 +2578,11 @@ volatile uint8_t g_dhcp_led_mode = 0;
 volatile uint8_t g_host_garp_sent = 0;
 volatile uint8_t g_target_garp_sent = 0;
 volatile uint8_t g_ecm_tx_state = 0;
+volatile uint8_t g_target_detach_dp_level = 0xFF;
+volatile uint16_t g_target_reenum_count = 0;
+volatile uint16_t g_target_bus_reset_count = 0;
+volatile uint16_t g_target_dhcp_count = 0;
+volatile uint16_t g_target_dhcp_nak_count = 0;
 /* Flag indicating ECM bridge is currently processing a CH9329 command via TCP frame.
  * Set to 1 when about to call CH9329_RxBuffer_Add, cleared after response is handled.
  * Used to prevent race conditions with USB queue processing of CH9329 responses. */

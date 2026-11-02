@@ -31,7 +31,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from tools.ble_eth_tunnel import BleEthClient, BleTcpProxy, TunnelEvent
+from tools.ble_eth_tunnel import BleEthClient, BleTcpProxy, TunnelEvent, ECM_IP_GET_ALL
 
 
 LOG = logging.getLogger("ssh_through_ble_eth")
@@ -209,6 +209,26 @@ async def _run_ssh(args: argparse.Namespace) -> int:
     return await proc.wait()
 
 
+async def _resolve_target_from_device(client: BleEthClient) -> str:
+    """Read the target host address from the device's ECM IP configuration."""
+    try:
+        config = await client.get_ecm_ip(ECM_IP_GET_ALL, timeout=3.0)
+        target = config.get("target_host")
+        if target:
+            return target
+    except (TimeoutError, ConnectionError) as exc:
+        LOG.warning("Could not read ECM IP configuration: %s", exc)
+
+    try:
+        default = await client.get_default_target(timeout=3.0)
+        return default["ip"]
+    except (TimeoutError, ConnectionError) as exc:
+        raise ConnectionError(
+            "Could not determine the target IP; pass --target explicitly or "
+            "configure the ECM target address on the device."
+        ) from exc
+
+
 async def run(args: argparse.Namespace) -> int:
     client = BleEthClient(
         device_name=args.device_name,
@@ -267,6 +287,11 @@ async def run(args: argparse.Namespace) -> int:
             )
             client.apply_device_features(int(info.get("features", 0)))
 
+            target_ip = args.target
+            if target_ip is None:
+                target_ip = await _resolve_target_from_device(client)
+                print(f"Using ECM target host from device: {target_ip}")
+
             if not args.no_cleanup_stale:
                 await _cleanup_stale_tunnels(client, int(info.get("max_connections", 0)))
 
@@ -280,7 +305,7 @@ async def run(args: argparse.Namespace) -> int:
                     client=client,
                     local_host=args.local_host,
                     local_port=candidate_port,
-                    target_ip=args.target,
+                    target_ip=target_ip,
                     target_port=args.target_port,
                     recv_timeout=args.recv_timeout,
                     max_connections=info.get("max_connections", 0),
@@ -312,7 +337,7 @@ async def run(args: argparse.Namespace) -> int:
             print()
             print("BLE-Eth SSH proxy is active:")
             print(f"  local:  {args.local_host}:{args.local_port}")
-            print(f"  remote: {args.target}:{args.target_port}")
+            print(f"  remote: {target_ip}:{args.target_port}")
             print()
 
             if args.test_banner:
@@ -405,8 +430,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--target",
-        default="192.168.11.2",
-        help="Remote SSH server IP reachable from the firmware ECM side (default: 192.168.11.2).",
+        default=None,
+        help="Remote SSH server IP reachable from the firmware ECM side "
+        "(default: read the target host from the device's ECM configuration).",
     )
     parser.add_argument(
         "--target-port",

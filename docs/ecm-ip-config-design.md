@@ -409,6 +409,8 @@ Response: 57 AB 00 A6 01 00 <sum>
 | 0x00 | Get All | [host_ip 4B][dev_ip 4B][subnet 4B][target_host_ip 4B][target_dev_ip 4B] = 20B |
 | 0x01 | Get Host Side | [host_ip 4B][dev_ip 4B][subnet 4B] = 12B |
 | 0x02 | Get Target Side | [target_host_ip 4B][target_dev_ip 4B] = 8B |
+| 0x03 | Get Link Status | [host_ecm_active 1B][target_ecm_active 1B] = 2B |
+| 0x05 | Get Diagnostics | [detach_dp_level 1B][reenum_count 2B LE][bus_reset_count 2B LE][dhcp_count 2B LE][dhcp_nak_count 2B LE][target_ecm_active 1B][host_ecm_active 1B] = 11B |
 
 **响应格式：**
 ```
@@ -460,7 +462,12 @@ void ECM_Bridge_Init(void) {
 }
 ```
 
-> **配置生效时机**：ECM 桥接在 `ECM_Bridge_Init` 时一次性读取配置到本地数组，运行期不再访问 Flash。因此配置修改后**必须重启设备**才能生效。`Set` 命令的响应中不包含"立即生效"语义，上层应用应在收到成功响应后提示用户重启。
+> **配置生效时机**：ECM 桥接在 `ECM_Bridge_Init` 时一次性读取配置到本地数组，运行期不再访问 Flash。`ECM_IPConfig_Set` 写 Flash 成功后会调用 `ECM_Bridge_UpdateIPConfig()` 立即刷新本地数组，因此**无需重启设备**：
+> - 主机侧地址（host/dev/subnet）变化时，固件先回复命令，约 500 ms 后对面向主机的 USBLIB 控制器做一次软重枚举（拉低再使能 D+ 上拉），强制主机重新枚举 ECM 接口并重新 DHCP——仅靠 link up/down 通知在 macOS 上不足以清除旧的接口/邻居缓存。重枚举期间主机的 CDC ACM 与 ECM 会短暂掉线后恢复，面向目标机的 USBFS 不受影响。
+> - 目标侧地址（target_host/target_dev）变化时，同样在约 500 ms 后对面向目标机的 USBFS 控制器做软重枚举（`USBFS_Device_Init(DISABLE)` 拉低 D+ 上拉，保持 1 s 后再 `USBFS_Device_Init(ENABLE)`），让目标机真正看到断开并重新枚举 ECM 功能、重新 DHCP——150 ms 的断开窗口太短，目标机（Linux/Windows）往往不会拆掉旧的网卡，也就不会重新发 DHCP。重枚举期间目标机的 HID 键盘/鼠标会中断约 1 s，随后自动恢复。重新挂载后固件会重播 link down/up 状态序列（防止主机跳过总线复位），并对目标机发来的、指向旧网段地址的 DHCP REQUEST 回 NAK（RFC 2131 4.3.2），迫使客户端丢弃旧租约、立即重新 DISCOVER。
+> - 诊断：GET 0x05 返回上次目标侧断开时采样到的 D+ 电平、重枚举次数、总线复位次数、DHCP 请求/NAK 次数以及两侧 ECM 数据接口状态，可直接判断“目标机是否真的看到断开”和“目标机是否重新发了 DHCP”。
+> - 两侧互不影响；只有对应侧地址真正变化时才重枚举该侧，否则仅保留 link down/up 兜底。
+> - 初始化按侧拆分：USBD 复位调用 `ECM_Bridge_Init()`，只重置主机侧会话状态；USBFS 总线复位调用 `ECM_Bridge_InitTarget()`，只重置目标侧会话状态。这样单侧重枚举不会清掉另一侧已激活的 ECM 数据接口（对端不会重新发送 SET_INTERFACE）。两者都会重新从 RAM 缓存加载 5 个 IP 地址。
 
 ### 4. 文件清单
 

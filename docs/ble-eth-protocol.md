@@ -110,6 +110,82 @@ When the remote TCP side closes the connection, the device pushes:
 57 AB 00 D2 01 <conn_id> CS
 ```
 
+### Configuration
+
+#### SET_DEFAULT (`0x20`) / GET_DEFAULT (`0x21`) - Default SSH Target
+
+`SET_DEFAULT` stores the auto-connect target in flash. `GET_DEFAULT` reads it
+back.
+
+- SET_DEFAULT request payload (6 bytes): `[IP 4][port 2]`, response `0xA0` with
+  a 1-byte status.
+- GET_DEFAULT request has no payload, response `0xA1` with a 7-byte payload:
+  `[IP 4][port 2][enabled 1]`.
+
+#### SET_ECM_IP (`0x22`) / GET_ECM_IP (`0x23`) - ECM Network Configuration
+
+These commands change the ECM bridge addressing at runtime (persisted to the
+dual-page flash record).
+
+**SET_ECM_IP request payload:**
+
+| sub_cmd | Name | Payload |
+|---------|------|---------|
+| `0x00` | Set all | `[host 4][dev 4][mask 4][target_host 4][target_dev 4]` (21 bytes total) |
+| `0x01` | Set host side | `[host 4][dev 4][mask 4]` (13 bytes total) |
+| `0x02` | Set target side | `[target_host 4][target_dev 4]` (9 bytes total) |
+| `0x04` | Reset to default | 1 byte |
+
+Response `0xA2` with a 1-byte status (`0x00` success, `0xE5` invalid
+parameters, `0xE9` flash error).
+
+**GET_ECM_IP request payload:** 1 byte `[sub_cmd]` — `0x00` all, `0x01` host
+side, `0x02` target side, `0x03` bridge link status, `0x05` target-side
+re-enumeration / DHCP diagnostics.
+
+Response `0xA3`:
+
+| sub_cmd | Payload |
+|---------|---------|
+| `0x00` | `[host 4][dev 4][mask 4][target_host 4][target_dev 4]` (21 bytes) |
+| `0x01` | `[host 4][dev 4][mask 4]` (13 bytes) |
+| `0x02` | `[target_host 4][target_dev 4]` (9 bytes) |
+| `0x03` | `[host_ecm_active 1][target_ecm_active 1]` (2 bytes) |
+| `0x05` | Diagnostics, see below (12 bytes) |
+
+The `0x05` diagnostics reply is laid out as:
+
+| Offset | Field | Size | Description |
+|--------|-------|------|-------------|
+| 0 | Status | 1 | `0x00` on success |
+| 1 | Detach D+ level | 1 | D+ sampled at the end of the last target detach: `0x00` = target host saw the disconnect, `0x01` = line stayed high (no disconnect), `0xFF` = no re-enumeration yet |
+| 2-3 | Re-enum count | 2 | Little-endian, number of target detach/attach cycles |
+| 4-5 | Bus reset count | 2 | Little-endian, number of USBFS bus resets seen from the target |
+| 6-7 | DHCP requests | 2 | Little-endian, DISCOVER/REQUEST frames handled for the target |
+| 8-9 | DHCP NAKs | 2 | Little-endian, out-of-scope REQUESTs answered with NAK |
+| 10 | Target ECM data if | 1 | `1` when the target ECM data interface is active |
+| 11 | Host ECM data if | 1 | `1` when the host ECM data interface is active |
+
+> **Overlapping command bytes:** CH9329 defines `0x22` (BLE security, payload
+> `[sub_cmd]` with sub-commands `0x01..0x03`) and `0x23` (BLE set-name, payload
+> is the name text). The firmware distinguishes the two protocols by payload
+> shape: `0x23` with a single payload byte in `0x00..0x05` is treated as
+> BLE-Eth GET_ECM_IP, and `0x22` with 9/13/21 payload bytes (or a single `0x04`)
+> as BLE-Eth SET_ECM_IP. Everything else, including `0x22` with a single
+> `0x01`/`0x02`/`0x03`, still reaches the CH9329 handler. Reset deliberately
+> uses `0x04` because `0x22 [0x03]` is CH9329 bond-count — treating it as a
+> reset would wipe the stored IP configuration whenever an app queried bonds.
+
+All four addresses must be in the same subnet, unique, and the mask must be
+contiguous; otherwise `0xE5` is returned and nothing is written. The new
+addressing takes effect immediately: both ECM sides soft re-enumerate (the
+Mac-facing side via the USBLIB pull-up, the target-facing side via the USBFS
+internal D+ pull-up, held low for 1 s so the target host tears down the old
+network device). After the target side re-attaches, the firmware replays the
+link-state notification sequence and NAKs any DHCP REQUEST that names an
+address outside the new target scope, forcing the client to drop its stale
+lease and start a fresh DISCOVER.
+
 ### Data Transfer
 
 #### DATA (`0x11`) - Send/Receive Tunneled Data

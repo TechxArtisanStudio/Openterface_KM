@@ -146,7 +146,9 @@ static ble_eth_ecm_tx_cb_t g_ecm_tx_cb;
 /* Firmware-side peer identity on the target CDC ECM link. */
 static const uint8_t g_dev_mac[6] = { 0x02, 0x00, 0x00, 0x00, 0x03, 0x00 };
 static const uint8_t g_host_mac[6] = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
-static const uint8_t g_dev_ip[4] = { 192, 168, 11, 5 };  /* Target-side firmware IP */
+/* Source IP used for tunneled TCP frames and ARP requests. Must match the
+ * bridge's target-side IP, otherwise the target PC drops the packets. */
+static uint8_t g_dev_ip[4] = { 192, 168, 20, 5 };
 
 /* Learned host MAC from incoming frames (overrides hardcoded g_host_mac) */
 static uint8_t g_host_mac_learned[6];
@@ -653,7 +655,9 @@ static void dispatch_frame(const ble_eth_frame_t *frame)
          *   sub_cmd 0x00: Set All - [host_ip 4][dev_ip 4][subnet 4][target_host 4][target_dev 4] = 21 bytes
          *   sub_cmd 0x01: Set Host Side - [host_ip 4][dev_ip 4][subnet 4] = 13 bytes
          *   sub_cmd 0x02: Set Target Side - [target_host 4][target_dev 4] = 9 bytes
-         *   sub_cmd 0x03: Reset to Default - 1 byte
+         *   sub_cmd 0x04: Reset to Default - 1 byte
+         *   (0x03 is not used here: it belongs to CH9329 bond-count on the same
+         *    command byte, see Peripheral_IsBleEthEcmIpFrame.)
          * Response: [status 1 byte]
          */
         if (frame->payload_len < 1) {
@@ -729,7 +733,7 @@ static void dispatch_frame(const ble_eth_frame_t *frame)
             }
             break;
 
-        case 0x03: /* Reset to Default */
+        case 0x04: /* Reset to Default */
             {
                 uint8_t result = ECM_IPConfig_Reset();
                 status = (result == ECM_IP_CONFIG_OK) ? BLE_ETH_STATUS_SUCCESS : BLE_ETH_STATUS_INTERNAL_ERR;
@@ -750,21 +754,76 @@ static void dispatch_frame(const ble_eth_frame_t *frame)
 
     case BLE_ETH_CMD_GET_ECM_IP: {
         /* Get ECM IP configuration
-         * Response: [status 1][host_ip 4][dev_ip 4][subnet 4][target_host 4][target_dev 4] = 21 bytes
+         * Payload: [sub_cmd 1]
+         *   0x00 all      -> [host 4][dev 4][mask 4][target_host 4][target_dev 4]
+         *   0x01 host     -> [host 4][dev 4][mask 4]
+         *   0x02 target   -> [target_host 4][target_dev 4]
+         *   0x03 status   -> [host_ecm_active 1][target_ecm_active 1]
+         *   0x05 diag     -> [detach_dp 1][reenum 2][bus_reset 2][dhcp 2][nak 2]
+         *                    [target_active 1][host_active 1]   (all LE)
          */
+        uint8_t sub_cmd = (frame->payload_len >= 1) ? frame->payload[0] : 0xFF;
         uint8_t rsp[21];
+        uint16_t rsp_len;
         ECM_IPConfig_t config;
-        ECM_IPConfig_Get(&config);
 
+        ECM_IPConfig_Get(&config);
         rsp[0] = BLE_ETH_STATUS_SUCCESS;
-        memcpy(&rsp[1], config.host_ip, 4);
-        memcpy(&rsp[5], config.dev_ip, 4);
-        memcpy(&rsp[9], config.subnet_mask, 4);
-        memcpy(&rsp[13], config.target_host_ip, 4);
-        memcpy(&rsp[17], config.target_dev_ip, 4);
+
+        switch (sub_cmd) {
+        case 0x00:
+            memcpy(&rsp[1], config.host_ip, 4);
+            memcpy(&rsp[5], config.dev_ip, 4);
+            memcpy(&rsp[9], config.subnet_mask, 4);
+            memcpy(&rsp[13], config.target_host_ip, 4);
+            memcpy(&rsp[17], config.target_dev_ip, 4);
+            rsp_len = 21;
+            break;
+
+        case 0x01:
+            memcpy(&rsp[1], config.host_ip, 4);
+            memcpy(&rsp[5], config.dev_ip, 4);
+            memcpy(&rsp[9], config.subnet_mask, 4);
+            rsp_len = 13;
+            break;
+
+        case 0x02:
+            memcpy(&rsp[1], config.target_host_ip, 4);
+            memcpy(&rsp[5], config.target_dev_ip, 4);
+            rsp_len = 9;
+            break;
+
+        case 0x03:
+            rsp[0] = BLE_ETH_STATUS_SUCCESS;
+            rsp[1] = g_host_ecm_data_if_active ? 1u : 0u;
+            rsp[2] = g_target_ecm_data_if_active ? 1u : 0u;
+            rsp_len = 3;
+            break;
+
+        case 0x05:  /* target re-enumeration / DHCP diagnostics */
+            rsp[0] = BLE_ETH_STATUS_SUCCESS;
+            rsp[1] = g_target_detach_dp_level;
+            rsp[2] = (uint8_t)(g_target_reenum_count & 0xFF);
+            rsp[3] = (uint8_t)(g_target_reenum_count >> 8);
+            rsp[4] = (uint8_t)(g_target_bus_reset_count & 0xFF);
+            rsp[5] = (uint8_t)(g_target_bus_reset_count >> 8);
+            rsp[6] = (uint8_t)(g_target_dhcp_count & 0xFF);
+            rsp[7] = (uint8_t)(g_target_dhcp_count >> 8);
+            rsp[8] = (uint8_t)(g_target_dhcp_nak_count & 0xFF);
+            rsp[9] = (uint8_t)(g_target_dhcp_nak_count >> 8);
+            rsp[10] = g_target_ecm_data_if_active ? 1u : 0u;
+            rsp[11] = g_host_ecm_data_if_active ? 1u : 0u;
+            rsp_len = 12;
+            break;
+
+        default:
+            rsp[0] = BLE_ETH_STATUS_PARAM_ERR;
+            rsp_len = 1;
+            break;
+        }
 
         uint8_t buf[32];
-        uint16_t len = build_frame(buf, addr, BLE_ETH_CMD_GET_ECM_IP_RESP, rsp, 21);
+        uint16_t len = build_frame(buf, addr, BLE_ETH_CMD_GET_ECM_IP_RESP, rsp, rsp_len);
         tx_queue_push_front(buf, len);
         break;
     }
@@ -879,9 +938,15 @@ static void queue_connect_response(uint8_t addr, uint8_t conn_id, uint8_t status
     tx_queue_push_front(buf, len);
 }
 
+void BLE_Eth_UpdateIPConfig(void)
+{
+    ECM_IPConfig_GetTargetDevIP(g_dev_ip);
+}
+
 void BLE_Eth_Init(ble_eth_event_cb_t event_cb)
 {
     g_event_cb = event_cb;
+    BLE_Eth_UpdateIPConfig();
     memset(&g_parser, 0, sizeof(g_parser));
     g_parser.state = BLE_ETH_PARSER_WAIT_HEAD1;
     memset(g_connections, 0, sizeof(g_connections));

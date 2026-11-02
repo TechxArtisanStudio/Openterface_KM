@@ -228,8 +228,8 @@ int main(void) {
     SystemCoreClockUpdate();
     Delay_Init();
     USB_ModeConfig_Init();
-    DefaultTargetConfig_Init();
-    ECM_IPConfig_Init();  // Initialize ECM IP configuration
+    ECM_IPConfig_Init();  // Initialize ECM IP configuration (before dependent modules)
+    DefaultTargetConfig_Init();  // Uses ECM target IP as its fallback
     //usbd_init
     USART_Printf_Init(115200);
     Set_USBConfig();

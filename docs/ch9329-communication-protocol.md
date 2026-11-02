@@ -242,7 +242,7 @@ After sending a successful `0x23` command, the device will reboot automatically.
 
 ### `0x26` Set ECM IP Configuration
 
-This is an Openterface extension for configuring the ECM network IP addresses. Changes take effect immediately without requiring USB reconnection or device reboot. The configuration is persisted to flash and survives power cycles.
+This is an Openterface extension for configuring the ECM network IP addresses. Host-side changes take effect without a physical replug or reboot: the firmware briefly re-enumerates the host-facing USB controller on its own (see note 1 below). The configuration is persisted to flash and survives power cycles.
 
 **Availability:** Only available when the firmware is built with ECM bridge support (modes 4, 5, 6, 7). If ECM is not compiled in, the command returns `0xE3` (unsupported command).
 
@@ -325,13 +325,15 @@ Response: 57 AB <addr> A6 01 00 <sum>
 
 **Important notes:**
 
-1. **Immediate effect**: IP changes take effect immediately. The firmware sends GARP (Gratuitous ARP) and triggers link state change to notify the host.
+1. **Re-enumeration on change**: When a sub-command changes the host IP, dev IP or subnet, the firmware replies first and then, about 500 ms later, detaches and re-attaches the host-facing USB controller (the port connected to the Mac/PC running the control app). This reproduces a physical replug, because macOS keeps the old ECM interface and neighbour state across a carrier bounce alone. The host sees the CDC ACM and ECM functions disconnect and come back within ~1 s.
 
-2. **DHCP renewal**: After IP change, the host may need to renew its DHCP lease to get the new IP. On macOS: `networksetup -setdhcp "Openterface Host"`
+2. **Target-side changes re-enumerate the target port**: When the target host IP or target dev IP changes, the same detach/attach cycle is applied to the target-facing USB controller (USBFS) after a 500 ms delay, so the target PC re-enumerates its ECM function and re-runs DHCP against the new scope. Target HID (keyboard/mouse) is unavailable for ~0.3 s during that cycle and reappears automatically after re-enumeration. No physical replug is required on either side.
 
-3. **Flash wear**: Each configuration change writes to flash. Avoid frequent changes in automated scripts.
+3. **DHCP renewal**: After re-enumeration the host runs DHCP again and picks up the new addresses. If the host cached the old lease, release it (`sudo dhclient -r <iface>` on Linux, `networksetup -setdhcp "Openterface Host"` on macOS).
 
-4. **Validation**: The firmware validates IP addresses before writing. Invalid addresses return `0xE5` parameter error.
+4. **Flash wear**: Each configuration change writes to flash. Avoid frequent changes in automated scripts.
+
+5. **Validation**: The firmware validates IP addresses before writing. Invalid addresses return `0xE5` parameter error.
 
 ### `0x27` Get ECM IP Configuration
 
