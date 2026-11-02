@@ -327,7 +327,7 @@ Response: 57 AB <addr> A6 01 00 <sum>
 
 1. **Re-enumeration on change**: When a sub-command changes the host IP, dev IP or subnet, the firmware replies first and then, about 500 ms later, detaches and re-attaches the host-facing USB controller (the port connected to the Mac/PC running the control app). This reproduces a physical replug, because macOS keeps the old ECM interface and neighbour state across a carrier bounce alone. The host sees the CDC ACM and ECM functions disconnect and come back within ~1 s.
 
-2. **Target-side changes re-enumerate the target port**: When the target host IP or target dev IP changes, the same detach/attach cycle is applied to the target-facing USB controller (USBFS) after a 500 ms delay, so the target PC re-enumerates its ECM function and re-runs DHCP against the new scope. Target HID (keyboard/mouse) is unavailable for ~0.3 s during that cycle and reappears automatically after re-enumeration. No physical replug is required on either side.
+2. **Target-side changes re-enumerate the target port**: When the target host IP or target dev IP changes, the same detach/attach cycle is applied to the target-facing USB controller (USBFS) after a 500 ms delay, so the target PC re-enumerates its ECM function and re-runs DHCP against the new scope. Target HID (keyboard/mouse) is unavailable for ~1 s during that cycle and reappears automatically after re-enumeration. No physical replug is required on either side.
 
 3. **DHCP renewal**: After re-enumeration the host runs DHCP again and picks up the new addresses. If the host cached the old lease, release it (`sudo dhclient -r <iface>` on Linux, `networksetup -setdhcp "Openterface Host"` on macOS).
 
@@ -343,11 +343,18 @@ This is an Openterface extension for reading the current ECM network IP configur
 
 **Payload format:**
 
-No payload required.
+Optional single `sub_cmd` byte:
+
+| Sub-cmd | Name | Response |
+| --- | --- | --- |
+| omitted / `0x00` | Get All | 21-byte configuration block (below) |
+| `0x01` | Get Host Side | `[status][host_ip(4)][dev_ip(4)][subnet(4)]` = 13 bytes |
+| `0x02` | Get Target Side | `[status][target_host_ip(4)][target_dev_ip(4)]` = 9 bytes |
+| `0x03` | Bridge Status | `[status][USBFS_Connect][host_ecm_active][target_ecm_active]` = 4 bytes |
 
 **Response:**
 
-The response is a 21-byte configuration block:
+For `0x00` (or no payload), the response is a 21-byte configuration block:
 
 ```text
 [status(1)][host_ip(4)][dev_ip(4)][subnet(4)][target_host_ip(4)][target_dev_ip(4)]
