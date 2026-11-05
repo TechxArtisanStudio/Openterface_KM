@@ -133,8 +133,9 @@ void USB_SendFromQueues(void) {
     while (media_queue.head != media_queue.tail && USBFS_Endp_Busy[DEF_UEP4] == 0) {
         Media_Report_t *pkt = &media_queue.buf[media_queue.head];
         /* Report ID 0x01 = ACPI: 2 bytes (ID + 1 data)
-         * Report ID 0x02 = Consumer: 4 bytes (ID + 3 data) */
-        uint16_t send_len = (pkt->data[0] == 0x01) ? 2 : 4;
+         * Report ID 0x02 = Consumer: 4 bytes (ID + 3 data)
+         * Report ID 0x03 = Apple function row: 2 bytes (ID + 1 data) */
+        uint16_t send_len = (pkt->data[0] == 0x02) ? 4 : 2;
         if (USBFS_Endp_DataUp(DEF_UEP4, pkt->data, send_len, DEF_UEP_CPY_LOAD) == READY)
             media_queue.head = (media_queue.head + 1) % MEDIA_QUEUE_SIZE;
         else break;
