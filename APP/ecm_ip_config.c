@@ -238,6 +238,13 @@ uint8_t ECM_IPConfig_Set(const ECM_IPConfig_t *config)
         return ECM_IP_CONFIG_ERR_PARAM;
     }
 
+    /* Unchanged config: skip erase/program and the re-enumeration that
+     * ECM_Bridge_UpdateIPConfig() would trigger via the callback. */
+    if (memcmp(config, &s_ram_cache, sizeof(ECM_IPConfig_t)) == 0) {
+        USB_DEBUG("IPConfig_Set: unchanged, skipped\r\n");
+        return ECM_IP_CONFIG_OK;
+    }
+
     /* 2. Read both pages, decide target page */
     ok_a = flash_read_page(ECM_IP_CONFIG_PAGE_A_ADDR, &page_a, sizeof(page_a));
     ok_b = flash_read_page(ECM_IP_CONFIG_PAGE_B_ADDR, &page_b, sizeof(page_b));

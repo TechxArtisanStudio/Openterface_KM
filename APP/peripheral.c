@@ -138,6 +138,14 @@ static peripheralConnItem_t peripheralConnList;
 
 static uint16_t peripheralMTU = ATT_MTU_SIZE;
 
+/* BLE-Eth notification retry backoff. app_usb_notify() fails when the BLE
+ * stack has no free TX buffer; retrying immediately just spins the task.
+ * Values are TMOS ticks (0.625 ms each). */
+#define BLE_ETH_NOTIFY_RETRY_MS   20
+#define BLE_ETH_NOTIFY_MAX_FAILS  3
+#define BLE_ETH_NOTIFY_SLOW_TICKS 80  /* 50 ms, used once the pool looks stuck */
+static uint8_t g_ble_eth_notify_fails;
+
 RingMemParm_t RingMemUSB;
 uint8_t       RingMemUSBBuf[512];
 RingMemParm_t RingMemBLE;
@@ -164,7 +172,7 @@ void        ble_usb_ServiceEvt(uint16_t connection_handle, ble_usb_evt_t *p_evt)
 int         RingMem_Protection(uint8_t enable);
 static void ble_eth_event_handler(ble_eth_evt_t *evt);
 static void ble_eth_tx_event_trigger(void);
-static void ecm_bridge_tx_handler(const uint8_t *data, uint16_t len);
+static uint8_t ecm_bridge_tx_handler(const uint8_t *data, uint16_t len);
 
 static uint8_t Peripheral_IsCh9329ModeCommandFrame(const uint8_t *buf, uint16_t len)
 {
@@ -194,7 +202,7 @@ static uint8_t Peripheral_IsCh9329ModeCommandFrame(const uint8_t *buf, uint16_t 
  * also used by CH9329 BLE-security and BLE-set-name. Disambiguate on payload
  * shape so the BLE-Eth handlers stay reachable. CH9329 security frames carry a
  * single sub-command byte (0x01..0x03), CH9329 name frames carry name text,
- * whereas BLE-Eth GET carries one sub-command (0x00..0x05) and BLE-Eth SET
+ * whereas BLE-Eth GET carries one sub-command (0x00..0x06) and BLE-Eth SET
  * carries 9/13/21 bytes. BLE-Eth "reset to defaults" uses sub-command 0x04:
  * 0x03 must stay with CH9329 (bond count), otherwise a bond query would reset
  * the stored ECM IP configuration. */
@@ -212,13 +220,37 @@ static uint8_t Peripheral_IsBleEthEcmIpFrame(const uint8_t *buf, uint16_t len)
 
     switch (buf[3]) {
         case BLE_ETH_CMD_GET_ECM_IP:  /* 0x23 */
-            return (buf[4] == 1u && buf[5] <= 0x05u) ? 1u : 0u;
+            return (buf[4] == 1u && buf[5] <= 0x06u) ? 1u : 0u;
 
         case BLE_ETH_CMD_SET_ECM_IP:  /* 0x22 */
             if (buf[4] == 1u) {
                 return (buf[5] == 0x04u) ? 1u : 0u;
             }
             return (buf[4] == 9u || buf[4] == 13u || buf[4] == 21u) ? 1u : 0u;
+
+        default:
+            return 0;
+    }
+}
+
+/* BLE-Eth command bytes owned by BLE_Eth_Parse(). These bytes do not collide
+ * with CH9329 commands, so a frame carrying one must never also be written to
+ * RingMemBLE: that would feed tunneled payload bytes into the HID/CH9329
+ * parser and corrupt both streams. 0x22/0x23 are shared with CH9329 and are
+ * disambiguated by Peripheral_IsBleEthEcmIpFrame() before this check. */
+static uint8_t Peripheral_IsBleEthCommandByte(uint8_t cmd)
+{
+    switch (cmd)
+    {
+        case BLE_ETH_CMD_CONNECT:
+        case BLE_ETH_CMD_DATA:
+        case BLE_ETH_CMD_DISCONNECT:
+        case BLE_ETH_CMD_PING:
+        case BLE_ETH_CMD_NET_PING:
+        case BLE_ETH_CMD_INFO:
+        case BLE_ETH_CMD_SET_DEFAULT:
+        case BLE_ETH_CMD_GET_DEFAULT:
+            return 1;
 
         default:
             return 0;
@@ -501,10 +533,12 @@ void Peripheral_Init()
     BLE_Eth_SetEcmtxCb(ecm_bridge_tx_handler);
 }
 
-/* Send Ethernet frame from BLE-Eth to ECM bridge (host side) */
-static void ecm_bridge_tx_handler(const uint8_t *data, uint16_t len)
+/* Send Ethernet frame from BLE-Eth to ECM bridge (host side). Returns the
+ * bridge queue result so the tunnel can avoid advancing TCP sequence numbers
+ * for frames that were dropped. */
+static uint8_t ecm_bridge_tx_handler(const uint8_t *data, uint16_t len)
 {
-    ECM_Bridge_SendRawFrame(data, len);
+    return ECM_Bridge_SendRawFrame(data, len);
 }
 
 /* Trigger BLE-Eth TX event when target frame data is pushed via BLE */
@@ -665,16 +699,30 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
         uint16_t max_notify_len = (peripheralMTU > 3) ? (uint16_t)(peripheralMTU - 3) : 0;
         uint16_t len;
 
+        if (peripheralConnList.connHandle == GAP_CONNHANDLE_INIT) {
+            g_ble_eth_notify_fails = 0;
+            return (events ^ SBP_PROCESS_BLEETH_TX_EVT);
+        }
+
         if (max_notify_len > BLE_ETH_SAFE_NOTIFY_LEN) {
             max_notify_len = BLE_ETH_SAFE_NOTIFY_LEN;
         }
 
         while ((len = BLE_Eth_GetNextTxChunk(tx_buf, max_notify_len)) > 0) {
             if (app_usb_notify(tx_buf, (uint8_t)len) != SUCCESS) {
-                /* BLE notify failed, re-schedule for retry */
-                tmos_set_event(Peripheral_TaskID, SBP_PROCESS_BLEETH_TX_EVT);
+                /* The chunk is not consumed, so the queue still holds it. This
+                 * event must stay armed: a host blocked waiting for the ACK
+                 * that is stuck in this queue issues no further write, so no
+                 * other event source would ever flush it and the tunnel
+                 * deadlocks. Back off rather than give up. */
+                g_ble_eth_notify_fails++;
+                tmos_start_task(Peripheral_TaskID, SBP_PROCESS_BLEETH_TX_EVT,
+                                g_ble_eth_notify_fails < BLE_ETH_NOTIFY_MAX_FAILS
+                                    ? BLE_ETH_NOTIFY_RETRY_MS
+                                    : BLE_ETH_NOTIFY_SLOW_TICKS);
                 break;
             }
+            g_ble_eth_notify_fails = 0;
             BLE_Eth_ConsumeTxChunk(len);
         }
         return (events ^ SBP_PROCESS_BLEETH_TX_EVT);
@@ -819,6 +867,11 @@ static void Peripheral_LinkTerminated(gapRoleEvent_t *pEvent)
         peripheralConnList.connTimeout = 0;
         tmos_stop_task(Peripheral_TaskID, SBP_PERIODIC_EVT);
         tmos_stop_task(Peripheral_TaskID, SBP_READ_RSSI_EVT);
+        tmos_stop_task(Peripheral_TaskID, SBP_PROCESS_BLEETH_TX_EVT);
+
+        /* Drop tunnel state and any queued notifications for the dead link. */
+        BLE_Eth_OnLinkLost();
+        g_ble_eth_notify_fails = 0;
 
         // Restart advertising
         {
@@ -1052,37 +1105,43 @@ void ble_usb_ServiceEvt(uint16_t connection_handle, ble_usb_evt_t *p_evt)
         case BLE_USB_EVT_TX_NOTI_ENABLED:
             break;
         case BLE_USB_EVT_BLE_DATA_RECIEVED:
+        {
+            const uint8_t *data = p_evt->data.p_data;
+            uint16_t len = p_evt->data.length;
+            uint8_t has_frame_header = (len >= 6 &&
+                                        data[0] == CH9329_FRAME_HEAD1 &&
+                                        data[1] == CH9329_FRAME_HEAD2);
 
-            /* Check if this is a CH9329 command that should be handled locally.
-             * CH9329 commands (0x01-0x08, 0x17, 0x18, 0x30) are processed by the
-             * device and responses are sent back via BLE notification.
-             * BLE-Eth commands (0x10-0x12, 0x1F) are handled by BLE_Eth_Parse.
-             * The 0x22/0x23 bytes exist in both protocols, so inspect the payload
-             * shape before assuming CH9329. */
-            if (!Peripheral_IsBleEthEcmIpFrame(p_evt->data.p_data, p_evt->data.length) &&
-                p_evt->data.length >= 6 &&
-                p_evt->data.p_data[0] == CH9329_FRAME_HEAD1 &&
-                p_evt->data.p_data[1] == CH9329_FRAME_HEAD2 &&
-                Peripheral_IsCh9329CommandByte(p_evt->data.p_data[3]))
+            /* Route BLE-Eth frames exclusively to the tunnel parser. Feeding
+             * them into RingMemBLE/CH9329 as well would let ring buffer
+             * drainage and the CH9329 parser consume tunneled TCP payload as
+             * HID data, and CH9329 responses would leak into the tunnel. */
+            if (has_frame_header &&
+                (Peripheral_IsBleEthCommandByte(data[3]) ||
+                 Peripheral_IsBleEthEcmIpFrame(data, len)))
+            {
+                BLE_Eth_Parse(data, len);
+                tmos_set_event(Peripheral_TaskID, SBP_PROCESS_BLEETH_TX_EVT);
+            }
+            else if (has_frame_header && Peripheral_IsCh9329CommandByte(data[3]))
             {
                 /* CH9329 command from BLE — route response via BLE notification */
                 Peripheral_SetBleCh9329Response(1);
-                CH9329_DataParser((uint8_t *)p_evt->data.p_data, p_evt->data.length);
+                CH9329_DataParser((uint8_t *)data, len);
                 Peripheral_SetBleCh9329Response(0);
             }
             else
             {
-                /* Not a CH9329 command — try BLE-Eth protocol parser */
-                BLE_Eth_Parse(p_evt->data.p_data, p_evt->data.length);
+                /* Unrecognised frame — let both parsers see it for backward
+                 * compatibility with non-CH9329 legacy streams. */
+                BLE_Eth_Parse(data, len);
                 tmos_set_event(Peripheral_TaskID, SBP_PROCESS_BLEETH_TX_EVT);
 
-                /* Also feed into legacy CH9329 path for backward compatibility.
-                 * The CH9329 parser is stateful and will only match its own commands. */
-                if(Peripheral_IsCh9329ModeCommandFrame(p_evt->data.p_data, p_evt->data.length))
+                if(Peripheral_IsCh9329ModeCommandFrame(data, len))
                 {
-                    CH9329_RxBuffer_Add((uint8_t *)p_evt->data.p_data, p_evt->data.length);
+                    CH9329_RxBuffer_Add((uint8_t *)data, len);
                 }
-                else if(RingMemWrite(&RingMemBLE, (uint8_t *)p_evt->data.p_data, p_evt->data.length) != SUCCESS)
+                else if(RingMemWrite(&RingMemBLE, (uint8_t *)data, len) != SUCCESS)
                 {
                 }
                 else
@@ -1092,6 +1151,7 @@ void ble_usb_ServiceEvt(uint16_t connection_handle, ble_usb_evt_t *p_evt)
             }
 
             break;
+        }
         default:
             break;
     }

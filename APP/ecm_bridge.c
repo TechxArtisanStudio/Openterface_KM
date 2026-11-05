@@ -103,8 +103,44 @@ typedef struct {
     volatile uint8_t rd;
     volatile uint8_t wr;
     volatile uint8_t count;
+    /* Set while the main loop is transmitting the head frame. queue_push()
+     * must not flush or overwrite that slot. */
+    volatile uint8_t in_flight;
+    /* Incremented by queue_clear() so an in-progress TX can detect that its
+     * head frame belongs to an aborted session. */
+    volatile uint16_t gen;
     volatile uint32_t overflow;
 } ECM_FrameQueue_t;
+
+/* One transport chunk copied out of the queue under a critical section.
+ * The USB transfer is issued from this local copy so an ISR push/clear cannot
+ * modify the bytes after they have been handed to the controller. */
+typedef struct {
+    uint8_t  data[ECM_BRIDGE_USBD_PACKET_SIZE];
+    uint16_t len;        /* bytes in data (0 for a terminating ZLP) */
+    uint16_t frame_len;  /* total length of the frame being transmitted */
+    uint16_t gen;        /* queue generation the frame belongs to */
+    uint8_t  zlp;
+    const ECM_Frame_t *head;
+} ECM_TxChunk_t;
+
+/* WCH __disable_irq()/__enable_irq() operate on CSR 0x800 (bit 3 = MIE), not
+ * on mstatus. Save/restore that bit so a critical section entered from an ISR
+ * does not re-enable interrupts on exit. */
+static inline uint32_t ecm_irq_save(void)
+{
+    uint32_t csr;
+    __asm volatile ("csrr %0, 0x800" : "=r"(csr));
+    __disable_irq();
+    return (csr >> 3) & 0x1u;
+}
+
+static inline void ecm_irq_restore(uint32_t state)
+{
+    if (state) {
+        __enable_irq();
+    }
+}
 
 typedef struct {
     uint8_t data[ECM_BRIDGE_MTU_FRAME_SIZE];
@@ -135,11 +171,12 @@ static ECM_RxFrame_t g_host_rx_frame;
 static ECM_FrameQueue_t g_host_to_target;
 static ECM_RxFrame_t g_target_rx_frame;
 static uint16_t g_target_tx_offset;
+static uint16_t g_target_tx_gen;
 static uint8_t g_target_zlp_pending;
-static uint8_t g_target_notify_state;
 static uint32_t g_target_notify_hold_until_ms;
 #endif
 static uint16_t g_host_tx_offset;
+static uint16_t g_host_tx_gen;
 static uint8_t g_host_zlp_pending;
 static uint8_t g_host_notify_state;
 static uint32_t g_host_notify_last_send_ms;  /* Timestamp of last notification send */
@@ -149,6 +186,20 @@ static uint32_t g_host_notify_hold_until_ms; /* Keep link down until this timest
  * their link debounce to fire. A single notification slot (~50 ms) is too
  * short, so hold NETWORK_CONNECTION=0 for this long before link-up. */
 #define ECM_LINK_DOWN_HOLD_MS 800u
+
+/* How often to re-assert NETWORK_CONNECTION=1 once the link sequence finished.
+ * A Linux host only starts polling the notification endpoint from
+ * usbnet_open(), so a one-shot up edge can be missed; usbnet_link_change() even
+ * discards it while the interface is not yet IFF_UP. Once carrier is off, a
+ * POINTTOPOINT driver unlinks its RX URBs, so the interface is dead in both
+ * directions until it sees another up edge. */
+#define ECM_LINK_UP_BEACON_MS 1000u
+
+/* g_target_notify_state / g_host_notify_state values */
+#define ECM_NOTIFY_DOWN     1u   /* NETWORK_CONNECTION = 0, pending */
+#define ECM_NOTIFY_UP       2u   /* NETWORK_CONNECTION = 1, pending */
+#define ECM_NOTIFY_SPEED    3u   /* CONNECTION_SPEED_CHANGE, pending */
+#define ECM_NOTIFY_BEACON   4u   /* steady state: re-assert NETWORK_CONNECTION = 1 */
 
 /* Soft re-enumeration of the Mac-facing USBLIB controller after a host-side
  * IP change. macOS keeps the ECM interface and its neighbour/route state
@@ -312,6 +363,12 @@ static uint8_t handle_arp_frame(const uint8_t *frame, uint16_t frame_len)
         memcpy(sender_ip, &frame[28], 4);
         if (BLE_Eth_HandleArpReply(sender_ip, sender_mac)) {
             USB_DEBUG("ARP reply processed\r\n");
+            /* Resolution can fail immediately (e.g. the ECM queue rejected the
+             * first frame), in which case BLE_Eth has already queued a
+             * CONNECT/NET_PING response. Nothing else would flush it. */
+            if (g_ble_tx_event_cb) {
+                g_ble_tx_event_cb();
+            }
         }
         /* Don't consume the frame - let it also go to Mac's queue */
     }
@@ -373,6 +430,12 @@ static uint8_t handle_target_arp_frame(const uint8_t *frame, uint16_t frame_len)
                   sender_mac[3], sender_mac[4], sender_mac[5]);
         if (BLE_Eth_HandleArpReply(sender_ip, sender_mac)) {
             USB_DEBUG("ARP reply from target processed\r\n");
+            /* Same as the host-side hook: an immediate resolution failure has
+             * already queued a CONNECT/NET_PING response that nothing else
+             * would flush. */
+            if (g_ble_tx_event_cb) {
+                g_ble_tx_event_cb();
+            }
         }
     }
 
@@ -1708,39 +1771,59 @@ static uint8_t handle_host_control_frame(const uint8_t *frame, uint16_t frame_le
 
 static uint8_t queue_push(ECM_FrameQueue_t *queue, const uint8_t *data, uint16_t len)
 {
+    uint32_t irq;
+
     if (len == 0) {
         return 1;
     }
+    if (len > ECM_BRIDGE_MTU_FRAME_SIZE) {
+        return 0;
+    }
+
+    irq = ecm_irq_save();
     if (queue->count >= ECM_BRIDGE_QUEUE_DEPTH) {
         queue->overflow++;
-        /* Queue is full — likely previous TX failed. Flush old data
-           and push the new frame so it gets a chance to be sent. */
+        if (queue->in_flight) {
+            /* The head frame is being transmitted right now. Overwriting it
+             * would emit a spliced frame; drop the new one and report the
+             * failure to the caller instead. */
+            ecm_irq_restore(irq);
+            return 0;
+        }
+        /* No frame in flight: the queued data is stale, flush it. */
         queue->rd = queue->wr;
         queue->count = 0;
+        queue->gen++;
     }
 
     memcpy(queue->frames[queue->wr].data, data, len);
     queue->frames[queue->wr].len = len;
-    if (queue == &g_target_to_host && len >= 14) {
-        USB_DEBUG("Q(T2H): wr=%d len=%d cnt=%d etype=0x%04X\r\n",
-                  queue->wr, len, queue->count + 1, get_be16(&data[12]));
-    } else {
-        USB_DEBUG("Q: wr=%d len=%d cnt=%d\r\n", queue->wr, len, queue->count + 1);
-    }
     queue->wr++;
     if (queue->wr >= ECM_BRIDGE_QUEUE_DEPTH) {
         queue->wr = 0;
     }
     queue->count++;
+    ecm_irq_restore(irq);
+
+    if (queue == &g_target_to_host && len >= 14) {
+        USB_DEBUG("Q(T2H): wr=%d len=%d cnt=%d etype=0x%04X\r\n",
+                  queue->wr, len, queue->count, get_be16(&data[12]));
+    } else {
+        USB_DEBUG("Q: wr=%d len=%d cnt=%d\r\n", queue->wr, len, queue->count);
+    }
     return 1;
 }
 
 static void queue_clear(ECM_FrameQueue_t *queue)
 {
+    uint32_t irq = ecm_irq_save();
     queue->rd = 0;
     queue->wr = 0;
     queue->count = 0;
+    queue->in_flight = 0;
+    queue->gen++;
     queue->overflow = 0;
+    ecm_irq_restore(irq);
 }
 
 static void rx_frame_clear(ECM_RxFrame_t *frame)
@@ -1751,24 +1834,78 @@ static void rx_frame_clear(ECM_RxFrame_t *frame)
     frame->overflow = 0;
 }
 
-static ECM_Frame_t *queue_peek(ECM_FrameQueue_t *queue)
+static uint16_t queue_generation(ECM_FrameQueue_t *queue)
 {
-    if (queue->count == 0) {
-        return 0;
-    }
-    return &queue->frames[queue->rd];
+    uint32_t irq = ecm_irq_save();
+    uint16_t gen = queue->gen;
+    ecm_irq_restore(irq);
+    return gen;
 }
 
-static void queue_pop(ECM_FrameQueue_t *queue)
+/* Copy the next transport chunk (or the ZLP marker) of the head frame into
+ * chunk->data while holding the queue lock, and mark the head as in flight.
+ * Returns 0 when the queue is empty. */
+static uint8_t queue_tx_load(ECM_FrameQueue_t *queue, uint16_t offset,
+                             uint8_t zlp_pending, ECM_TxChunk_t *chunk)
 {
-    if (queue->count == 0) {
-        return;
+    uint32_t irq = ecm_irq_save();
+    uint8_t ok = 0;
+
+    chunk->len = 0;
+    chunk->frame_len = 0;
+    chunk->zlp = 0;
+    chunk->head = 0;
+    chunk->gen = queue->gen;
+
+    if (queue->count > 0) {
+        const ECM_Frame_t *frame = &queue->frames[queue->rd];
+
+        if (zlp_pending) {
+            chunk->zlp = 1;
+            chunk->frame_len = frame->len;
+            chunk->head = frame;
+            queue->in_flight = 1;
+            ok = 1;
+        }
+        else if (offset < frame->len) {
+            uint16_t len = (uint16_t)(frame->len - offset);
+            if (len > sizeof(chunk->data)) {
+                len = sizeof(chunk->data);
+            }
+            memcpy(chunk->data, &frame->data[offset], len);
+            chunk->len = len;
+            chunk->frame_len = frame->len;
+            chunk->head = frame;
+            queue->in_flight = 1;
+            ok = 1;
+        }
     }
-    queue->rd++;
-    if (queue->rd >= ECM_BRIDGE_QUEUE_DEPTH) {
-        queue->rd = 0;
+
+    ecm_irq_restore(irq);
+    return ok;
+}
+
+/* Pop the head frame if it is still the one that was copied out. A queue_clear
+ * in between (session reset) changes the generation and the frame is dropped
+ * without touching the new queue contents. */
+static uint8_t queue_tx_complete(ECM_FrameQueue_t *queue, const ECM_TxChunk_t *chunk)
+{
+    uint32_t irq = ecm_irq_save();
+    uint8_t popped = 0;
+
+    if (queue->count > 0 &&
+        queue->gen == chunk->gen &&
+        chunk->head == &queue->frames[queue->rd]) {
+        queue->rd++;
+        if (queue->rd >= ECM_BRIDGE_QUEUE_DEPTH) {
+            queue->rd = 0;
+        }
+        queue->count--;
+        popped = 1;
     }
-    queue->count--;
+    queue->in_flight = 0;
+    ecm_irq_restore(irq);
+    return popped;
 }
 
 static uint16_t eth_frame_length(const uint8_t *data, uint16_t accumulated)
@@ -1897,7 +2034,7 @@ static uint8_t make_notification(uint8_t state, uint8_t interface, uint8_t *pack
 {
     packet[0] = 0xA1;
 
-    if (state == 1) {
+    if (state == ECM_NOTIFY_DOWN) {
         /* Link down notification (NETWORK_CONNECTION = 0) */
         packet[1] = 0x00;
         put_u16(&packet[2], 0);  /* value = 0 (disconnected) */
@@ -1906,7 +2043,7 @@ static uint8_t make_notification(uint8_t state, uint8_t interface, uint8_t *pack
         return 8;
     }
 
-    if (state == 2) {
+    if (state == ECM_NOTIFY_UP || state == ECM_NOTIFY_BEACON) {
         /* Link up notification (NETWORK_CONNECTION = 1) */
         packet[1] = 0x00;
         put_u16(&packet[2], 1);  /* value = 1 (connected) */
@@ -1915,7 +2052,7 @@ static uint8_t make_notification(uint8_t state, uint8_t interface, uint8_t *pack
         return 8;
     }
 
-    if (state == 3) {
+    if (state == ECM_NOTIFY_SPEED) {
         /* Connection speed change notification */
         packet[1] = 0x2A;
         put_u16(&packet[2], 0);
@@ -1954,21 +2091,38 @@ static void poll_target_notification(void)
     len = make_notification(g_target_notify_state, ECM_BRIDGE_TARGET_COMM_IF, packet);
     if (len > 0 && USBFS_Endp_DataUp(DEF_UEP5, packet, len, DEF_UEP_CPY_LOAD) == READY) {
         USB_DEBUG("ECM: notif sent state=%d len=%d\r\n", g_target_notify_state, len);
-        if (g_target_notify_state == 1) {
+        g_target_notify_tx_count++;
+        if (g_target_notify_state == ECM_NOTIFY_DOWN) {
             /* Hold link down so the target PC notices the carrier loss. */
-            g_target_notify_state = 2;
+            g_target_notify_state = ECM_NOTIFY_UP;
             g_target_notify_hold_until_ms = now + ECM_LINK_DOWN_HOLD_MS;
-        } else if (g_target_notify_state >= 3) {
-            g_target_notify_state = 0;
-            /* Link is back up: refresh the target PC's neighbour entry. */
-            g_target_garp_sent = 0;
+        } else if (g_target_notify_state == ECM_NOTIFY_UP) {
+            g_target_notify_state = ECM_NOTIFY_SPEED;
         } else {
-            g_target_notify_state++;
+            /* Speed change done, or already beaconing: hold link-up only. A host
+             * that is not polling keeps exactly one packet latched in the
+             * endpoint, and that packet has to be the one asserting carrier. */
+            g_target_notify_state = ECM_NOTIFY_BEACON;
+            g_target_notify_hold_until_ms = now + ECM_LINK_UP_BEACON_MS;
         }
     }
     else {
         USB_DEBUG("ECM: notif FAILED to send\r\n");
     }
+}
+
+/* The link-state sequence is armed once at target init, which races the host's
+ * ECM driver: it only starts polling the notification endpoint after
+ * SET_INTERFACE(alt=1), so it can miss the "connected" edge and park the link
+ * down for good. Re-arming on data-interface activation guarantees the host
+ * observes an up transition. */
+void ECM_Bridge_Target_RearmLinkNotify(void)
+{
+    /* Arm on link-up, not link-down: the host has just opened the interface,
+     * and if a "down" is latched in the endpoint buffer and nothing follows it
+     * up, a Linux host keeps the interface at NO-CARRIER. */
+    g_target_notify_state = ECM_NOTIFY_UP;
+    g_target_notify_hold_until_ms = 0;
 }
 #endif
 
@@ -2014,8 +2168,7 @@ static void poll_host_notification(void)
 #if USB_WORK_MODE_COMPILES_TARGET_CDC_ECM
 static void poll_target_tx(void)
 {
-    ECM_Frame_t *frame;
-    uint16_t len;
+    ECM_TxChunk_t chunk;
 
     /* When the CDC ECM data interface first becomes active on Target side
        (Target PC sent SET_INTERFACE on USBFS side), queue a gratuitous ARP
@@ -2038,18 +2191,19 @@ static void poll_target_tx(void)
         g_target_garp_sent = 1;
     }
 
-    frame = queue_peek(&g_host_to_target);
-    if (frame == 0) {
-        g_target_tx_offset = 0;
-        g_target_zlp_pending = 0;
-        return;
-    }
-
     /* Only attempt TX after the Target has activated the CDC ECM data interface
        via SET_INTERFACE(IF5, alt=1). Without this, USBD_ENDPx_DataUp returns
        SUCCESS but the endpoint never responds to host IN tokens. */
     if (!g_target_ecm_data_if_active) {
         return;
+    }
+
+    /* A partial frame offset belongs to the queue generation it was started
+     * in. If the queue was cleared in between, restart at the new head. */
+    if ((g_target_tx_offset != 0 || g_target_zlp_pending) &&
+        queue_generation(&g_host_to_target) != g_target_tx_gen) {
+        g_target_tx_offset = 0;
+        g_target_zlp_pending = 0;
     }
 
     /* Target ECM lives on the USBFS controller (EP7), regardless of which
@@ -2058,29 +2212,32 @@ static void poll_target_tx(void)
         return;
     }
 
-    if (g_target_zlp_pending) {
-        if (USBFS_Endp_DataUp(DEF_UEP7, frame->data, 0, DEF_UEP_CPY_LOAD) == READY) {
+    if (!queue_tx_load(&g_host_to_target, g_target_tx_offset,
+                       g_target_zlp_pending, &chunk)) {
+        g_target_tx_offset = 0;
+        g_target_zlp_pending = 0;
+        return;
+    }
+    g_target_tx_gen = chunk.gen;
+
+    if (chunk.zlp) {
+        if (USBFS_Endp_DataUp(DEF_UEP7, chunk.data, 0, DEF_UEP_CPY_LOAD) == READY) {
             g_target_zlp_pending = 0;
             g_target_tx_offset = 0;
-            queue_pop(&g_host_to_target);
+            queue_tx_complete(&g_host_to_target, &chunk);
         }
         return;
     }
 
-    len = (uint16_t)(frame->len - g_target_tx_offset);
-    if (len > ECM_BRIDGE_USBFS_PACKET_SIZE) {
-        len = ECM_BRIDGE_USBFS_PACKET_SIZE;
-    }
-
-    if (USBFS_Endp_DataUp(DEF_UEP7, &frame->data[g_target_tx_offset], len, DEF_UEP_CPY_LOAD) == READY) {
-        g_target_tx_offset = (uint16_t)(g_target_tx_offset + len);
-        if (g_target_tx_offset >= frame->len) {
-            if (len == ECM_BRIDGE_USBFS_PACKET_SIZE) {
+    if (USBFS_Endp_DataUp(DEF_UEP7, chunk.data, chunk.len, DEF_UEP_CPY_LOAD) == READY) {
+        g_target_tx_offset = (uint16_t)(g_target_tx_offset + chunk.len);
+        if (g_target_tx_offset >= chunk.frame_len) {
+            if (chunk.len == ECM_BRIDGE_USBFS_PACKET_SIZE) {
                 g_target_zlp_pending = 1;
             }
             else {
                 g_target_tx_offset = 0;
-                queue_pop(&g_host_to_target);
+                queue_tx_complete(&g_host_to_target, &chunk);
             }
         }
     }
@@ -2089,8 +2246,7 @@ static void poll_target_tx(void)
 
 static void poll_host_tx(void)
 {
-    ECM_Frame_t *frame;
-    uint16_t len;
+    ECM_TxChunk_t chunk;
 
     /* When the CDC ECM data interface first becomes active (Mac sent
        SET_INTERFACE on USBD side), queue a gratuitous ARP so the Mac's
@@ -2114,13 +2270,6 @@ static void poll_host_tx(void)
         g_ecm_tx_state = 1;
     }
 
-    frame = queue_peek(&g_target_to_host);
-    if (frame == 0) {
-        g_host_tx_offset = 0;
-        g_host_zlp_pending = 0;
-        return;
-    }
-
     /* Only attempt TX after the Mac has activated the CDC ECM data interface
        via SET_INTERFACE(IF1, alt=1). Without this, USBD_ENDPx_DataUp returns
        SUCCESS but the endpoint never responds to host IN tokens. */
@@ -2128,25 +2277,38 @@ static void poll_host_tx(void)
         return;
     }
 
+    if ((g_host_tx_offset != 0 || g_host_zlp_pending) &&
+        queue_generation(&g_target_to_host) != g_host_tx_gen) {
+        g_host_tx_offset = 0;
+        g_host_zlp_pending = 0;
+    }
+
     if (ECM_USBD_BULK_IN_BUSY != 0) {
         g_ecm_tx_state = 3;
         return;
     }
 
+    if (!queue_tx_load(&g_target_to_host, g_host_tx_offset,
+                       g_host_zlp_pending, &chunk)) {
+        g_host_tx_offset = 0;
+        g_host_zlp_pending = 0;
+        return;
+    }
+    g_host_tx_gen = chunk.gen;
+
     static uint8_t tx_count = 0;
     if ((++tx_count & 0x0F) == 0) {
-        USB_DEBUG("ECM TX len=%d busy=%d if_active=%d\r\n", frame->len,
+        USB_DEBUG("ECM TX len=%d busy=%d if_active=%d\r\n", chunk.frame_len,
                    ECM_USBD_BULK_IN_BUSY, g_host_ecm_data_if_active);
     }
 
-    if (g_host_zlp_pending) {
+    if (chunk.zlp) {
         g_ecm_tx_state = 2;
-        if (USBD_ENDPx_DataUp(ECM_USBD_BULK_IN_ENDP, frame->data, 0) == USB_SUCCESS) {
+        if (USBD_ENDPx_DataUp(ECM_USBD_BULK_IN_ENDP, chunk.data, 0) == USB_SUCCESS) {
             g_ecm_tx_count++;
-            g_ecm_tx_state = 2;  /* success */
             g_host_zlp_pending = 0;
             g_host_tx_offset = 0;
-            queue_pop(&g_target_to_host);
+            queue_tx_complete(&g_target_to_host, &chunk);
         }
         else {
             g_ecm_tx_state = 4;  /* DataUp failed */
@@ -2154,22 +2316,17 @@ static void poll_host_tx(void)
         return;
     }
 
-    len = (uint16_t)(frame->len - g_host_tx_offset);
-    if (len > ECM_BRIDGE_USBD_PACKET_SIZE) {
-        len = ECM_BRIDGE_USBD_PACKET_SIZE;
-    }
-
-    if (USBD_ENDPx_DataUp(ECM_USBD_BULK_IN_ENDP, &frame->data[g_host_tx_offset], len) == USB_SUCCESS) {
+    if (USBD_ENDPx_DataUp(ECM_USBD_BULK_IN_ENDP, chunk.data, chunk.len) == USB_SUCCESS) {
         g_ecm_tx_count++;
         g_ecm_tx_state = 2;  /* success */
-        g_host_tx_offset = (uint16_t)(g_host_tx_offset + len);
-        if (g_host_tx_offset >= frame->len) {
-            if (len == ECM_BRIDGE_USBD_PACKET_SIZE) {
+        g_host_tx_offset = (uint16_t)(g_host_tx_offset + chunk.len);
+        if (g_host_tx_offset >= chunk.frame_len) {
+            if (chunk.len == ECM_BRIDGE_USBD_PACKET_SIZE) {
                 g_host_zlp_pending = 1;
             }
             else {
                 g_host_tx_offset = 0;
-                queue_pop(&g_target_to_host);
+                queue_tx_complete(&g_target_to_host, &chunk);
             }
         }
     }
@@ -2223,6 +2380,14 @@ static void schedule_target_reenum(void)
     }
     if (!USB_ModeConfig_ActiveModeHasTargetCdcEcm()) {
         return;
+    }
+    /* Every BLE-Eth tunnel rides the target-side ECM link and sources from
+     * ecm_dev_ip, so a target address change invalidates all of them. Close
+     * now (the interface is still up, so the RSTs can drain) and tell the BLE
+     * host to reconnect. */
+    BLE_Eth_ResetAllTunnels(BLE_ETH_STATUS_NO_ROUTE);
+    if (g_ble_tx_event_cb != 0) {
+        g_ble_tx_event_cb();
     }
     g_target_reenum_state = 1;
     g_target_reenum_at_ms = systick_ms + ECM_TARGET_REENUM_DELAY_MS;
@@ -2302,10 +2467,15 @@ void ECM_Bridge_Init(void)
        re-enumeration and would otherwise lose its interface activation. */
     queue_clear(&g_target_to_host);
 #if USB_WORK_MODE_COMPILES_TARGET_CDC_ECM
-    /* Frames queued toward the target PC belong to the old host session. */
-    queue_clear(&g_host_to_target);
-    g_target_tx_offset = 0;
-    g_target_zlp_pending = 0;
+    /* BLE-Eth tunnel frames share this queue. While a tunnel is active the
+     * Mac-facing re-enumeration does not touch the target path, so flushing
+     * here would silently drop bytes whose TCP sequence was already advanced.
+     * Without an active tunnel the contents are stale bridge frames. */
+    if (!BLE_Eth_HasActiveTunnel() && !BLE_Eth_HasActiveOrPendingConnection()) {
+        queue_clear(&g_host_to_target);
+        g_target_tx_offset = 0;
+        g_target_zlp_pending = 0;
+    }
 #endif
     rx_frame_clear(&g_host_rx_frame);
     g_host_tx_offset = 0;
@@ -2450,7 +2620,7 @@ void ECM_Bridge_UpdateIPConfig(void)
     }
 }
 
-void ECM_Bridge_SendRawFrame(const uint8_t *data, uint16_t len)
+uint8_t ECM_Bridge_SendRawFrame(const uint8_t *data, uint16_t len)
 {
     /* Queue raw Ethernet frame directly to host_to_target (target PC),
        bypassing CH9329 protocol handler. Used by BLE-Eth TCP frame injection. */
@@ -2464,6 +2634,7 @@ void ECM_Bridge_SendRawFrame(const uint8_t *data, uint16_t len)
     }
     uint8_t ok = queue_push(&g_host_to_target, data, len);
     USB_DEBUG("  q: %s\r\n", ok ? "OK" : "FAIL");
+    return ok;
 }
 
 void ECM_Bridge_HostRxDone(const uint8_t *data, uint16_t len)
@@ -2579,6 +2750,8 @@ volatile uint8_t g_host_garp_sent = 0;
 volatile uint8_t g_target_garp_sent = 0;
 volatile uint8_t g_ecm_tx_state = 0;
 volatile uint8_t g_target_detach_dp_level = 0xFF;
+volatile uint8_t g_target_notify_state = 0;
+volatile uint16_t g_target_notify_tx_count = 0;
 volatile uint16_t g_target_reenum_count = 0;
 volatile uint16_t g_target_bus_reset_count = 0;
 volatile uint16_t g_target_dhcp_count = 0;

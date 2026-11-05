@@ -68,6 +68,7 @@ extern "C" {
 #define BLE_ETH_CMD_GET_DEFAULT   0x21U  /* Get default target IP/port */
 #define BLE_ETH_CMD_SET_ECM_IP    0x22U  /* Set ECM IP configuration */
 #define BLE_ETH_CMD_GET_ECM_IP    0x23U  /* Get ECM IP configuration */
+#define BLE_ETH_CMD_NET_PING      0x24U  /* ICMP echo to an IP over the ECM link */
 
 /* Response / push commands */
 #define BLE_ETH_CMD_CONNECT_RESP  0x90U  /* Connect response (0x10 | 0x80) */
@@ -81,6 +82,7 @@ extern "C" {
 #define BLE_ETH_CMD_GET_DEFAULT_RESP 0xA1U  /* Get default response */
 #define BLE_ETH_CMD_SET_ECM_IP_RESP  0xA2U  /* Set ECM IP response */
 #define BLE_ETH_CMD_GET_ECM_IP_RESP  0xA3U  /* Get ECM IP response */
+#define BLE_ETH_CMD_NET_PING_RESP    0xA4U  /* ICMP ping summary (0x24 | 0x80) */
 #define BLE_ETH_CMD_ERROR         0xD0U  /* Generic error (cmd | 0xC0) */
 
 /* ======================== Default Target Configuration =================== */
@@ -208,6 +210,34 @@ extern "C" {
 #define BLE_ETH_FEAT_SSH_OPT       0x02U
 #define BLE_ETH_FEAT_DATA_ACK_META 0x04U
 #define BLE_ETH_FEAT_DATA_ACK_WINDOW 0x08U
+#define BLE_ETH_FEAT_ICMP_PING     0x10U
+
+/* ======================== ICMP Ping Payload ==============================
+ *
+ *  BLE_ETH_CMD_NET_PING request payload:
+ *    [0..3] : destination IP address (4 bytes, big-endian)
+ *    [4]    : echo count (1..BLE_ETH_NET_PING_MAX_COUNT; 0 selects the default)
+ *
+ *  The device paces one echo per second, mirroring the system ping interval,
+ *  and keeps a single echo in flight. The reply is sent once every echo has
+ *  either been answered or timed out, so the host should allow
+ *  (count + 1) seconds before treating the request as lost.
+ *
+ *  BLE_ETH_CMD_NET_PING_RESP payload (5 bytes):
+ *    [0]   : status — SUCCESS if any echo was answered, else TIMEOUT /
+ *            PARAM_ERR / NO_ROUTE
+ *    [1]   : echoes sent
+ *    [2]   : echoes answered
+ *    [3..4]: mean round-trip time in milliseconds (big-endian, 0 if none)
+ *
+ *  The ping occupies a connection slot for its lifetime, so it competes with
+ *  CONNECT tunnels for the BLE_ETH_MAX_CONNECTIONS entries.
+ */
+
+#define BLE_ETH_NET_PING_PAYLOAD_LEN     5U
+#define BLE_ETH_NET_PING_RESP_LEN        5U
+#define BLE_ETH_NET_PING_MAX_COUNT       50U
+#define BLE_ETH_NET_PING_DEFAULT_COUNT   4U
 
 /* ======================== Parser State =================================== */
 
@@ -257,6 +287,18 @@ typedef struct {
     uint16_t arp_timeout_ticks;   /* ARP resolution countdown */
     uint8_t  syn_retries_left;    /* TCP SYN retries before connect timeout */
     uint8_t  peer_addr;           /* BLE protocol address from CONNECT */
+    /* ICMP echo state for BLE_ETH_CMD_NET_PING. The slot reuses the ARP and
+     * timeout machinery above, so tcp_state carries a second meaning here:
+     * ARP_PENDING = resolving the target MAC, SYN_SENT = an echo is in flight. */
+    uint8_t  is_icmp;             /* slot is a ping, not a TCP tunnel */
+    uint8_t  icmp_awaiting;       /* outstanding echo not yet answered */
+    uint8_t  icmp_sent;           /* echoes transmitted */
+    uint8_t  icmp_recv;           /* echo replies matched */
+    uint16_t icmp_ident;          /* ICMP id, unique per ping request */
+    uint16_t icmp_seq;            /* seq of the outstanding echo */
+    uint16_t icmp_remaining;      /* echoes still to send after this one */
+    uint32_t icmp_tx_tick_ms;     /* systick_ms when the echo left the device */
+    uint32_t icmp_rtt_sum_ms;     /* accumulated for the mean in the reply */
 } ble_eth_conn_t;
 
 /* ======================== Parser Context ================================= */
@@ -457,10 +499,32 @@ void BLE_Eth_ConsumeTxChunk(uint16_t len);
 void BLE_Eth_ResetParser(void);
 
 /**
+ * @brief Tear down all tunnels after the BLE link is lost.
+ *        Clears the parser, TX queue and all connection state. No
+ *        notifications are queued because the link is already gone.
+ */
+void BLE_Eth_OnLinkLost(void);
+
+/**
+ * @brief Close all active tunnels and notify the BLE host with CONN_CLOSED.
+ *        Sends a TCP RST to the target for established connections so the
+ *        target does not keep half-open sockets. Used before target-side USB
+ *        re-enumeration, which invalidates every tunnel.
+ * @param status Status byte carried in the CONN_CLOSED payload.
+ */
+void BLE_Eth_ResetAllTunnels(uint8_t status);
+
+/**
+ * @brief ECM TX callback. Returns 1 when the frame was accepted by the ECM
+ *        bridge queue, 0 when it was dropped (queue full / bridge inactive).
+ */
+typedef uint8_t (*ble_eth_ecm_tx_cb_t)(const uint8_t *data, uint16_t len);
+
+/**
  * @brief Set the ECM TX callback for sending Ethernet frames to the host.
  *        Called internally during initialization.
  */
-void BLE_Eth_SetEcmtxCb(void (*cb)(const uint8_t *data, uint16_t len));
+void BLE_Eth_SetEcmtxCb(ble_eth_ecm_tx_cb_t cb);
 
 /**
  * @brief Send TCP data through an active tunnel, wrapped in Ethernet/IPv4/TCP.
@@ -555,6 +619,8 @@ void BLE_Eth_ResetReliabilityStats(void);
 #define BLE_Eth_GetNextTxChunk(buf, max)            (0U)
 #define BLE_Eth_ConsumeTxChunk(len)                 ((void)0)
 #define BLE_Eth_ResetParser()                       ((void)0)
+#define BLE_Eth_OnLinkLost()                        ((void)0)
+#define BLE_Eth_ResetAllTunnels(status)             ((void)0)
 #define BLE_Eth_SetEcmtxCb(cb)                      ((void)0)
 #define BLE_Eth_SendDataToEth(id, data, len)        ((void)0)
 #define BLE_Eth_HandleTargetFrame(frame, len)       (false)

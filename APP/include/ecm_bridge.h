@@ -17,7 +17,12 @@ void ECM_Bridge_HostRxDone(const uint8_t *data, uint16_t len);
 void ECM_Bridge_TargetRxDone(const uint8_t *data, uint16_t len);
 void ECM_Bridge_Poll(void);
 void ECM_Bridge_SetBleTxCallback(void (*cb)(void));
-void ECM_Bridge_SendRawFrame(const uint8_t *data, uint16_t len);
+uint8_t ECM_Bridge_SendRawFrame(const uint8_t *data, uint16_t len);
+#if USB_WORK_MODE_COMPILES_TARGET_CDC_ECM
+void ECM_Bridge_Target_RearmLinkNotify(void);
+#else
+#define ECM_Bridge_Target_RearmLinkNotify() ((void)0)
+#endif
 #else
 #define ECM_Bridge_Init()                  ((void)0)
 #define ECM_Bridge_InitTarget()            ((void)0)
@@ -26,7 +31,8 @@ void ECM_Bridge_SendRawFrame(const uint8_t *data, uint16_t len);
 #define ECM_Bridge_TargetRxDone(data, len) ((void)0)
 #define ECM_Bridge_Poll()                  ((void)0)
 #define ECM_Bridge_SetBleTxCallback(cb)    ((void)0)
-#define ECM_Bridge_SendRawFrame(data, len) ((void)0)
+#define ECM_Bridge_SendRawFrame(data, len) ((uint8_t)0)
+#define ECM_Bridge_Target_RearmLinkNotify() ((void)0)
 #endif
 
 /* --- Diagnostic / debug variables (always defined) -----------------------
@@ -79,6 +85,16 @@ extern volatile uint8_t  g_usbfs_ep6_tog_ok;    /* last TOG_OK result */
 extern volatile uint16_t g_usbfs_ep6_rx_len;    /* last RX length */
 extern volatile uint32_t g_usbfs_ep6_rx_count;  /* total EP6 OUT interrupts (any TOG) */
 extern volatile uint16_t g_usbfs_ep7_in_count;  /* total EP7 IN completions */
+extern volatile uint16_t g_usbfs_ep5_in_count;  /* total EP5 IN (notification) completions */
+
+/* Target-side CDC ECM link notification state machine.
+ *   g_target_notify_state: 0=idle, 1=link down pending, 2=link up pending,
+ *                          3=speed change pending. A host that is not polling
+ *   the notification endpoint latches the pending packet, so a non-zero state
+ *   with g_target_notify_tx_count stuck means the host never read it.
+ *   g_target_notify_tx_count: notifications handed to EP5. */
+extern volatile uint8_t  g_target_notify_state;
+extern volatile uint16_t g_target_notify_tx_count;
 
 #ifdef __cplusplus
 }

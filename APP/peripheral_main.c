@@ -165,6 +165,14 @@ void Main_Circulation(void)
             ecm_polled = 1;
         }
 #endif
+        /* A target-facing ECM NIC has to be serviced even with no BLE client:
+         * the link notification and the target PC's ARP traffic both have to be
+         * handled before any tunnel exists, otherwise the host parks the
+         * interface at NO-CARRIER and nothing ever attaches. */
+        else if (USB_ModeConfig_ActiveModeHasTargetCdcEcm()) {
+            ECM_Bridge_Poll();
+            ecm_polled = 1;
+        }
         /* Also poll ECM bridge when BLE-Eth has active tunnels or ARP-pending connections */
 #ifdef ENABLE_BLE
         else if (BLE_Eth_HasActiveOrPendingConnection()) {

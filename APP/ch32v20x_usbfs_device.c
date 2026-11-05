@@ -231,6 +231,7 @@ volatile uint8_t  g_usbfs_ep6_tog_ok = 0;    /* last TOG_OK result */
 volatile uint16_t g_usbfs_ep6_rx_len = 0;    /* last RX length */
 volatile uint32_t g_usbfs_ep6_rx_count = 0;  /* total EP6 OUT interrupts (any TOG state) */
 volatile uint16_t g_usbfs_ep7_in_count = 0;   /* total EP7 IN completions */
+volatile uint16_t g_usbfs_ep5_in_count = 0;   /* total EP5 IN (ECM notification) completions */
 
 /******************************************************************************/
 /* Interrupt Service Routine Declaration*/
@@ -768,6 +769,7 @@ void USBFS_IRQHandler( void )
                         else
 #endif
                         {
+                        g_usbfs_ep5_in_count++;
                         USBFSD->UEP5_TX_CTRL = ( USBFSD->UEP5_TX_CTRL & ~USBFS_UEP_T_RES_MASK ) | USBFS_UEP_T_RES_NAK;
                         USBFSD->UEP5_TX_CTRL ^= USBFS_UEP_T_TOG;
                         USBFS_Endp_Busy[ DEF_UEP5 ] = 0;
@@ -1610,6 +1612,9 @@ void USBFS_IRQHandler( void )
 #endif
                                         /* Reset GARP flag so it gets re-queued on every activation. */
                                         g_target_garp_sent = 0;
+                                        /* The host now polls the notification endpoint, so replay
+                                         * the link-state sequence or the "connected" edge is lost. */
+                                        ECM_Bridge_Target_RearmLinkNotify();
                                         /* Externally visible flag — ecm_bridge.c checks this
                                          * before sending through USBFS EP7. */
                                         g_target_ecm_data_if_active = 1;
@@ -1681,7 +1686,11 @@ void USBFS_IRQHandler( void )
                                         USBFS_EP0_Buf[ 0 ] = 0x01;
                                     }
                                 }
-#if USB_WORK_MODE_COMPILES_TARGET_CDC_ACM
+                                /* EP5/EP6/EP7 are the Target ECM notify + data pipes, so a
+                                 * GET_STATUS(ENDPOINT) for them must not fall through to
+                                 * errflag. Harmless but inert in the runtime-profile builds
+                                 * shipped today, where COMPILES_TARGET_CDC_ACM is already 1. */
+#if USB_WORK_MODE_COMPILES_TARGET_CDC_ACM || USB_WORK_MODE_COMPILES_TARGET_CDC_ECM
                                 else if( (uint8_t)( USBFS_SetupReqIndex & 0xFF ) == ( DEF_UEP_IN | DEF_UEP5 ) )
                                 {
                                     if( ( USBFSD->UEP5_TX_CTRL & USBFS_UEP_T_RES_MASK ) == USBFS_UEP_T_RES_STALL )

@@ -140,6 +140,12 @@ IF5  CDC ECM 数据   ─ alt0 空 / alt1: EP7 OUT 32B + EP7 IN 32B
 CDC-ECM 控制接口必须恰好声明 1 个中断 IN 端点，`cdc_ether` 依赖它获取
 `NETWORK_CONNECTION` 通知；没有通知端点时网卡会停留在 NO-CARRIER。
 
+通知是一次性的边沿，Linux 会丢掉它：`usbnet_open()` 之后主机才开始轮询通知
+端点，而 `usbnet_link_change()` 在接口尚未 `IFF_UP` 时直接忽略 link-up。carrier
+一旦为 0，带 `FLAG_POINTTOPOINT` 的驱动还会解除 RX URB 的提交，网口两个方向同
+时失效。因此固件在 down→up→speed 之后持续 beacon `NETWORK_CONNECTION=1`
+（`ECM_LINK_UP_BEACON_MS`），主机任何时候开始轮询都能立刻读到 up。
+
 ---
 
 ## 4. 数据流

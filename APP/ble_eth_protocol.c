@@ -14,9 +14,11 @@
 #include "include/default_target_config.h"
 #include "include/ecm_ip_config.h"
 #include "include/ecm_bridge.h"
+#include "ch32v20x_usbfs_device.h"
 #include <string.h>
 #include "debug.h"
 #include "include/pwm_led.h"
+#include "include/km_ring.h"
 
 #if USB_WORK_MODE_BRIDGE_ECM
 
@@ -43,6 +45,11 @@ static ble_eth_event_cb_t   g_event_cb;
 #define BLE_ETH_SYN_RETRY_TICKS 10U
 #define BLE_ETH_SYN_MAX_RETRIES 5U
 
+/* A ping cannot afford the 50-second ARP/SYN budget the connect path uses, and
+ * its 1-second echo cadence doubles as the per-echo reply deadline. */
+#define BLE_ETH_ICMP_ARP_RETRY_TICKS 2U
+#define BLE_ETH_ICMP_ARP_MAX_RETRIES  4U
+
 typedef struct {
     uint8_t  data[BLE_ETH_TX_CHUNK_SIZE];
     uint16_t len;
@@ -63,14 +70,22 @@ static ble_eth_tx_queue_t  g_tx_queue;
  */
 static bool g_tx_head_partial;
 
-static inline void txq_lock(void)
+/* WCH __disable_irq()/__enable_irq() act on CSR 0x800 bit 3 (MIE), not on
+ * mstatus. Return the previous MIE so a critical section entered from an ISR
+ * does not re-enable interrupts on exit. */
+static inline uint32_t txq_lock(void)
 {
+    uint32_t csr;
+    __asm volatile ("csrr %0, 0x800" : "=r"(csr));
     __disable_irq();
+    return (csr >> 3) & 0x1u;
 }
 
-static inline void txq_unlock(void)
+static inline void txq_unlock(uint32_t state)
 {
-    __enable_irq();
+    if (state) {
+        __enable_irq();
+    }
 }
 
 /* Reassembly buffer (one at a time, since BLE is single-connection) */
@@ -140,7 +155,6 @@ static uint8_t compute_rx_window(void)
 
 /* Callback for sending complete Ethernet frames to ECM bridge.
    Set by peripheral.c via BLE_Eth_SetEcmtxCb(). */
-typedef void (*ble_eth_ecm_tx_cb_t)(const uint8_t *data, uint16_t len);
 static ble_eth_ecm_tx_cb_t g_ecm_tx_cb;
 
 /* Firmware-side peer identity on the target CDC ECM link. */
@@ -156,7 +170,18 @@ static bool g_host_mac_valid = false;
 static uint16_t g_next_local_port = 50000U;
 static uint32_t g_next_initial_seq = 0x12345678U;
 static bool g_tcp_alloc_seeded = false;
+/* Distinguishes concurrent ping requests so a late echo reply from an earlier
+ * one cannot be credited to the next request. */
+static uint16_t g_next_icmp_ident = 1U;
 extern volatile uint32_t systick_ms;
+
+/* Scratch buffer for building one TCP segment. send_tcp_frame() runs in the
+ * TMOS/BLE task (SYN/DATA) and also from the USBFS ISR (ACK on target data),
+ * so access is serialized with txq_lock() rather than relying on per-context
+ * stack. A single 1514-byte buffer avoids two large static buffers. */
+static uint8_t g_tcp_tx_frame[1514];
+/* Frames dropped because the ECM bridge queue rejected them. */
+static uint32_t g_eth_tx_fail;
 
 void BLE_Eth_SetEcmtxCb(ble_eth_ecm_tx_cb_t cb)
 {
@@ -239,25 +264,25 @@ static void normalize_frame_checksum(uint8_t *data, uint16_t len)
 
 static void tx_queue_clear(void)
 {
-    txq_lock();
+    uint32_t irq = txq_lock();
     g_tx_queue.rd = 0;
     g_tx_queue.wr = 0;
     g_tx_queue.count = 0;
     g_tx_head_partial = false;
-    txq_unlock();
+    txq_unlock(irq);
 }
 
 static bool tx_queue_push(const uint8_t *data, uint16_t len)
 {
     if (len == 0) return true;
 
-    txq_lock();
+    uint32_t irq = txq_lock();
 
     /* Enqueue must be all-or-nothing to avoid truncating framed payloads. */
     uint16_t needed_chunks = (uint16_t)((len + BLE_ETH_TX_CHUNK_SIZE - 1U) / BLE_ETH_TX_CHUNK_SIZE);
     if ((uint16_t)(g_tx_queue.count + needed_chunks) > BLE_ETH_TX_QUEUE_DEPTH) {
         g_reliability_stats.tx_queue_full_drop++;
-        txq_unlock();
+        txq_unlock(irq);
         return false;
     }
 
@@ -277,7 +302,7 @@ static bool tx_queue_push(const uint8_t *data, uint16_t len)
         offset = (uint16_t)(offset + copy_len);
     }
 
-    txq_unlock();
+    txq_unlock(irq);
 
     return true;
 }
@@ -290,11 +315,11 @@ static bool tx_queue_push_front(const uint8_t *data, uint16_t len)
         return tx_queue_push(data, len);
     }
 
-    txq_lock();
+    uint32_t irq = txq_lock();
 
     if (g_tx_queue.count >= BLE_ETH_TX_QUEUE_DEPTH) {
         g_reliability_stats.tx_queue_full_drop++;
-        txq_unlock();
+        txq_unlock(irq);
         return false;
     }
 
@@ -322,7 +347,7 @@ static bool tx_queue_push_front(const uint8_t *data, uint16_t len)
         g_tx_queue.count++;
     }
 
-    txq_unlock();
+    txq_unlock(irq);
     return true;
 }
 
@@ -387,6 +412,13 @@ static uint8_t send_tcp_frame(uint8_t conn_id, uint16_t tcp_flags,
 static uint8_t send_tcp_syn(uint8_t conn_id);
 static void send_arp_request(uint8_t conn_id);
 static void queue_connect_response(uint8_t addr, uint8_t conn_id, uint8_t status);
+static uint8_t send_icmp_echo(uint8_t conn_id);
+static void finish_icmp_conn(uint8_t conn_id, uint8_t status);
+static void queue_net_ping_response(uint8_t addr, uint8_t status, uint8_t sent,
+                                    uint8_t recv, uint16_t avg_ms);
+static bool handle_icmp_target_frame(const uint8_t *ip, const uint8_t *icmp,
+                                     uint16_t icmp_len);
+static uint16_t frame_get_be16(const uint8_t *p);
 
 static void queue_data_ack(uint8_t addr, uint8_t status, uint8_t conn_id, uint8_t seq, uint8_t expected_seq)
 {
@@ -471,7 +503,8 @@ static void dispatch_frame(const ble_eth_frame_t *frame)
         uint8_t conn_id = frame->payload[0];
         if (conn_id < BLE_ETH_MAX_CONNECTIONS && g_connections[conn_id].active) {
             ble_eth_conn_t *c = &g_connections[conn_id];
-            if (c->tcp_state == BLE_ETH_TCP_ESTABLISHED || c->tcp_state == BLE_ETH_TCP_SYN_SENT) {
+            if (!c->is_icmp &&
+                (c->tcp_state == BLE_ETH_TCP_ESTABLISHED || c->tcp_state == BLE_ETH_TCP_SYN_SENT)) {
                 send_tcp_frame(conn_id, 0x14, NULL, 0);  /* RST+ACK */
             }
         }
@@ -586,7 +619,7 @@ static void dispatch_frame(const ble_eth_frame_t *frame)
         rsp[1] = BLE_ETH_MAX_CONNECTIONS;
         rsp[2] = 0x00;  /* high byte of max single-frag payload */
         rsp[3] = BLE_ETH_MAX_PAYLOAD_LEN - BLE_ETH_FRAG_HEADER_LEN;  /* low byte */
-        rsp[4] = BLE_ETH_FEAT_TCP_TUNNEL | BLE_ETH_FEAT_SSH_OPT | BLE_ETH_FEAT_DATA_ACK_META | BLE_ETH_FEAT_DATA_ACK_WINDOW;
+        rsp[4] = BLE_ETH_FEAT_TCP_TUNNEL | BLE_ETH_FEAT_SSH_OPT | BLE_ETH_FEAT_DATA_ACK_META | BLE_ETH_FEAT_DATA_ACK_WINDOW | BLE_ETH_FEAT_ICMP_PING;
 
         uint8_t buf[24];
         uint16_t len = build_frame(buf, addr, BLE_ETH_CMD_INFO_RESP, rsp, BLE_ETH_INFO_PAYLOAD_LEN);
@@ -600,6 +633,40 @@ static void dispatch_frame(const ble_eth_frame_t *frame)
         uint16_t len = build_frame(buf, addr, BLE_ETH_CMD_PONG,
                                    frame->payload, frame->payload_len);
         tx_queue_push_front(buf, len);
+        break;
+    }
+
+    case BLE_ETH_CMD_NET_PING: {
+        /* ICMP echo through the target ECM link — unlike CMD_PING this really
+         * reaches the target PC, so it is the only way to answer "can the phone
+         * ping the machine behind the cable". */
+        if (frame->payload_len < BLE_ETH_NET_PING_PAYLOAD_LEN) {
+            queue_net_ping_response(addr, BLE_ETH_STATUS_PARAM_ERR, 0, 0, 0);
+            break;
+        }
+
+        uint8_t count = frame->payload[4];
+        if (count == 0u) count = BLE_ETH_NET_PING_DEFAULT_COUNT;
+        if (count > BLE_ETH_NET_PING_MAX_COUNT) count = BLE_ETH_NET_PING_MAX_COUNT;
+
+        uint8_t conn_id = BLE_Eth_AllocConnection(frame->payload, 0u);
+        if (conn_id == BLE_ETH_INVALID_CONN_ID) {
+            queue_net_ping_response(addr, BLE_ETH_STATUS_CONN_FULL, 0, 0, 0);
+            break;
+        }
+
+        ble_eth_conn_t *c = &g_connections[conn_id];
+        c->peer_addr = addr;
+        c->is_icmp = 1u;
+        if (++g_next_icmp_ident == 0u) g_next_icmp_ident = 1u;
+        c->icmp_ident = g_next_icmp_ident;
+        c->icmp_remaining = count;
+        c->tcp_state = BLE_ETH_TCP_ARP_PENDING;
+        c->syn_retries_left = BLE_ETH_ICMP_ARP_MAX_RETRIES;
+        c->arp_timeout_ticks = BLE_ETH_ICMP_ARP_RETRY_TICKS;
+
+        PWM_LED_SetBrightness(LED_DIAG_SYN_SENT);  /* ARP request sent */
+        send_arp_request(conn_id);
         break;
     }
 
@@ -816,6 +883,19 @@ static void dispatch_frame(const ble_eth_frame_t *frame)
             rsp_len = 12;
             break;
 
+        case 0x06:  /* target ECM link-notification diagnostics */
+            rsp[0] = BLE_ETH_STATUS_SUCCESS;
+            rsp[1] = g_target_notify_state;
+            rsp[2] = USBFS_Endp_Busy[DEF_UEP5] ? 1u : 0u;
+            rsp[3] = (uint8_t)(g_target_notify_tx_count & 0xFF);
+            rsp[4] = (uint8_t)(g_target_notify_tx_count >> 8);
+            rsp[5] = (uint8_t)(g_usbfs_ep5_in_count & 0xFF);
+            rsp[6] = (uint8_t)(g_usbfs_ep5_in_count >> 8);
+            rsp[7] = (uint8_t)(g_ecm_tx_count & 0xFF);
+            rsp[8] = (uint8_t)(g_ecm_tx_count >> 8);
+            rsp_len = 9;
+            break;
+
         default:
             rsp[0] = BLE_ETH_STATUS_PARAM_ERR;
             rsp_len = 1;
@@ -1028,6 +1108,9 @@ uint8_t BLE_Eth_AllocConnection(const uint8_t remote_ip[4], uint16_t remote_port
 {
     for (uint8_t i = 0; i < BLE_ETH_MAX_CONNECTIONS; i++) {
         if (!g_connections[i].active) {
+            /* Clear the whole slot: a reused entry must not inherit the ICMP
+             * fields of the previous occupant. */
+            memset(&g_connections[i], 0, sizeof(ble_eth_conn_t));
             g_connections[i].active = true;
             g_connections[i].conn_id = i;
             memcpy(g_connections[i].remote_ip, remote_ip, 4);
@@ -1038,9 +1121,7 @@ uint8_t BLE_Eth_AllocConnection(const uint8_t remote_ip[4], uint16_t remote_port
             g_connections[i].remote_seq = 0;
             g_connections[i].remote_ack = 0;
             g_connections[i].local_port = alloc_local_port();
-            memset(g_connections[i].target_mac, 0, 6);
             g_connections[i].arp_timeout_ticks = 10;  /* 10 second timeout */
-            g_connections[i].peer_addr = 0;
             return i;
         }
     }
@@ -1062,6 +1143,13 @@ bool BLE_Eth_HandleArpReply(const uint8_t sender_ip[4], const uint8_t sender_mac
             memcmp(c->remote_ip, sender_ip, 4) == 0) {
             memcpy(c->target_mac, sender_mac, 6);
             c->tcp_state = BLE_ETH_TCP_SYN_SENT;
+            if (c->is_icmp) {
+                /* SYN_SENT is reused as "an echo is in flight" for pings. */
+                if (!send_icmp_echo(i)) {
+                    finish_icmp_conn(i, BLE_ETH_STATUS_NO_ROUTE);
+                }
+                return true;
+            }
             c->syn_seq = c->local_seq;
             c->syn_retries_left = BLE_ETH_SYN_MAX_RETRIES;
             c->arp_timeout_ticks = BLE_ETH_SYN_RETRY_TICKS;
@@ -1085,7 +1173,9 @@ bool BLE_Eth_HasActiveOrPendingConnection(void)
     return false;
 }
 
-/* Periodic tick handler for ARP/SYN timeout processing. */
+/* Periodic tick handler for ARP/SYN timeout and ping cadence processing.
+ * The BLE task fires this once per second, which is exactly the interval a
+ * ping should use, so the tick doubles as the per-echo reply deadline. */
 bool BLE_Eth_PeriodicTick(void)
 {
     bool tx_queued = false;
@@ -1098,8 +1188,12 @@ bool BLE_Eth_PeriodicTick(void)
                 if (c->arp_timeout_ticks == 0) {
                     if (c->syn_retries_left > 0) {
                         c->syn_retries_left--;
-                        c->arp_timeout_ticks = BLE_ETH_SYN_RETRY_TICKS;
+                        c->arp_timeout_ticks = c->is_icmp ? BLE_ETH_ICMP_ARP_RETRY_TICKS
+                                                          : BLE_ETH_SYN_RETRY_TICKS;
                         send_arp_request(i);
+                    } else if (c->is_icmp) {
+                        finish_icmp_conn(i, BLE_ETH_STATUS_TIMEOUT);
+                        tx_queued = true;
                     } else {
                         c->tcp_state = BLE_ETH_TCP_CLOSED;
                         c->active = false;
@@ -1108,6 +1202,22 @@ bool BLE_Eth_PeriodicTick(void)
                         evt_conn_opened(BLE_ETH_INVALID_CONN_ID, BLE_ETH_STATUS_TIMEOUT);
                     }
                 }
+            }
+        }
+        else if (c->active && c->tcp_state == BLE_ETH_TCP_SYN_SENT && c->is_icmp) {
+            if (c->icmp_awaiting) {
+                c->icmp_awaiting = 0;  /* echo unanswered for a full second */
+            }
+            if (c->icmp_remaining > 0u) {
+                if (!send_icmp_echo(i)) {
+                    finish_icmp_conn(i, c->icmp_recv ? BLE_ETH_STATUS_SUCCESS
+                                                     : BLE_ETH_STATUS_NO_ROUTE);
+                    tx_queued = true;
+                }
+            } else {
+                finish_icmp_conn(i, c->icmp_recv ? BLE_ETH_STATUS_SUCCESS
+                                                 : BLE_ETH_STATUS_TIMEOUT);
+                tx_queued = true;
             }
         }
         else if (c->active && c->tcp_state == BLE_ETH_TCP_SYN_SENT) {
@@ -1152,14 +1262,14 @@ bool BLE_Eth_PushTargetData(uint8_t conn_id, const uint8_t *data, uint16_t len)
     /* Enqueue fragments atomically. If we enqueue only a prefix of a TCP segment
      * but still ACK it at the TCP layer, the byte stream becomes corrupted.
      */
-    txq_lock();
+    uint32_t irq = txq_lock();
     uint8_t depth_for_data = BLE_ETH_TX_QUEUE_DEPTH;
     if (depth_for_data > BLE_ETH_TX_QUEUE_CTRL_RESERVE) {
         depth_for_data = (uint8_t)(depth_for_data - BLE_ETH_TX_QUEUE_CTRL_RESERVE);
     }
     if ((uint16_t)(g_tx_queue.count + total_frags) > depth_for_data) {
         g_reliability_stats.tx_queue_full_drop++;
-        txq_unlock();
+        txq_unlock(irq);
         return false;
     }
 
@@ -1202,7 +1312,7 @@ bool BLE_Eth_PushTargetData(uint8_t conn_id, const uint8_t *data, uint16_t len)
         offset = (uint16_t)(offset + chunk_len);
     }
 
-    txq_unlock();
+    txq_unlock(irq);
     return true;
 }
 
@@ -1210,10 +1320,10 @@ uint16_t BLE_Eth_GetNextTxChunk(uint8_t *buf, uint16_t max_len)
 {
     if (max_len == 0) return 0;
 
-    txq_lock();
+    uint32_t irq = txq_lock();
 
     if (g_tx_queue.count == 0) {
-        txq_unlock();
+        txq_unlock(irq);
         return 0;
     }
 
@@ -1222,14 +1332,14 @@ uint16_t BLE_Eth_GetNextTxChunk(uint8_t *buf, uint16_t max_len)
     if (len > max_len) len = max_len;
     memcpy(buf, chunk->data, len);
 
-    txq_unlock();
+    txq_unlock(irq);
 
     return len;
 }
 
 void BLE_Eth_ConsumeTxChunk(uint16_t len)
 {
-    txq_lock();
+    uint32_t irq = txq_lock();
 
     while (len > 0 && g_tx_queue.count > 0) {
         ble_eth_tx_chunk_t *chunk = &g_tx_queue.chunks[g_tx_queue.rd];
@@ -1238,7 +1348,7 @@ void BLE_Eth_ConsumeTxChunk(uint16_t len)
             memmove(chunk->data, chunk->data + len, chunk->len - len);
             chunk->len = (uint16_t)(chunk->len - len);
             g_tx_head_partial = true;
-            txq_unlock();
+            txq_unlock(irq);
             return;
         }
 
@@ -1250,7 +1360,7 @@ void BLE_Eth_ConsumeTxChunk(uint16_t len)
         g_tx_head_partial = false;
     }
 
-    txq_unlock();
+    txq_unlock(irq);
 }
 
 /* ======================== ECM TCP frame generation ======================= */
@@ -1333,7 +1443,12 @@ static uint8_t send_tcp_frame(uint8_t conn_id, uint16_t tcp_flags,
     uint16_t total = 14 + 20 + 20 + payload_len;
     if (total > 1514) return 0;
 
-    uint8_t buf[1514];
+    /* The static frame buffer is shared with the USBFS ISR ACK path. Keep
+     * interrupts off for the (short) build+enqueue so a nested send cannot
+     * rewrite the bytes half way through. txq_lock saves/restores MIE, so
+     * entering from an ISR does not re-enable interrupts on exit. */
+    uint32_t irq = txq_lock();
+    uint8_t *buf = g_tcp_tx_frame;
     uint16_t off = 0;
 
     /* Ethernet header */
@@ -1383,12 +1498,20 @@ static uint8_t send_tcp_frame(uint8_t conn_id, uint16_t tcp_flags,
         off += payload_len;
     }
 
-    /* Update TCP sequence numbers */
+    uint8_t queued = g_ecm_tx_cb(buf, total);
+    txq_unlock(irq);
+
+    if (!queued) {
+        g_eth_tx_fail++;
+        USB_DEBUG("BLE-Eth TX drop: len=%d fails=%lu\r\n", total, g_eth_tx_fail);
+        return 0;
+    }
+
+    /* Advance sequence numbers only after the frame actually left the device;
+     * otherwise the host waits forever for data that was never transmitted. */
     if (tcp_flags & 0x02) c->local_seq++;  /* SYN increments seq */
     if (tcp_flags & 0x01) c->local_seq++;  /* FIN increments seq */
     if (payload_len > 0) c->local_seq += payload_len;
-
-    g_ecm_tx_cb(buf, total);
     return 1;
 }
 
@@ -1435,6 +1558,139 @@ static void send_arp_request(uint8_t conn_id)
     g_ecm_tx_cb(buf, 42);
 }
 
+/* ======================== ICMP Echo ====================================== */
+
+static void queue_net_ping_response(uint8_t addr, uint8_t status, uint8_t sent,
+                                    uint8_t recv, uint16_t avg_ms)
+{
+    uint8_t rsp[BLE_ETH_NET_PING_RESP_LEN];
+    rsp[0] = status;
+    rsp[1] = sent;
+    rsp[2] = recv;
+    rsp[3] = (uint8_t)(avg_ms >> 8);
+    rsp[4] = (uint8_t)(avg_ms & 0xFF);
+
+    uint8_t buf[16];
+    uint16_t len = build_frame(buf, addr, BLE_ETH_CMD_NET_PING_RESP,
+                               rsp, BLE_ETH_NET_PING_RESP_LEN);
+    tx_queue_push_front(buf, len);
+}
+
+/* Report the ping outcome and release the slot. Status SUCCESS means at least
+ * one echo was answered; the host decides how to present partial loss. */
+static void finish_icmp_conn(uint8_t conn_id, uint8_t status)
+{
+    if (conn_id >= BLE_ETH_MAX_CONNECTIONS) return;
+
+    ble_eth_conn_t *c = &g_connections[conn_id];
+    if (!c->active) return;
+
+    uint8_t addr = c->peer_addr;
+    uint8_t sent = c->icmp_sent;
+    uint8_t recv = c->icmp_recv;
+    uint16_t avg = recv ? (uint16_t)(c->icmp_rtt_sum_ms / recv) : 0u;
+
+    BLE_Eth_FreeConnection(conn_id);
+    queue_net_ping_response(addr, status, sent, recv, avg);
+}
+
+/* Build Ethernet + IPv4 + ICMP echo request and hand it to the ECM bridge.
+ * Mirrors send_tcp_frame(); returns 1 when the bridge accepted the frame. */
+static uint8_t send_icmp_echo(uint8_t conn_id)
+{
+    if (conn_id >= BLE_ETH_MAX_CONNECTIONS) return 0;
+    if (!g_ecm_tx_cb) return 0;
+
+    ble_eth_conn_t *c = &g_connections[conn_id];
+    if (!c->active) return 0;
+
+    const uint16_t icmp_len = 8u + 8u;  /* header + transmit timestamp */
+    const uint16_t total = 14u + 20u + icmp_len;
+
+    /* Same shared scratch buffer as the TCP path, and it is also written from
+     * the USBFS ISR, so keep the build inside the lock. */
+    uint32_t irq = txq_lock();
+    uint8_t *buf = g_tcp_tx_frame;
+    uint16_t off = 0;
+
+    c->icmp_tx_tick_ms = systick_ms;
+    c->icmp_seq = c->icmp_sent;
+
+    /* Ethernet header */
+    memcpy(&buf[off], c->target_mac, 6); off += 6;
+    memcpy(&buf[off], g_dev_mac, 6);     off += 6;
+    ecm_put_be16(&buf[off], 0x0800); off += 2;
+
+    /* IPv4 header */
+    uint16_t ip_total = 20u + icmp_len;
+    buf[off + 0] = 0x45;
+    buf[off + 1] = 0x00;
+    ecm_put_be16(&buf[off + 2], ip_total);
+    ecm_put_be16(&buf[off + 4], 0x0001);
+    ecm_put_be16(&buf[off + 6], 0x4000);
+    buf[off + 8] = 64;
+    buf[off + 9] = 1;                 /* protocol = ICMP */
+    buf[off + 10] = 0; buf[off + 11] = 0;
+    memcpy(&buf[off + 12], g_dev_ip, 4);
+    memcpy(&buf[off + 16], c->remote_ip, 4);
+    ecm_put_be16(&buf[off + 10], ip_checksum(&buf[off], 20));
+    off += 20;
+
+    /* ICMP echo request */
+    buf[off + 0] = 8;                 /* type = echo request */
+    buf[off + 1] = 0;                 /* code */
+    buf[off + 2] = 0; buf[off + 3] = 0;
+    ecm_put_be16(&buf[off + 4], c->icmp_ident);
+    ecm_put_be16(&buf[off + 6], c->icmp_seq);
+    ecm_put_be32(&buf[off + 8], c->icmp_tx_tick_ms);
+    ecm_put_be32(&buf[off + 12], 0u);
+    /* ICMP checksum covers the message only, with no pseudo-header. */
+    ecm_put_be16(&buf[off + 2], ip_checksum(&buf[off], icmp_len));
+    off += icmp_len;
+
+    uint8_t queued = g_ecm_tx_cb(buf, total);
+    txq_unlock(irq);
+
+    if (!queued) {
+        g_eth_tx_fail++;
+        USB_DEBUG("BLE-Eth ICMP drop: fails=%lu\r\n", g_eth_tx_fail);
+        return 0;
+    }
+
+    if (c->icmp_sent < 255u) c->icmp_sent++;
+    if (c->icmp_remaining > 0u) c->icmp_remaining--;
+    c->icmp_awaiting = 1u;
+    return 1;
+}
+
+/* Match an inbound ICMP echo reply to a pending ping and fold it into the
+ * running totals. Runs from the USBFS ISR, so it only touches conn fields. */
+static bool handle_icmp_target_frame(const uint8_t *ip, const uint8_t *icmp,
+                                     uint16_t icmp_len)
+{
+    if (icmp_len < 8u) return false;
+    if (icmp[0] != 0u) return false;  /* only echo replies interest us */
+
+    uint8_t src_ip[4];
+    memcpy(src_ip, &ip[12], 4);
+    uint16_t ident = frame_get_be16(&icmp[4]);
+    uint16_t seq = frame_get_be16(&icmp[6]);
+
+    for (uint8_t i = 0; i < BLE_ETH_MAX_CONNECTIONS; i++) {
+        ble_eth_conn_t *c = &g_connections[i];
+        if (!c->active || !c->is_icmp || !c->icmp_awaiting) continue;
+        if (memcmp(c->remote_ip, src_ip, 4) != 0) continue;
+        if (ident != c->icmp_ident || seq != c->icmp_seq) continue;
+
+        c->icmp_awaiting = 0u;
+        if (c->icmp_recv < 255u) c->icmp_recv++;
+        c->icmp_rtt_sum_ms += (uint32_t)(systick_ms - c->icmp_tx_tick_ms);
+        PWM_LED_SetBrightness(LED_DIAG_SYN_ACK_RX);
+        return true;
+    }
+    return false;
+}
+
 /* Send TCP data through tunnel. Wraps in Ethernet/IPv4/TCP.
  * Payloads larger than the TCP MSS are split into multiple segments:
  * a single oversized frame would exceed the 1514-byte Ethernet MTU and
@@ -1451,7 +1707,13 @@ void BLE_Eth_SendDataToEth(uint8_t conn_id, const uint8_t *data, uint16_t len)
     while (off < len) {
         uint16_t seg_len = (uint16_t)(len - off);
         if (seg_len > BLE_ETH_TCP_MSS) seg_len = BLE_ETH_TCP_MSS;
-        send_tcp_frame(conn_id, 0x18, data + off, seg_len);  /* PSH+ACK */
+        if (!send_tcp_frame(conn_id, 0x18, data + off, seg_len)) {  /* PSH+ACK */
+            /* No retransmission path exists: continuing would either splice
+             * the remaining bytes after a missing segment or waste BLE
+             * bandwidth. Stop and keep local_seq consistent with what was
+             * actually delivered. */
+            return;
+        }
         off = (uint16_t)(off + seg_len);
     }
 }
@@ -1483,11 +1745,25 @@ bool BLE_Eth_HandleTargetFrame(const uint8_t *frame, uint16_t len)
     if ((ip[0] >> 4) != 4u) return false;
 
     uint16_t ip_header_len = (uint16_t)((ip[0] & 0x0Fu) * 4u);
-    if (ip_header_len < 20u || off + ip_header_len + 20u > len) return false;
+    if (ip_header_len < 20u) return false;
+
+    /* The IPv4 total length bounds the L4 message; without this check a
+     * truncated frame yields an underflowed length and the payload pointer
+     * runs past the received buffer. */
+    uint16_t ip_total = frame_get_be16(&ip[2]);
+    if (ip_total < ip_header_len) return false;
+    if ((uint32_t)off + ip_total > (uint32_t)len) return false;
+
+    if (ip[9] == 1u) {
+        return handle_icmp_target_frame(ip, &frame[off + ip_header_len],
+                                        (uint16_t)(ip_total - ip_header_len));
+    }
+
     if (ip[9] != 6u) return false;  /* not TCP */
+    if (off + ip_header_len + 20u > len) return false;
 
     const uint8_t *tcp = &frame[off + ip_header_len];
-    uint16_t tcp_segment_len = frame_get_be16(&ip[2]) - ip_header_len;
+    uint16_t tcp_segment_len = (uint16_t)(ip_total - ip_header_len);
     uint16_t tcp_header_len = (uint16_t)((tcp[12] >> 4) * 4u);
     if (tcp_header_len < 20u || tcp_header_len > tcp_segment_len) return false;
 
@@ -1590,6 +1866,51 @@ void BLE_Eth_ResetParser(void)
     g_parser.rx_index = 0;
     g_parser.checksum = 0;
     reassembly_clear();
+}
+
+/* Drop all tunnel state. When notify_host is set, queue a CONN_CLOSED frame
+ * per connection so the host-side proxy knows to reconnect; the TX queue is
+ * cleared first so stale DATA_PUSH chunks cannot precede the close frame. */
+static void reset_all_tunnels(uint8_t notify_host, uint8_t status)
+{
+    uint8_t buf[16];
+
+    tx_queue_clear();
+    reassembly_clear();
+    g_last_data_ack.valid = false;
+
+    for (uint8_t i = 0; i < BLE_ETH_MAX_CONNECTIONS; i++) {
+        ble_eth_conn_t *c = &g_connections[i];
+        if (!c->active) continue;
+
+        if (!c->is_icmp &&
+            (c->tcp_state == BLE_ETH_TCP_ESTABLISHED ||
+             c->tcp_state == BLE_ETH_TCP_SYN_SENT)) {
+            send_tcp_frame(i, 0x14, NULL, 0);  /* RST+ACK to target */
+        }
+
+        if (notify_host) {
+            uint8_t rsp[2] = { i, status };
+            uint16_t len = build_frame(buf, c->peer_addr,
+                                       BLE_ETH_CMD_CONN_CLOSED,
+                                       rsp, sizeof(rsp));
+            tx_queue_push_front(buf, len);
+        }
+
+        BLE_Eth_FreeConnection(i);
+        evt_conn_closed(i, status);
+    }
+}
+
+void BLE_Eth_OnLinkLost(void)
+{
+    reset_all_tunnels(0, BLE_ETH_STATUS_SUCCESS);
+    BLE_Eth_ResetParser();
+}
+
+void BLE_Eth_ResetAllTunnels(uint8_t status)
+{
+    reset_all_tunnels(1, status);
 }
 
 bool BLE_Eth_HasActiveTunnel(void)

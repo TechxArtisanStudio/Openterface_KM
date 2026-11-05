@@ -110,6 +110,57 @@ When the remote TCP side closes the connection, the device pushes:
 57 AB 00 D2 01 <conn_id> CS
 ```
 
+#### NET_PING (`0x24`) - ICMP Echo to a Target IP
+
+Unlike PING (`0x1E`), which only echoes bytes back over BLE to test the radio
+path, NET_PING sends real ICMP echo requests out of the target-side CDC ECM
+link and reports what came back. This is how a phone or laptop with only a BLE
+connection checks whether the machine behind the cable is reachable.
+
+**Request payload (5 bytes):**
+
+| Offset | Field | Size | Description |
+|--------|-------|------|-------------|
+| 0-3 | Destination IP | 4 | Big-endian IPv4 address |
+| 4 | Echo Count | 1 | 1-50; `0x00` selects the default of 4 |
+
+**Response (`0xA4`) payload (5 bytes):**
+
+| Offset | Field | Size | Description |
+|--------|-------|------|-------------|
+| 0 | Status | 1 | `0x00` if at least one reply arrived, else `0xE1` TIMEOUT / `0xE8` NO_ROUTE / `0xE5` PARAM_ERR / `0xE7` CONN_FULL |
+| 1 | Echoes Sent | 1 | Requests transmitted |
+| 2 | Echoes Received | 1 | Replies matched by ICMP id and sequence |
+| 3-4 | Mean RTT | 2 | Big-endian milliseconds, `0` when no reply |
+
+Behavior notes:
+
+- One echo per second, one in flight at a time (the cadence is the 1 s
+  `SBP_PERIODIC_EVT` tick, `1600 × 0.625 ms`).
+- **ARP resolution comes first and can take up to 10 s**: 2 s per attempt, 4
+  retries, then a `TIMEOUT` response with `Echoes Sent = 0`. So the host must
+  allow roughly `10 + count + 1` seconds, not `count + 1`. Declaring failure
+  earlier just produces a false negative.
+- `Echoes Sent = 0` plus `TIMEOUT` means the target-side link never resolved
+  that IP — the machine is absent, off-subnet, or the target ECM link is down.
+  This is a different fault from `Sent = 4 / Recv = 1`, which means L2 was fine
+  and the host itself ignored echoes.
+- The ping occupies a connection slot for its whole lifetime, so with
+  `BLE_ETH_MAX_CONNECTIONS = 2` only one CONNECT tunnel can run alongside it.
+- Replies are matched on ICMP id plus sequence, and the ICMP id is unique per
+  NET_PING request, so a late answer to a previous ping cannot be credited to
+  the next one.
+
+**Example:**
+
+```
+Ping 192.168.30.2 four times
+  payload = C0 A8 1E 02 04
+  checksum = 57+AB+00+24+05+C0+A8+1E+02+04 = 0x2B7 -> low byte 0xB7
+Request : 57 AB 00 24 05 C0 A8 1E 02 04 B7
+Response: 57 AB 00 A4 05 00 04 04 00 02 B5   (success, 4/4, mean RTT 2 ms)
+```
+
 ### Configuration
 
 #### SET_DEFAULT (`0x20`) / GET_DEFAULT (`0x21`) - Default SSH Target
@@ -141,7 +192,8 @@ parameters, `0xE9` flash error).
 
 **GET_ECM_IP request payload:** 1 byte `[sub_cmd]` — `0x00` all, `0x01` host
 side, `0x02` target side, `0x03` bridge link status, `0x05` target-side
-re-enumeration / DHCP diagnostics.
+re-enumeration / DHCP diagnostics, `0x06` target ECM link-notification
+diagnostics.
 
 Response `0xA3`:
 
@@ -152,6 +204,7 @@ Response `0xA3`:
 | `0x02` | `[target_host 4][target_dev 4]` (9 bytes) |
 | `0x03` | `[host_ecm_active 1][target_ecm_active 1]` (2 bytes) |
 | `0x05` | Diagnostics, see below (12 bytes) |
+| `0x06` | Link-notification diagnostics, see below (9 bytes) |
 
 The `0x05` diagnostics reply is laid out as:
 
@@ -166,10 +219,26 @@ The `0x05` diagnostics reply is laid out as:
 | 10 | Target ECM data if | 1 | `1` when the target ECM data interface is active |
 | 11 | Host ECM data if | 1 | `1` when the host ECM data interface is active |
 
+The `0x06` link-notification diagnostics reply is laid out as:
+
+| Offset | Field | Size | Description |
+|--------|-------|------|-------------|
+| 0 | Status | 1 | `0x00` on success |
+| 1 | Notify state | 1 | Target link notification machine: `0` idle, `1` link-down pending, `2` link-up pending, `3` speed-change pending, `4` beaconing link-up |
+| 2 | EP5 busy | 1 | `1` while a notification is still latched in USBFS EP5 IN, i.e. the target host has not read it |
+| 3-4 | Notifications sent | 2 | Little-endian, `NETWORK_CONNECTION`/`SPEED_CHANGE` packets handed to EP5 |
+| 5-6 | EP5 IN completions | 2 | Little-endian, interrupt-IN transactions the target host actually consumed |
+| 7-8 | ECM frames sent | 2 | Little-endian, `g_ecm_tx_count` |
+
+`Notifications sent` growing while `EP5 IN completions` stays at zero means the
+target host never polls the notification endpoint — its ECM interface is not
+open, so no carrier and no link. Both growing while the host still reports
+`NO-CARRIER` means the host is consuming the packets and not acting on them.
+
 > **Overlapping command bytes:** CH9329 defines `0x22` (BLE security, payload
 > `[sub_cmd]` with sub-commands `0x01..0x03`) and `0x23` (BLE set-name, payload
 > is the name text). The firmware distinguishes the two protocols by payload
-> shape: `0x23` with a single payload byte in `0x00..0x05` is treated as
+> shape: `0x23` with a single payload byte in `0x00..0x06` is treated as
 > BLE-Eth GET_ECM_IP, and `0x22` with 9/13/21 payload bytes (or a single `0x04`)
 > as BLE-Eth SET_ECM_IP. Everything else, including `0x22` with a single
 > `0x01`/`0x02`/`0x03`, still reaches the CH9329 handler. Reset deliberately
@@ -243,6 +312,7 @@ When data arrives from the remote TCP side, the device pushes DATA frames with t
 | 1 | SSH Optimized | SSH traffic optimization available |
 | 2 | DATA ACK metadata | DATA_RESP uses `[status, conn_id, seq, expected_seq]` |
 | 3 | DATA ACK rx_window | DATA_RESP uses `[status, conn_id, seq, expected_seq, rx_window]` |
+| 4 | ICMP ping | NET_PING (`0x24`) is supported |
 
 ## Fragmentation
 
