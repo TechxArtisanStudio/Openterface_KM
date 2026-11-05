@@ -38,8 +38,8 @@ show_help() {
     echo "Product versions:"
     echo "  kvmgo          Build KVMGo (BOARD_VERSION=1)"
     echo "  minikvm        Build Mini-KVM v1.2 (BOARD_VERSION=2)"
-    echo "  keymod-plus    Build KeyMod Plus (external 32KHz oscillator)"
-    echo "  keymod-mini    Build KeyMod Mini (internal RC oscillator)"
+    echo "  keymod-plus    Build KeyMod Plus (external 32KHz oscillator, KVM-GO feature set)"
+    echo "  keymod-mini    Build KeyMod Mini (internal RC oscillator, no serial port)"
     echo "  all            Build all versions"
     echo ""
     echo "Options:"
@@ -234,22 +234,22 @@ case ${TARGET} in
     keymod-plus)
         ENABLE_BLE=1
         USE_LTO=1
-        build_one "keymod-plus" "3" "1" "KeyMod" "hid_acm_ecm"
+        build_one "keymod-plus" "3" "1" "KeyMod" "hid_acm_ecm_bridge"
         ;;
     keymod-mini)
         ENABLE_BLE=1
         USE_LTO=1
-        build_one "keymod-mini" "3" "0" "KeyMod" "hid_acm_ecm"
+        build_one "keymod-mini" "3" "0" "KeyMod" "hid_ecm_bridge"
         ;;
     all)
         ENABLE_BLE=1
         USE_LTO=1
-        build_one "kvmgo" "1" "" "KVM-GO" "hid_acm_ecm"
+        build_one "kvmgo" "1" "" "KVM-GO" "hid_acm_ecm_bridge"
         ENABLE_BLE=0
         build_one "minikvm" "2" "" "Mini-KVM" "hid_acm_ecm"
         ENABLE_BLE=1
-        build_one "keymod-plus" "3" "1" "KeyMod" "hid_acm_ecm"
-        build_one "keymod-mini" "3" "0" "KeyMod" "hid_acm_ecm"
+        build_one "keymod-plus" "3" "1" "KeyMod" "hid_acm_ecm_bridge"
+        build_one "keymod-mini" "3" "0" "KeyMod" "hid_ecm_bridge"
         ;;
 esac
 

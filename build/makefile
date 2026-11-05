@@ -33,7 +33,9 @@ BOARD_VERSION ?= 1
 # USB work mode per board version:
 #   KVMGo (v1) and Mini-KVM (v2): CDC COM only (hid_acm)
 #   KeyMod (v3):                  CDC COM + CDC ECM (hid_acm_ecm)
-# Note: Can be overridden from command line for specific targets
+# Note: Can be overridden from command line for specific targets.
+#       keymod-plus uses hid_acm_ecm_bridge (same as KVMGo) and
+#       keymod-mini uses hid_ecm_bridge (no CDC-ACM serial).
 override ENABLE_UAC := 0
 ifndef USB_WORK_MODE
 ifneq ($(filter 1 2,$(BOARD_VERSION)),)
@@ -174,21 +176,23 @@ minikvm:
 	@cp openterface-km-firmware.hex openterface-km-firmware-minikvm.hex
 	@echo "Built: openterface-km-firmware-minikvm (CDC COM+ECM)"
 
-# KeyMod Plus build configuration (BOARD_VERSION=3, CDC COM + ECM)
+# KeyMod Plus build configuration (BOARD_VERSION=3, same personality as KVMGo)
 keymod-plus:
-	$(MAKE) --no-print-directory BOARD_VERSION=3 ENABLE_OSCILLATOR=1 ENABLE_BLE=1 BLE_NAME=KeyMod
+	$(MAKE) --no-print-directory BOARD_VERSION=3 ENABLE_OSCILLATOR=1 ENABLE_BLE=1 BLE_NAME=KeyMod USB_WORK_MODE=hid_acm_ecm_bridge
+	@riscv-none-embed-objcopy -O binary "openterface-km-firmware.elf" "openterface-km-firmware.bin"
 	@cp openterface-km-firmware.elf openterface-km-firmware-keymod-plus.elf
 	@cp openterface-km-firmware.bin openterface-km-firmware-keymod-plus.bin
 	@cp openterface-km-firmware.hex openterface-km-firmware-keymod-plus.hex
-	@echo "Built: openterface-km-firmware-keymod-plus (CDC COM+ECM, osc=on)"
+	@echo "Built: openterface-km-firmware-keymod-plus (HID+ACM+ECM bridge, osc=on)"
 
-# KeyMod Mini build configuration (BOARD_VERSION=3, CDC COM + ECM)
+# KeyMod Mini build configuration (BOARD_VERSION=3, no CDC-ACM serial)
 keymod-mini:
-	$(MAKE) --no-print-directory BOARD_VERSION=3 ENABLE_OSCILLATOR=0 ENABLE_BLE=1 BLE_NAME=KeyMod
+	$(MAKE) --no-print-directory BOARD_VERSION=3 ENABLE_OSCILLATOR=0 ENABLE_BLE=1 BLE_NAME=KeyMod USB_WORK_MODE=hid_ecm_bridge
+	@riscv-none-embed-objcopy -O binary "openterface-km-firmware.elf" "openterface-km-firmware.bin"
 	@cp openterface-km-firmware.elf openterface-km-firmware-keymod-mini.elf
 	@cp openterface-km-firmware.bin openterface-km-firmware-keymod-mini.bin
 	@cp openterface-km-firmware.hex openterface-km-firmware-keymod-mini.hex
-	@echo "Built: openterface-km-firmware-keymod-mini (CDC COM+ECM, osc=off)"
+	@echo "Built: openterface-km-firmware-keymod-mini (HID+ECM bridge, no serial, osc=off)"
 
 main-build: openterface-km-firmware.elf secondary-outputs
 

@@ -6,7 +6,7 @@
 #define USB_WORK_MODE_HID_ACM_BRIDGE  3
 #define USB_WORK_MODE_HID_ECM_BRIDGE  4
 #define USB_WORK_MODE_HID_UAC_ECM     5
-#define USB_WORK_MODE_HID_ACM_ECM     6   /* Host CDC-ACM + CDC-ECM combined (keymod-plus) */
+#define USB_WORK_MODE_HID_ACM_ECM     6   /* Host CDC-ACM + Host CDC-ECM combined */
 #define USB_WORK_MODE_HID_ACM_ECM_BRIDGE 7 /* Host CDC-ACM + Host CDC-ECM + Target CDC-ECM */
 
 #ifndef USB_WORK_MODE

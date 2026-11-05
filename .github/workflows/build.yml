@@ -147,7 +147,7 @@ jobs:
         $env:PATH = "C:\tools\risc-none-embed-gcc\bin;" + $env:PATH
         $env:RISC_COMPILER_PATH = "C:\tools\risc-none-embed-gcc"
         make clean
-        make -j4 ENABLE_BLE=1 ENABLE_OSCILLATOR=1 BOARD_VERSION=3 BLE_NAME=KeyMod all
+        make -j4 ENABLE_BLE=1 ENABLE_OSCILLATOR=1 BOARD_VERSION=3 BLE_NAME=KeyMod USB_WORK_MODE=hid_acm_ecm_bridge all
         riscv-none-embed-objcopy -O binary "openterface-km-firmware.elf" "openterface-km-firmware.bin"
         riscv-none-embed-size --format=berkeley openterface-km-firmware.elf | Out-File -Encoding ascii openterface-km-firmware.siz
         if ($LASTEXITCODE -eq 0) {
@@ -174,7 +174,7 @@ jobs:
         $env:PATH = "C:\tools\risc-none-embed-gcc\bin;" + $env:PATH
         $env:RISC_COMPILER_PATH = "C:\tools\risc-none-embed-gcc"
         make clean
-        make -j4 ENABLE_BLE=1 ENABLE_OSCILLATOR=0 BOARD_VERSION=3 BLE_NAME=KeyMod all
+        make -j4 ENABLE_BLE=1 ENABLE_OSCILLATOR=0 BOARD_VERSION=3 BLE_NAME=KeyMod USB_WORK_MODE=hid_ecm_bridge all
         riscv-none-embed-objcopy -O binary "openterface-km-firmware.elf" "openterface-km-firmware.bin"
         riscv-none-embed-size --format=berkeley openterface-km-firmware.elf | Out-File -Encoding ascii openterface-km-firmware.siz
         if ($LASTEXITCODE -eq 0) {
