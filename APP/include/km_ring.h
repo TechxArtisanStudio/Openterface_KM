@@ -44,8 +44,8 @@ typedef struct {
 } Resp_Report_t;
 
 /* Media key report structure
- * data[0] = Report ID (0x01=ACPI, 0x02=Consumer)
- * data[1..3] = payload (1 byte for ACPI, 3 bytes for Consumer)
+ * data[0] = Report ID (0x01=ACPI, 0x02=Consumer, 0x03=Apple function row)
+ * data[1..3] = payload (1 byte for ACPI and Apple row, 3 bytes for Consumer)
  */
 typedef struct {
     uint8_t data[4];

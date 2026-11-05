@@ -69,7 +69,7 @@
 #define DEF_USBD_CONFIG_DESC_LEN   ( (uint16_t)MyCfgDescr[ 2 ] + ( (uint16_t)MyCfgDescr[ 3 ] << 8 ) )
 #define DEF_USBD_REPORT_DESC_LEN_KB       0x3E
 #define DEF_USBD_REPORT_DESC_LEN_REL_MS   0x34
-#define DEF_USBD_REPORT_DESC_LEN_MEDIA    0x8D  /* ACPI + Consumer Control + vendor Feature ReportID=0x30 */
+#define DEF_USBD_REPORT_DESC_LEN_MEDIA    0xAE  /* ACPI + Consumer Control + Apple function row + vendor Feature ReportID=0x30 */
 
 /* EP3 report descriptor length — automatically follows EP3_USE_STYLUS */
 #ifdef EP3_USE_STYLUS

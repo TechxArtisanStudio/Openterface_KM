@@ -191,11 +191,12 @@ uint8_t Keyboard_GetLastLEDStatus(void) {
  *          CH9329 protocol format:
  *            ACPI keys:  data[0]=0x01, data[1]=acpi_code (Power/Sleep/Wake)
  *            Media keys: data[0]=0x02, data[1..3]=24-bit bitmap
+ *            Apple row:  data[0]=0x03, data[1]=brightness/Mission Control/Launchpad
  *
  * @param   addr     - Device address
  * @param   cmd_code - Command code (0x03)
  * @param   data     - data bytes from CH9329 frame (Report ID + payload)
- * @param   data_len - Length of data (2 for ACPI, 4 for media)
+ * @param   data_len - Length of data (2 for ACPI and Apple row, 4 for media)
  *
  * @return  none
  */
@@ -204,15 +205,17 @@ void Keyboard_HandleMediaData(uint8_t addr, uint8_t cmd_code, uint8_t* data, uin
     if (data_len < 2) return;
 
     uint8_t report_id = data[0];
-    if (report_id != 0x01 && report_id != 0x02) return;
+    if (report_id != 0x01 && report_id != 0x02 && report_id != 0x03) return;
 
-    uint8_t req_len = (report_id == 0x01) ? 2 : 4;
+    /* 0x02 Consumer carries 3 data bytes; 0x01 ACPI and 0x03 Apple function
+     * row carry one each. */
+    uint8_t req_len = (report_id == 0x02) ? 4 : 2;
     if (data_len < req_len) return;
 
     /* Skip if identical to last report */
     if (report_id == media_last_data[0] &&
         data[1] == media_last_data[1] &&
-        (report_id == 0x01 || (data[2] == media_last_data[2] && data[3] == media_last_data[3]))) {
+        (report_id != 0x02 || (data[2] == media_last_data[2] && data[3] == media_last_data[3]))) {
         return;
     }
 

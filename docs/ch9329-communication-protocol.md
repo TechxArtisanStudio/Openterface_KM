@@ -125,10 +125,23 @@ Important behavior note: the current implementation only releases keys when the 
 
 ### `0x03` Media / ACPI Report
 
-Two subformats are accepted:
+Three subformats are accepted, selected by the leading HID report ID:
 
 - ACPI: `data[0] = 0x01`, `data[1] = acpi_code`
 - Media: `data[0] = 0x02`, `data[1..3] = 24-bit bitmap`
+- Apple function row: `data[0] = 0x03`, `data[1] = 8-bit bitmap`
+
+Apple function row bitmap (`data[1]`, sent on EP4 as a 2-byte report):
+
+| bit | HID usage (Consumer page `0x0C`) | macOS function |
+| --- | --- | --- |
+| 0 | `0x0070` Display Brightness Decrement | F1, screen dimmer |
+| 1 | `0x006F` Display Brightness Increment | F2, screen brighter |
+| 2 | `0x029F` AC Desktop Show All Windows | F3, Mission Control |
+| 3 | `0x02A2` AC Desktop Show All Applications | F4, Launchpad |
+| 4-7 | reserved, send `0` | — |
+
+Release the key by sending the same report ID with `data[1] = 0`.
 
 Duplicate media frames are suppressed if they match the last report.
 

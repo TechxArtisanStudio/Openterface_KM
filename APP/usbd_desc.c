@@ -489,7 +489,7 @@ const uint8_t MyCfgDescr[ ] =
     /* CDC ECM Functional Descriptors */
     0x05, 0x24, 0x00, 0x10, 0x01,                           // Header, CDC 1.10
     0x05, 0x24, 0x06, 0x04, 0x05,                           // Union: control IF4, data IF5
-    0x0D, 0x24, 0x0F, 0x04,                                 // Ethernet Networking, iMACAddress=4
+    0x0D, 0x24, 0x0F, 0x05,                                 // Ethernet Networking, iMACAddress=5 (Target MAC)
     0x00, 0x00, 0x00, 0x00,                                 // bmEthernetStatistics
     0xEA, 0x05,                                             // wMaxSegmentSize: 1514
     0x00, 0x00,                                             // wNumberMCFilters: none
@@ -1207,6 +1207,10 @@ const uint8_t AbsMouseRepDesc[ ] =
  *          bit4=Back,    bit5=Forward,bit6=WWW Stop,   bit7=Refresh
  *   Byte4: bit0=Media,   bit1=Explorer,bit2=Calculator,bit3=ScreenSave,
  *          bit4=MyPC,    bit5=Minimize,bit6=Record,    bit7=Rewind
+ *
+ * Report ID 0x03 (Apple function row, 1 data byte):
+ *   Byte2: bit0=Brightness-, bit1=Brightness+, bit2=Mission Control,
+ *          bit3=Launchpad, bit4-7=reserved
  */
 const uint8_t MediaKeyRepDesc[ ] =
 {
@@ -1270,6 +1274,26 @@ const uint8_t MediaKeyRepDesc[ ] =
     0x09, 0xB2,        //   Usage (Record)                bit6  (0x00B2)
     0x09, 0xB4,        //   Usage (Rewind)                bit7  (0x00B4)
     0x81, 0x02,        //   Input (Data, Variable, Absolute)
+    0xC0,              // End Collection
+
+    /* ---- Report ID 0x03: Apple function row (1 data byte) ---- */
+    /* Total: 33 bytes. macOS maps these Consumer page usages onto the
+     * laptop function row; see IOKit IOHIDUsageTables.h. */
+    0x05, 0x0C,        // Usage Page (Consumer Devices)
+    0x09, 0x01,        // Usage (Consumer Control)
+    0xA1, 0x01,        // Collection (Application)
+    0x85, 0x03,        //   Report ID (3)
+    0x15, 0x00,        //   Logical Minimum (0)
+    0x25, 0x01,        //   Logical Maximum (1)
+    0x75, 0x01,        //   Report Size (1)
+    0x95, 0x04,        //   Report Count (4)
+    0x09, 0x70,        //   Usage (Display Brightness Decrement)     bit0  F1 (0x0070)
+    0x09, 0x6F,        //   Usage (Display Brightness Increment)     bit1  F2 (0x006F)
+    0x0A, 0x9F, 0x02,  //   Usage (AC Desktop Show All Windows)      bit2  F3 (0x029F)
+    0x0A, 0xA2, 0x02,  //   Usage (AC Desktop Show All Applications) bit3  F4 (0x02A2)
+    0x81, 0x02,        //   Input (Data, Variable, Absolute)
+    0x95, 0x04,        //   Report Count (4) — padding
+    0x81, 0x01,        //   Input (Constant)
     0xC0,              // End Collection
 
     /* ---- Report ID 0x30: Vendor USB mode control Feature report ---- */
@@ -1407,12 +1431,15 @@ const uint8_t MyEcmMacInfo[ ] =
 };
 
 /* Target CDC ECM MAC address string: ASCII hex, no separators.
- * Different from Host ECM MAC (02:00:00:00:00:30) to avoid confusion when both are present (mode 7).
- * Target MAC: 02:00:00:00:00:31 */
+ * Must match ECM_TARGET_DEV_MAC in ecm_bridge.c: the iMACAddress this string
+ * feeds is the address the target host believes we have, while every ARP,
+ * GARP and ICMP frame we emit carries ECM_TARGET_DEV_MAC. Diverging copies
+ * make the host's own NIC address disagree with what it learns about us.
+ * Target MAC: 02:00:00:00:03:00 */
 const uint8_t MyTargetEcmMacInfo[ ] =
 {
     0x1A,
     0x03,
     '0', 0, '2', 0, '0', 0, '0', 0, '0', 0, '0', 0,
-    '0', 0, '0', 0, '0', 0, '0', 0, '3', 0, '1', 0
+    '0', 0, '0', 0, '0', 0, '3', 0, '0', 0, '0', 0
 };
