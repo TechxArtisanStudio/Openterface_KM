@@ -121,7 +121,7 @@ static gattAttribute_t ble_usb_ProfileAttrTbl[] = {
     // Characteristic 2 User Description
     {
         {ATT_BT_UUID_SIZE, clientCharCfgUUID},
-        GATT_PERMIT_READ | GATT_PERMIT_WRITE,
+        GATT_PERMIT_READ | GATT_PERMIT_WRITE | GATT_PERMIT_ENCRYPT_WRITE,
         0,
         (uint8_t *)ble_usb_TxCCCD},
 
@@ -135,7 +135,7 @@ static gattAttribute_t ble_usb_ProfileAttrTbl[] = {
     // Characteristic Value 1
     {
         {ATT_BT_UUID_SIZE, ble_usb_RxCharUUID},
-        GATT_PERMIT_WRITE,
+        GATT_PERMIT_WRITE | GATT_PERMIT_ENCRYPT_WRITE,
         0,
         &ble_usb_RxCharValue[0]},
 

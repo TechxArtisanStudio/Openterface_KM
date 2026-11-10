@@ -127,6 +127,8 @@ void Main_Circulation(void)
                     case 2: RGB_SetColorSolid(RGB_GREEN, 1.0f); break;  // connected → solid green
                     case 3: RGB_SetFlashMode(300, RGB_RED); break;      // disconnected → red flash
                     case 4: RGB_SetColorSolid(RGB_RED, 1.0f); break;    // error → solid red
+                    case 5: RGB_SetColorSolid(RGB_BLUE, 1.0f); break;   // pairing ok → solid blue
+                    case 6: RGB_SetFlashMode(120, RGB_RED); break;      // pairing failed → fast red
                 }
             }
         }
@@ -190,6 +192,8 @@ void Main_Circulation(void)
                 case 2: PWM_LED_SetBrightness(100); break;                               // connected solid
                 case 3: PWM_LED_SetBrightness((systick_ms / 500) % 2 ? 100 : 0); break;  // disconnected fast blink
                 case 4: PWM_LED_SetBrightness((systick_ms / 80) % 2 ? 100 : 0); break;   // error rapid blink
+                case 5: PWM_LED_SetBrightness(100); break;                               // pairing ok: solid
+                case 6: PWM_LED_SetBrightness((systick_ms / 250) % 2 ? 100 : 0); break;  // pairing failed blink
             }
         }
 #endif

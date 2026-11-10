@@ -36,6 +36,7 @@ extern "C" {
 #define SBP_PROCESS_BLEDATA_EVT 0x0040
 #define SBP_PROCESS_BLEETH_TX_EVT 0x0080
 #define SBP_SYSTEM_RESET_EVT    0x0100
+#define SBP_PAIR_LED_EVT        0x0200
 
 /*********************************************************************
  * MACROS

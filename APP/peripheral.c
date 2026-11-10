@@ -27,6 +27,7 @@
 #include "include/ble_eth_protocol.h"
 #include "include/default_target_config.h"
 #include "include/ble_name_config.h"
+#include "include/ble_pair_config.h"
 #include "usbd_composite_km.h"
 #include "include/ecm_bridge.h"
 #include "RGB.h"
@@ -151,8 +152,13 @@ uint8_t       RingMemUSBBuf[512];
 RingMemParm_t RingMemBLE;
 uint8_t       RingMemBLEBuf[512];
 
-// BLE LED status — 0=default(SD card), 1=advertising, 2=connected, 3=disconnected, 4=error
+// BLE LED status — 0=default(SD card), 1=advertising, 2=connected, 3=disconnected, 4=error,
+// 5=pairing succeeded, 6=pairing failed (5/6 are transient feedback, see SBP_PAIR_LED_EVT)
 uint8_t g_ble_led_state = 0;
+
+/* TMOS ticks (0.625 ms) the pairing feedback owns the LED before the
+ * connection state takes it back. */
+#define PERIPHERAL_PAIR_FEEDBACK_TICKS 1600
 
 // Flag to route CH9329 responses via BLE notification instead of USB EP3
 static uint8_t g_ble_ch9329_response = 0;
@@ -378,15 +384,79 @@ static gapRolesBroadcasterCBs_t Broadcaster_BroadcasterCBs = {
 };
 
 // GAP Bond Manager Callbacks
+static void Peripheral_PairStateCB(uint16_t connectionHandle, uint8_t state, uint8_t status);
+
 static gapBondCBs_t Peripheral_BondMgrCBs = {
-    NULL, // Passcode callback (not used by application)
-    NULL  // Pairing / Bonding state Callback (not used by application)
+    NULL, // Passcode callback: DISPLAY_ONLY + preset passcode needs no app input
+    Peripheral_PairStateCB // Pairing / Bonding state Callback
 };
 
 // Simple GATT Profile Callbacks
 static simpleProfileCBs_t Peripheral_SimpleProfileCBs = {
     simpleProfileChangeCB // Characteristic value change callback
 };
+
+/*********************************************************************
+ * @fn      Peripheral_RefreshPairingMode
+ *
+ * @brief   Allow new pairings only while a bond slot is free. Existing bonds
+ *          keep reconnecting: they encrypt from a stored LTK and never send a
+ *          pairing request, so NO_PAIRING does not touch them.
+ *
+ * @return  none
+ */
+static void Peripheral_RefreshPairingMode(void)
+{
+    uint8_t bondCount = 0;
+    uint8_t pairMode;
+
+    (void)GAPBondMgr_GetParameter(GAPBOND_BOND_COUNT, &bondCount);
+    pairMode = (bondCount >= BLE_PairConfig_GetMaxBonds())
+                   ? GAPBOND_PAIRING_MODE_NO_PAIRING
+                   : GAPBOND_PAIRING_MODE_WAIT_FOR_REQ;
+    (void)GAPBondMgr_SetParameter(GAPBOND_PERI_PAIRING_MODE, sizeof(uint8_t), &pairMode);
+}
+
+/*********************************************************************
+ * @fn      Peripheral_PairStateCB
+ *
+ * @brief   Bond manager pairing state callback: LED feedback plus slot
+ *          bookkeeping.
+ *
+ * @return  none
+ */
+static void Peripheral_PairStateCB(uint16_t connectionHandle, uint8_t state, uint8_t status)
+{
+    (void)connectionHandle;
+
+    if (state == GAPBOND_PAIRING_STATE_BONDED && status == SUCCESS)
+    {
+        g_ble_led_state = 5; /* pairing succeeded */
+        tmos_start_task(Peripheral_TaskID, SBP_PAIR_LED_EVT, PERIPHERAL_PAIR_FEEDBACK_TICKS);
+        Peripheral_RefreshPairingMode();
+    }
+    else if (state == GAPBOND_PAIRING_STATE_COMPLETE && status != SUCCESS)
+    {
+        g_ble_led_state = 6; /* wrong PIN or rejected pairing */
+        tmos_start_task(Peripheral_TaskID, SBP_PAIR_LED_EVT, PERIPHERAL_PAIR_FEEDBACK_TICKS);
+    }
+}
+
+/*********************************************************************
+ * @fn      Peripheral_FactoryResetSecurity
+ *
+ * @brief   Erase every bond, drop the PIN override and restore a single bond
+ *          slot. Shared by the 0x22 erase command and the reset gesture.
+ *
+ * @return  none
+ */
+static void Peripheral_FactoryResetSecurity(void)
+{
+    (void)GAPBondMgr_SetParameter(GAPBOND_ERASE_ALLBONDS, 0, NULL);
+    (void)BLE_PairConfig_ResetAll();
+    Peripheral_RefreshPairingMode();
+}
+
 /*********************************************************************
  * PUBLIC FUNCTIONS
  */
@@ -411,6 +481,7 @@ void Peripheral_Init()
 
     // 【Compile-time guarantee】KVM-GO: true initialization; MiniKVM: empty macro expansion
     BLE_NameConfig_Init();
+    BLE_PairConfig_Init();
 
     // Setup the GAP Peripheral Role Profile
     {
@@ -470,23 +541,32 @@ void Peripheral_Init()
 
     // Setup the GAP Bond Manager
     {
-        uint32_t passkey = 0; // passkey "000000"
+        uint32_t passkey = BLE_PairConfig_GetEffectivePin();
         uint8_t  pairMode = GAPBOND_PAIRING_MODE_WAIT_FOR_REQ;
         uint8_t  mitm = TRUE;
         uint8_t  bonding = TRUE;
         uint8_t  ioCap = GAPBOND_IO_CAP_DISPLAY_ONLY;
+        uint8_t  eraseAuto = FALSE;
+        uint8_t  bondAuto = TRUE;
+
         GAPBondMgr_SetParameter(GAPBOND_PERI_DEFAULT_PASSCODE, sizeof(uint32_t), &passkey);
         GAPBondMgr_SetParameter(GAPBOND_PERI_PAIRING_MODE, sizeof(uint8_t), &pairMode);
         GAPBondMgr_SetParameter(GAPBOND_PERI_MITM_PROTECTION, sizeof(uint8_t), &mitm);
         GAPBondMgr_SetParameter(GAPBOND_PERI_IO_CAPABILITIES, sizeof(uint8_t), &ioCap);
         GAPBondMgr_SetParameter(GAPBOND_PERI_BONDING_ENABLED, sizeof(uint8_t), &bonding);
+        /* The ROM default is ON: a pairing that overflows the bond table would
+         * silently erase every trusted phone. Slots are gated by
+         * Peripheral_RefreshPairingMode() instead. */
+        GAPBondMgr_SetParameter(GAPBOND_ERASE_AUTO, sizeof(uint8_t), &eraseAuto);
+        GAPBondMgr_SetParameter(GAPBOND_BOND_AUTO, sizeof(uint8_t), &bondAuto);
+
+        Peripheral_RefreshPairingMode();
     }
 
     // Initialize GATT attributes
     GGS_AddService(GATT_ALL_SERVICES);           // GAP
     GATTServApp_AddService(GATT_ALL_SERVICES);   // GATT attributes
     DevInfo_AddService();                        // Device Information Service
-    SimpleProfile_AddService(GATT_ALL_SERVICES); // Simple GATT Profile
     ble_usb_add_service(ble_usb_ServiceEvt);
 
     // Set the GAP Characteristics
@@ -733,6 +813,13 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
         /* System reset after BLE notification has been sent */
         NVIC_SystemReset();
         return (events ^ SBP_SYSTEM_RESET_EVT);
+    }
+
+    if(events & SBP_PAIR_LED_EVT)
+    {
+        /* Pairing feedback is over; hand the LED back to the link state. */
+        g_ble_led_state = (peripheralConnList.connHandle != GAP_CONNHANDLE_INIT) ? 2 : 1;
+        return (events ^ SBP_PAIR_LED_EVT);
     }
 
     // Discard unknown events
@@ -1106,6 +1193,14 @@ void ble_usb_ServiceEvt(uint16_t connection_handle, ble_usb_evt_t *p_evt)
             break;
         case BLE_USB_EVT_BLE_DATA_RECIEVED:
         {
+            /* Backstop for the GATT_ENCRYPT_WRITE permissions: the ROM stack
+             * enforces them, but that code is not inspectable, so nothing that
+             * reaches this handler may be unencrypted. */
+            if(!linkDB_State(connection_handle, LINK_ENCRYPTED))
+            {
+                break;
+            }
+
             const uint8_t *data = p_evt->data.p_data;
             uint16_t len = p_evt->data.length;
             uint8_t has_frame_header = (len >= 6 &&
@@ -1293,8 +1388,12 @@ int RingMem_Protection(uint8_t enable)
  */
 void Peripheral_SecurityCommand(uint8_t addr, uint8_t cmd_code, uint8_t *pdata, uint8_t data_len)
 {
-    uint8_t response[8];
+    uint8_t response[4];
     uint8_t status = STATUS_SUCCESS;
+    uint8_t bond_count = 0;
+    uint8_t max_bonds;
+    uint32_t pin;
+    uint8_t i;
 
     if (data_len < 1) {
         status = STATUS_ERR_PARAM;
@@ -1302,34 +1401,90 @@ void Peripheral_SecurityCommand(uint8_t addr, uint8_t cmd_code, uint8_t *pdata, 
         return;
     }
 
-    uint8_t sub_cmd = pdata[0];
+    switch (pdata[0]) {
+        case 0x01:
+            /* Pairing windows are gone: a pairing request is accepted while a
+             * slot is free and rejected otherwise. */
+            status = STATUS_ERR_PARAM;
+            CH9329_SendResponse(addr, cmd_code, &status, 1, 0);
+            return;
 
-    switch (sub_cmd) {
-        case 0x01:  // Open pairing window
-            // TODO: Implement pairing window opening
-            response[0] = STATUS_SUCCESS;
-            response[1] = 0x00;  // Remaining seconds (u16 LE)
-            response[2] = 0x00;
-            CH9329_SendResponse(addr, cmd_code, response, 3, 1);
-            break;
-
-        case 0x02:  // Erase all bonds
-            // TODO: Implement bond erasure
+        case 0x02:  /* Erase all bonds + PIN override + slot limit */
+            Peripheral_FactoryResetSecurity();
             response[0] = STATUS_SUCCESS;
             CH9329_SendResponse(addr, cmd_code, response, 1, 1);
-            break;
+            /* Give the reply time to leave before the reboot drops the link. */
+            Peripheral_ScheduleSystemReset(500);
+            return;
 
-        case 0x03:  // Bond count
-            // TODO: Implement bond count query
+        case 0x03:  /* Bond status: count + configured slot limit */
+            (void)GAPBondMgr_GetParameter(GAPBOND_BOND_COUNT, &bond_count);
             response[0] = STATUS_SUCCESS;
-            response[1] = 0x00;  // Number of stored bonds
+            response[1] = bond_count;
+            response[2] = BLE_PairConfig_GetMaxBonds();
+            CH9329_SendResponse(addr, cmd_code, response, 3, 1);
+            return;
+
+        case 0x04:  /* Set PIN override: exactly six ASCII digits */
+            if (data_len != 7) {
+                status = STATUS_ERR_PARAM;
+                CH9329_SendResponse(addr, cmd_code, &status, 1, 0);
+                return;
+            }
+            pin = 0;
+            for (i = 0; i < 6; i++) {
+                if (pdata[1 + i] < '0' || pdata[1 + i] > '9') {
+                    status = STATUS_ERR_PARAM;
+                    CH9329_SendResponse(addr, cmd_code, &status, 1, 0);
+                    return;
+                }
+                pin = pin * 10u + (uint32_t)(pdata[1 + i] - '0');
+            }
+            if (BLE_PairConfig_SetPin(pin) != BLE_PAIR_OK) {
+                status = STATUS_ERR_FLASH_PROGRAM;
+                CH9329_SendResponse(addr, cmd_code, &status, 1, 0);
+                return;
+            }
+            /* Applies to the next pairing; existing bonds are untouched. */
+            (void)GAPBondMgr_SetParameter(GAPBOND_PERI_DEFAULT_PASSCODE, sizeof(uint32_t), &pin);
+            response[0] = STATUS_SUCCESS;
+            CH9329_SendResponse(addr, cmd_code, response, 1, 1);
+            return;
+
+        case 0x05:  /* Set slot limit — USB only, it changes the access model */
+            if (Peripheral_GetBleCh9329Response()) {
+                status = STATUS_ERR_PARAM;
+                CH9329_SendResponse(addr, cmd_code, &status, 1, 0);
+                return;
+            }
+            if (data_len < 2) {
+                status = STATUS_ERR_PARAM;
+                CH9329_SendResponse(addr, cmd_code, &status, 1, 0);
+                return;
+            }
+            max_bonds = pdata[1];
+            if (max_bonds < BLE_PAIR_MIN_BONDS) max_bonds = BLE_PAIR_MIN_BONDS;
+            if (max_bonds > BLE_PAIR_MAX_BONDS) max_bonds = BLE_PAIR_MAX_BONDS;
+            if (BLE_PairConfig_SetMaxBonds(max_bonds) != BLE_PAIR_OK) {
+                status = STATUS_ERR_FLASH_PROGRAM;
+                CH9329_SendResponse(addr, cmd_code, &status, 1, 0);
+                return;
+            }
+            Peripheral_RefreshPairingMode();
+            response[0] = STATUS_SUCCESS;
+            CH9329_SendResponse(addr, cmd_code, response, 1, 1);
+            return;
+
+        case 0x06:  /* Read slot limit */
+            response[0] = STATUS_SUCCESS;
+            response[1] = BLE_PairConfig_GetMaxBonds();
             CH9329_SendResponse(addr, cmd_code, response, 2, 1);
-            break;
+            return;
 
         default:
             status = STATUS_ERR_PARAM;
             CH9329_SendResponse(addr, cmd_code, &status, 1, 0);
-            break;
+            return;
     }
 }
 
