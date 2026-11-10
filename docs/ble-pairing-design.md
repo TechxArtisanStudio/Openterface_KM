@@ -3,8 +3,8 @@
 - 分支：`feature/ble-pairing-security`
 - 基线：`main` @ `1ee6c00`
 - 适用固件：KeyMod（`BOARD_VERSION=3`）、KVM-GO（`BOARD_VERSION=1`）等 `ENABLE_BLE` 机型
-- 状态：设计完整，可开工。分三个里程碑（§12），M1 独立可先发。§14 列出必须在台架确认的 5 个前提，其中 P1/P2 是 M1 能否成立的硬前提
-- 决策沿革：2026-11-03 定 PIN 模型与"无配对窗口"原则；2026-11-09 上限从 4 改为 **1**（用户："一台手机更安全"），同日决定上限**改为可配置项存 Flash**，单绑定由此从硬约束变成默认档位
+- 状态：**M1 + M2 已实现**（见 §12），M3（按键长按）待硬件确认；§14 的 P1/P1b/P3 仍需台架验
+- 决策沿革：2026-11-03 定 PIN 模型与"无配对窗口"原则；2026-11-09 上限从 4 改为 **1**（用户："一台手机更安全"），同日决定上限**改为可配置项存 Flash**，单绑定由此从硬约束变成默认档位；2026-11-10 初始 PIN 定为**全设备统一 666666**（用户要求），并开始实现
 
 ---
 
@@ -16,9 +16,9 @@ bonding 参数名义上开着，实际任何路人手机都能操控设备。逐
 |---|---|---|
 | 数据通路准入 | FFF2 值属性权限 `GATT_PERMIT_WRITE`，未配对/未加密即可写 → 直接操控 HID、CH9329 全命令、BLE-Eth 隧道 | [ble_usb_service.c:135-140](file:///Users/txa/project/Openterface_KM/Profile/ble_usb_service.c#L135-L140) |
 | 订阅准入 | FFF1 CCCD 权限 `GATT_PERMIT_READ \| GATT_PERMIT_WRITE`，未加密即可订阅通知 | [ble_usb_service.c:121-126](file:///Users/txa/project/Openterface_KM/Profile/ble_usb_service.c#L121-L126) |
-| passkey | 写死 `0`（"000000"），全网所有设备同一个值 | [peripheral.c:471-483](file:///Users/txa/project/Openterface_KM/APP/peripheral.c#L471-L483) |
-| Bond 回调 | `gapBondCBs_t` 两个成员全 NULL，应用对配对成功/失败毫无感知 | [peripheral.c:380-384](file:///Users/txa/project/Openterface_KM/APP/peripheral.c#L380-L384) |
-| `0x22` 安全命令 | 0x01/0x02/0x03 三个子命令全是 TODO 桩，返回假成功；0x03 恒报 0 bond | [peripheral.c:1294-1334](file:///Users/txa/project/Openterface_KM/APP/peripheral.c#L1294-L1334) |
+| passkey | 写死 `0`（"000000"），全网所有设备同一个值 | [peripheral.c:471-483](file:///Users/txa/project/Openterface_KM/APP/peripheral.c#L471-L483)（实现后：默认 `666666`，Flash 可改，见 §4） |
+| Bond 回调 | `gapBondCBs_t` 两个成员全 NULL，应用对配对成功/失败毫无感知 | [peripheral.c:380-384](file:///Users/txa/project/Openterface_KM/APP/peripheral.c#L380-L384)（实现后：`pairStateCB` 已接入，见 §10） |
+| `0x22` 安全命令 | 0x01/0x02/0x03 三个子命令全是 TODO 桩，返回假成功；0x03 恒报 0 bond | [peripheral.c:1294-1334](file:///Users/txa/project/Openterface_KM/APP/peripheral.c#L1294-L1334)（实现后：0x02/0x03/0x04/0x05/0x06，见 §8） |
 | bond 满行为 | `GAPBOND_ERASE_AUTO` 应用未设置 → ROM 默认**开启**：第 N+1 台配对会静默清空全部旧 bond | [wchble_rom.h:1122](file:///Users/txa/project/Openterface_KM/LIB/wchble_rom.h#L1122) |
 | 遗留死代码 | `SimpleProfile_AddService` 被调用，但函数体注册逻辑整段注释，是空函数。广告里的 `SIMPLEPROFILE_SERV_UUID`(0xFFF0) 恰与 `ble_usb` 服务同 UUID，属命名误导。**非攻击面**，仅清理 | [peripheral.c:489](file:///Users/txa/project/Openterface_KM/APP/peripheral.c#L489)、[gattprofile.c:294-313](file:///Users/txa/project/Openterface_KM/Profile/gattprofile.c#L294-L313) |
 
@@ -30,35 +30,36 @@ bonding 参数名义上开着，实际任何路人手机都能操控设备。逐
 |---|---|---|
 | 路过扫码的任意手机 | 直接写 FFF2，完全控制 | 拦在协议栈层，写被拒 |
 | 会操作 BLE 配对的人（无 PIN） | 用 "000000" 配对，获得持久访问 | 配对失败 |
-| 拍过标签的人（有 PIN） | 同上 | **仍可配对**（槽空时），见 §6 的驱逐权衡 |
+| 知道初始 PIN 666666 的人 | 用 "000000" 配对 | **仍可配对**（槽空且未改 PIN 时），见 §6 的驱逐权衡 |
 | 插得上 USB 的人 | 完全控制 | 完全控制——USB 是恢复路径，不设准入 |
 
-主要威胁是第一、二行（无 PIN 路人），本方案解决它。第三行需要物理接触设备一次（看到标签），属可接受残留风险，§6 给出 v2 补法。
+主要威胁是第一、二行（无 PIN 路人），本方案解决它。第三行在未改 PIN 时等同于公开凭据，属可接受残留风险（首次配对后改 PIN 即消除），§6 给出 v2 补法。
 
 ## 3. 设计原则
 
-1. **物理占有 = 信任根**。6 位 PIN 印在标签上，`MITM=TRUE` + `GAPBOND_IO_CAP_DISPLAY_ONLY`。设备无屏无键，PIN 只从手机侧输入，固件永不通过 BLE 回传 PIN。
+1. **PIN = 信任根**。初始 6 位 PIN `666666`，可改为私有 PIN；`MITM=TRUE` + `GAPBOND_IO_CAP_DISPLAY_ONLY`。设备无屏无键，PIN 只从手机侧输入，固件永不通过 BLE 回传 PIN。
 2. **准入压在协议栈层**，不靠藏广播、不靠应用层判断。应用层判断只作纵深兜底（因为 ROM 行为不可读，见 P1）。
 3. **UI 极简**：无配对窗口、无短按、无多色 LED。绑定槽空则随时可配，占用则拒绝。
-4. **改安全参数需要物理接入**：改 PIN、改上限只走 USB；已认证 BLE 链路只能改自己的绑定关系（解绑）。
-5. **失败可恢复**：标签 PIN 永不失效（恢复码语义）；USB 通路始终可用。
+4. **改安全参数分级授权**：绑定上限只走 USB（它决定访问模型）；改 PIN 可以走 USB 或已加密 BLE（现任手机自己）；已认证 BLE 链路还能解绑自己。
+5. **失败可恢复**：清除 override 后 666666 永远可用（恢复码语义）；USB 通路始终可用。
 
-## 4. 安全模型：标签 PIN
+## 4. 安全模型：初始 PIN 666666
 
 ### 4.1 PIN 生效值
 
 ```
-effective_pin = has_pin_override ? override_pin : label_pin
-label_pin     = CRC32(MAC[0..5]) % 1000000      // 每片唯一，启动时重算，不需存储
+effective_pin = has_pin_override ? override_pin : BLE_PAIR_DEFAULT_PIN (= 666666)
 ```
 
-`label_pin` 由产线烧录工具预先算好并打印到标签（同一算法）。若产线走 SN 流程，把入参换成 SN，`#define` 留接口。启动时 `GAPBondMgr_SetParameter(GAPBOND_PERI_DEFAULT_PASSCODE /*0x407*/, 4, &effective_pin)`。
+初始 PIN 全设备统一 `666666`（`BLE_PAIR_DEFAULT_PIN`，编译期常量，不占 Flash），启动时 `GAPBondMgr_SetParameter(GAPBOND_PERI_DEFAULT_PASSCODE /*0x407*/, 4, &effective_pin)`。不需要标签打印流程。
+
+**这个选择的代价必须写清楚**：666666 是公开常量，任何知道本方案的人都能配对空槽设备。所以出厂状态的安全等级取决于"槽已被占用"——第一台手机绑上之后，新手机必须等 `0x22 0x02` 解绑。**安全使用的前提是首次配对后立刻用 `0x22 0x04` 改成私有 PIN**，App 应在首次连接成功后引导这一步。若坚持"拿到设备本体才能用"的占有语义，应改回每片唯一 PIN（原方案：`CRC32(MAC) % 1000000` 打印到标签）。
 
 passcode 回调保持 NULL 是有意选择：`DISPLAY_ONLY` + 预设 passcode 时栈不需要应用参与，但此行为未经实测（P3）。
 
-### 4.2 PIN 可改，标签是恢复码
+### 4.2 PIN 可改，666666 是恢复码
 
-新增运行时 override（存 Flash，§9）。重置时清 override → 标签 PIN 重新生效。新 PIN 只从 USB 或已加密 BLE 链路下发，固件不回显。
+新增运行时 override（存 Flash，§9）。重置时清 override → 666666 重新生效。新 PIN 只从 USB 或已加密 BLE 链路下发，固件不回显。
 
 ## 5. Bond 策略：默认单绑定，上限可配置
 
@@ -108,17 +109,17 @@ ROM 栈自身的 bond 容量上限未公开（P2）。默认 1 意味着**这个
 1. 旧手机在 App 里点"解除本机绑定" → 在**自己已加密的链路**上发 `0x22 0x02`；
 2. 固件擦除唯一那条 bond（就是这台手机自己），槽位空出；
 3. 旧手机用户到系统蓝牙设置里"忽略此设备"（iOS 不做这步下次配对会异常，App 提示语必须带）；
-4. 新手机凭标签 PIN 配对。
+4. 新手机用当前 PIN（出厂 666666）配对。
 
 安全论证：已认证手机擦掉**唯一属于自己的**那条 bond 不构成新攻击面——它随时可以走开。所以 `0x22 0x02` 从"USB only"放开为"USB 或加密 BLE"。这是单绑定带来的规则放宽，多槽模型下不能这么放开（否则任一台可 DoS 全体）。
 
 ### 6.2 残留弱点：PIN 持有者可驱逐现任
 
-单绑定 + 固定标签 PIN 的组合弱点：一旦槽位空（现任解绑/设备被 USB 重置），**任何持有 PIN 的人可以立即配对并独占**。4 槽模型下攻击者顶多占一个坑，现任不受影响；1 槽下是排他驱逐。
+单绑定 + 已知初始 PIN 的组合弱点：一旦槽位空（现任解绑/设备被 USB 重置），**任何持有 PIN 的人可以立即配对并独占**。4 槽模型下攻击者顶多占一个坑，现任不受影响；1 槽下是排他驱逐。
 
 所以"一台更安全"成立于挡住无 PIN 的路人（主要威胁，成立），对持有 PIN 的第三方反而给了排他权。
 
-**v2 补法（不进本版）**：配对成功后 App 在加密链路上协商一个设备本地生成的每手机所有权密钥，存 App/钥匙串；此后新手机要成为"主人"必须由现任签名移交。没有这套，就把标签当封条管理。
+**v2 补法（不进本版）**：配对成功后 App 在加密链路上协商一个设备本地生成的每手机所有权密钥，存 App/钥匙串；此后新手机要成为"主人"必须由现任签名移交。没有这套，就把 PIN 当封条管理。
 
 ## 7. 数据通路准入（方案承重部分）
 
@@ -200,26 +201,28 @@ typedef struct {
 
 ## 12. 实施计划
 
-改动清单（编号沿用 §1-§11）：
+改动清单（编号沿用 §1-§11，状态截至 2026-11-10）：
 
-| # | 文件 | 改动 | 里程碑 |
-|---|---|---|---|
-| 1 | `Profile/ble_usb_service.c` | FFF2 + CCCD 权限加 `GATT_PERMIT_ENCRYPT_WRITE` | M1 |
-| 2 | `APP/peripheral.c` | `ble_usb_ServiceEvt` 加 `linkDB_State(LINK_ENCRYPTED)` 兜底 | M1 |
-| 3 | `APP/peripheral.c` | 删 `SimpleProfile_AddService` 调用 + `gattprofile.c` 注释块 | M1 |
-| 4 | `APP/peripheral.c` | `0x22 0x03` 返回真实 count + max（默认 1） | M1 |
-| 5 | `APP/peripheral.c` | Bond Manager 块：passkey 改 `effective_pin`、显式 `ERASE_AUTO=0`、容量判定函数 | M2 |
-| 6 | `APP/peripheral.c` | 实现 `pairStateCB`（LED 5/6、bond 刷新、模式切换）；passcodeCB 保持 NULL | M2 |
-| 7 | `APP/ble_pair_config.c/.h`（新） | Flash 记录 + `BLE_PairConfig_Init` 接入启动序列（[peripheral_main.c:246-274](file:///Users/txa/project/Openterface_KM/APP/peripheral_main.c#L246-L274)） | M2 |
-| 8 | `APP/peripheral.c` | `0x22 0x02` 实装、`0x04/0x05/0x06` 新增 | M2 |
-| 9 | `APP/peripheral_main.c` + `button.c`（新） | 5 s 长按（依赖 T-HW 结论） | M3 |
-| 10 | `keymod-test` | 配对引导 + PIN 输入框、`0x22 0x03/0x04/0x05/0x06/0x02` 接入、"解除本机绑定"按钮 + iOS"忽略此设备"提示、上限 UI | M2/M3 |
+| # | 文件 | 改动 | 里程碑 | 状态 |
+|---|---|---|---|---|
+| 1 | `Profile/ble_usb_service.c` | FFF2 + CCCD 权限加 `GATT_PERMIT_ENCRYPT_WRITE` | M1 | 已实现 |
+| 2 | `APP/peripheral.c` | `ble_usb_ServiceEvt` 加 `linkDB_State(LINK_ENCRYPTED)` 兜底 | M1 | 已实现 |
+| 3 | `APP/peripheral.c` | 删 `SimpleProfile_AddService` 调用（空函数） | M1 | 已实现 |
+| 4 | `APP/peripheral.c` | `0x22 0x03` 返回真实 count + max | M1 | 已实现 |
+| 5 | `APP/peripheral.c` | Bond Manager 块：passkey 改 `effective_pin`、显式 `ERASE_AUTO=0`、容量判定函数 | M2 | 已实现 |
+| 6 | `APP/peripheral.c` | 实现 `pairStateCB`（LED 5/6、bond 刷新、模式切换）；passcodeCB 保持 NULL | M2 | 已实现 |
+| 7 | `APP/ble_pair_config.c/.h`（新） | Flash 记录 + `BLE_PairConfig_Init` 接入 `Peripheral_Init` | M2 | 已实现 |
+| 8 | `APP/peripheral.c` | `0x22 0x02` 实装、`0x04/0x05/0x06` 新增 | M2 | 已实现 |
+| 9 | `APP/peripheral_main.c` + `button.c`（新） | 5 s 长按（依赖 T-HW 结论） | M3 | 待硬件确认 |
+| 10 | `keymod-test` | 配对引导 + PIN 输入框、`0x22 0x03/0x04/0x05/0x06/0x02` 接入、"解除本机绑定"按钮 + iOS"忽略此设备"提示、上限 UI | M2/M3 | 未开始 |
 
-**M1 — 关门**（1-4）：未配对即不可用，bond 仍可白嫖 "000000"。改动小、可独立台架验证、可独立发版。**风险**：旧版 App 直连失败，必须与 App 同步发版；USB 通路保留兜底。
-**M2 — 真 PIN + 单绑定**（5-8、10 的部分）：安全模型成立。
-**M3 — 体验**（9、10 剩余）：按键重置、上限调整 UI。
+实现备注：新文件必须登记进 `build/APP/subdir.mk`（三个列表：`C_SRCS`、`C_DEPS`、`OBJS`），该文件是 MounRiver 生成的静态清单，不做 glob。`bluetooth` 记录页 `0x0806A000` 位于 440 KB 代码区之内，与 ECM IP 配置页同一风险：镜像必须保持在 426 KB 以内（当前 ~220 KB）。
 
-一句话优先级：承重的是 §7 两层，三行代码把"任何路人"降级成"拿到标签的人"。若只做一件事，做 M1。
+**M1 — 关门**（1-4）：未配对即不可用，bond 仍可白嫖 666666。改动小、可独立台架验证。**风险**：旧版 App 直连失败，必须与 App 同步发版；USB 通路保留兜底。
+**M2 — 真 PIN + 单绑定**（5-8）：安全模型成立，初始 PIN 666666，可改。
+**M3 — 体验**（9、10）：按键重置、上限调整 UI、App 配对引导。
+
+一句话优先级：承重的是 §7 两层，三行代码把"任何路人"降级成"拿到初始 PIN 的人"。若只做一件事，做 M1。
 
 ## 13. 测试矩阵
 
@@ -227,21 +230,22 @@ typedef struct {
 
 | # | 用例 | 预期 |
 |---|---|---|
-| T1 | 未加密写 FFF2 / 写 CCCD | ATT 错误 **0x0F** INSUFFICIENT_ENCRYPT；`linkDB_State` 兜底日志命中 |
-| T2 | 正确标签 PIN 配对 | 成功、bond 落盘、LED 态 5、`0x22 0x03` count=1 |
+| T1 | 未加密写 FFF2 / 写 CCCD | ATT 错误 **0x0F** INSUFFICIENT_ENCRYPT；`linkDB_State` 兜底命中 |
+| T2 | 用 666666 配对 | 成功、bond 落盘、LED 态 5、`0x22 0x03` 返回 count=1, max=1 |
 | T3 | 错 PIN 配对 | 失败断链、count 不变、LED 态 6、可重试 |
 | T4 | 配对后重启 | 已绑定手机免输入直接加密重连（验证 P1b） |
 | T5 | 占用中第二台配对 | **失败**（`NO_PAIRING` 生效） |
-| T6 | App 解绑 → 系统"忽略设备" → 新手机凭标签 PIN 配对 | 全程不需要 USB（§6.1 主路径成立） |
-| T7 | USB `0x22 0x02` | bond 清空、PIN override 清、上限回 1、标签 PIN 可配 |
+| T6 | App 解绑 → 系统"忽略设备" → 新手机用 666666 配对 | 全程不需要 USB（§6.1 主路径成立） |
+| T7 | USB `0x22 0x02` | bond 清空、PIN override 清、上限回 1、666666 可配 |
 | T8 | `0x22 0x05` 从 BLE 发 | 拒绝；从 USB 发成功 |
 | T9 | `0x22 0x05` 钳位 | 写 0 → 1；写 255 → 4；断电重启保持 |
 | T10 | 上限 4 配 3 台后调回 1 | 3 台存量重连仍成功，新配对被拒（§5.3） |
-| T11 | `0x22 0x04`（6B PIN）与 BLE-Eth ECM 帧 | 消歧正确，PIN 设置不误触 ECM 默认值重置（§8 坑） |
+| T11 | `0x22 0x04`（6B PIN）与 BLE-Eth ECM 帧 | 消歧正确（PIN 帧 `buf[4]=7`，不匹配 1/9/13/21），不误触 ECM 默认值重置 |
 | T12 | Flash 记录损坏（人为写垃圾到 `0x0806A000`） | 落默认值、下次写自愈、不硬 fault |
 | T13 | iOS/Android 双端 passkey entry | 弹输入框（验证 P3：passcodeCB=NULL 时栈行为） |
 | T14 | 回归 | BLE-Eth 隧道、CH9329 全命令、`0x19`、改名在加密链路上行为不变 |
 | T15 | （用户调到 4 时才需）连续配 6 台 + `ERASE_AUTO=0` | 不静默清空，栈实际上限可预期（P2） |
+| T16 | `0x22 0x04` 改成 123456 后重启 | 断电保持；旧 bond 不受影响，新配对应要求 123456 |
 
 ## 14. 待验证前提
 
@@ -261,7 +265,7 @@ P1、P1b 不成立则 M1 的机制需重做，开工第 0 步就该在台上验�
 | 风险 | 处置 |
 |---|---|
 | 旧 App 与新固件断层 | M1 与 App 同批发版；USB 通路永久可用 |
-| PIN 持有者驱逐现任（§6.2） | v1 接受 + 标签当封条；v2 上 App 层每手机所有权密钥 |
+| PIN 持有者驱逐现任（§6.2） | v1 接受 + PIN 当封条；v2 上 App 层每手机所有权密钥 |
 | 丢失手机无法单独吊销 | 单绑定下 = 走 §6.1/§11 重置，全擦即吊销，无残留 |
 | iOS 系统层残留 bond 记录 | App 解绑引导必须包含"忽略此设备"步骤（T6） |
 | `0x22` 与 BLE-Eth 命令字节继续复用 | 新子命令一律用长度形状区分，T11 守门；长期看应给安全命令换独立命令字节 |
