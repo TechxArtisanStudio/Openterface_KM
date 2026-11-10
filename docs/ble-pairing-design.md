@@ -3,7 +3,7 @@
 - 分支：`feature/ble-pairing-security`
 - 基线：`main` @ `1ee6c00`
 - 适用固件：KeyMod（`BOARD_VERSION=3`）、KVM-GO（`BOARD_VERSION=1`）等 `ENABLE_BLE` 机型
-- 状态：**M1 + M2 已实现**（见 §12），M3（按键长按）待硬件确认；§14 的 P1/P1b/P3 仍需台架验
+- 状态：**M1 + M2 已实现**（见 §12）；M3 的按键长按经硬件核实**不可行**（BOOT 键只能烧录，运行时采不到，见 §11），M3 只剩 App 侧工作；§14 的 P1/P1b/P3 仍需台架验
 - 决策沿革：2026-11-03 定 PIN 模型与"无配对窗口"原则；2026-11-09 上限从 4 改为 **1**（用户："一台手机更安全"），同日决定上限**改为可配置项存 Flash**，单绑定由此从硬约束变成默认档位；2026-11-10 初始 PIN 定为**全设备统一 666666**（用户要求），并开始实现
 
 ---
@@ -192,12 +192,27 @@ typedef struct {
 
 ## 11. 出厂重置
 
-现实约束：固件里**没有用户按键**。现有 GPIO 边沿检测是 SD 卡切换（PB8/PA4，[sd_switch.c:67-94](file:///Users/txa/project/Openterface_KM/APP/sd_switch.c#L67-L94)、[:134-160](file:///Users/txa/project/Openterface_KM/APP/sd_switch.c#L134-L160)），与配对无关。硬件上是否有可采样的按键待确认（T-HW）。
+**硬件结论（2026-11-10 核实，T-HW 关闭）：BOOT 按键在固件运行时读不到，5 s 长按不可实现。**
 
-- 有 GPIO 按键：新增 `Button_Poll()` 进主循环，10 ms 消抖、5 s 计时，按住期间 LED 急闪、未满 5 s 松开取消。
-- 按键只接 NRST（复位即重启，软件采不到）：v1 出厂重置走 USB `0x22 0x02`，App 引导"插 USB 用 keymod-test 点 reset"。
+- KeyMod 的 MCU 是 **CH32V208GBU6**（QFN28，工程文件 `BLE_USB.wvproj` 的 `"mcu"` 字段）。该封装把 **BOOT0 与 PB8 合封在同一物理引脚**（数据手册第 19 页的合封说明；QFN28 也未引出 BOOT1/PB2，内部下拉到 GND）。
+- 合封后 **PB8 只保留输出驱动能力，所有输入功能被禁止**——这是合封芯片的电气特性，不是软件配置问题。同族 CH32V203G6 的官方说明写得更直白："进入用户程序后 PB8 仍可用但仅能输出，输入是无效值，BOOT0 按键状态无法被获取"。
+- 反证：`version == 1`（KVM-GO）固件把 PB8 当 SD 切换的**输入**用（[peripheral_main.c:56-57](file:///Users/txa/project/Openterface_KM/APP/peripheral_main.c#L56-L57)、[sd_switch.c:37-40](file:///Users/txa/project/Openterface_KM/APP/sd_switch.c#L37-L40)），说明 KVM-GO 用的是带以太网、BOOT0 独立的封装（QFN48/64/68），PB8 是普通 GPIO；KeyMod 的 QFN28 不是。
 
-两条路共用同一个 `Peripheral_FactoryResetSecurity()`（擦 bond → 清 PIN override → 上限回 1 → 重启），按键只是触发器。单绑定下这个函数同时是日常换机流程的兜底（§6.1 步 1 失效时）。
+其余三条路也都不通：
+
+- 按住 BOOT 再上电 → 芯片直接进 ROM ISP，用户程序根本没运行，谈不上"长按 5 s"。
+- KeyMod（version 3）没有任何其它按键/边沿输入：`sd_switch.c` 的 v3 分支是空实现，`HAL/KEY.c`（PB13 轮询）根本没编进镜像（不在 `build/APP/subdir.mk` 里）。
+- 掉电计数手势（插拔 N 次）不可行：没有 VBAT 电池，BKP/备份域随掉电清零，无法跨上电记住次数；`RCC` 复位标志也过不了断电。
+
+**因此 v1 的出厂重置只有两条软件通路**，共用 `Peripheral_FactoryResetSecurity()`（擦 bond → 清 PIN override → 上限回 1 → 重启）：
+
+1. **USB `0x22 0x02`**（主路径）。KeyMod 本来就要插 USB 用，换到电脑上一个串口工具/`keymod-test` 点一下即可，代价是"需要一台电脑"。
+2. **已绑定手机经加密 BLE 发 `0x22 0x02`**（§6.1 的交接路径）。PIN 忘了但手机还在时用它；应答可能赶在 500 ms 后的重启之前发出。
+
+**给下一代硬件的建议**（若要"免电脑、纯物理按键"恢复）：把按键节点同时引到一个普通 GPIO（按键另一端仍接 VDD/BOOT0，GPIO 侧串 10 kΩ 限流并配内部下拉，作纯输入），或换双刀按键。**注意不能**把该 GPIO 与合封的 PB8 并成一个推挽节点，也不能在 PB8 上开内部上拉——500 kΩ 外部下拉是保证上电进 Flash 自举的，内部上拉拉高 BOOT0 会让设备上电进 ISP。
+
+**不做**：不加采不到值的按键轮询代码，不做隐式掉电手势（不可计数、且违背"无隐藏手势"原则）。`g_ble_led_state` 的 5/6 两态是配对成功/失败反馈，与按键无关，保留。
+
 
 ## 12. 实施计划
 
@@ -213,14 +228,14 @@ typedef struct {
 | 6 | `APP/peripheral.c` | 实现 `pairStateCB`（LED 5/6、bond 刷新、模式切换）；passcodeCB 保持 NULL | M2 | 已实现 |
 | 7 | `APP/ble_pair_config.c/.h`（新） | Flash 记录 + `BLE_PairConfig_Init` 接入 `Peripheral_Init` | M2 | 已实现 |
 | 8 | `APP/peripheral.c` | `0x22 0x02` 实装、`0x04/0x05/0x06` 新增 | M2 | 已实现 |
-| 9 | `APP/peripheral_main.c` + `button.c`（新） | 5 s 长按（依赖 T-HW 结论） | M3 | 待硬件确认 |
+| 9 | —（取消） | 5 s 长按：CH32V208GBU6 的 BOOT0/PB8 合封、输入功能禁用，软件采不到；v1 走 USB `0x22 0x02` | M3 | 不做（§11） |
 | 10 | `keymod-test` | 配对引导 + PIN 输入框、`0x22 0x03/0x04/0x05/0x06/0x02` 接入、"解除本机绑定"按钮 + iOS"忽略此设备"提示、上限 UI | M2/M3 | 未开始 |
 
 实现备注：新文件必须登记进 `build/APP/subdir.mk`（三个列表：`C_SRCS`、`C_DEPS`、`OBJS`），该文件是 MounRiver 生成的静态清单，不做 glob。`bluetooth` 记录页 `0x0806A000` 位于 440 KB 代码区之内，与 ECM IP 配置页同一风险：镜像必须保持在 426 KB 以内（当前 ~220 KB）。
 
 **M1 — 关门**（1-4）：未配对即不可用，bond 仍可白嫖 666666。改动小、可独立台架验证。**风险**：旧版 App 直连失败，必须与 App 同步发版；USB 通路保留兜底。
 **M2 — 真 PIN + 单绑定**（5-8）：安全模型成立，初始 PIN 666666，可改。
-**M3 — 体验**（9、10）：按键重置、上限调整 UI、App 配对引导。
+**M3 — 体验**（10）：上限调整 UI、App 配对引导；按键重置经硬件核实不可行（§11），已取消。
 
 一句话优先级：承重的是 §7 两层，三行代码把"任何路人"降级成"拿到初始 PIN 的人"。若只做一件事，做 M1。
 
@@ -258,7 +273,7 @@ P1、P1b 不成立则 M1 的机制需重做，开工第 0 步就该在台上验�
 | P2 | ROM bond 容量 ≥ 用户可配上限 | 上限钳位下调到实测值 | 仅当有人调到 >1，T15 |
 | P3 | `DISPLAY_ONLY` + 预设 passcode + passcodeCB=NULL 时手机侧弹 PIN 框 | 注册 passcodeCB 只做显示 | M2 第一天，T13 |
 | P4 | 密钥分发含必需 key（默认 `0x77`，`GAPBOND_PERI_KEY_DIST_LIST=0x406`）足以支持重连加密 | 调整分发 mask | M2，T4 |
-| T-HW | KeyMod 板上是否有可 GPIO 采样的按键（还是只接 NRST） | §11 走 USB 路径 | 开工前查硬件图 |
+| T-HW | ~~KeyMod 板上是否有可 GPIO 采样的按键~~ | **已结论（2026-11-10）**：GBU6 的 BOOT0 与 PB8 合封、PB8 输入被禁止，采不到；v1 走 USB `0x22 0x02`（§11） | 已关闭 |
 
 ## 15. 风险与已知不足
 
