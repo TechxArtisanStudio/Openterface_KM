@@ -5,17 +5,21 @@ on:
     branches:
       - main
       - 'feature/*'
+      - 'fix/*'
+  pull_request:
+    branches:
+      - main
   workflow_call:
     inputs:
       enable_ble:
-        description: Enable Bluetooth Low Energy (BLE)
+        description: Force '0' to build every product without Bluetooth; '1' keeps the per-product flags in build/makefile
         required: false
         default: '1'
         type: string
   workflow_dispatch:
     inputs:
       enable_ble:
-        description: Enable Bluetooth Low Energy (BLE)
+        description: Force '0' to build every product without Bluetooth; '1' keeps the per-product flags in build/makefile
         required: false
         default: '1'
         type: choice
@@ -29,7 +33,10 @@ env:
   OUTPUT_DIR: ${{ github.workspace }}\output
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   RISC_COMPILER_VERSION: 8.2.0-3.1.1
-  ENABLE_BLE: ${{ inputs.enable_ble || github.event.inputs.enable_ble || '1' }}
+  # The per-board flag table lives in build/makefile (PRODUCT=kvmgo|minikvm|
+  # keymod-plus|keymod-mini). This is the only knob left here, and it can only
+  # turn BLE off — it never turns BLE on for a product that ships without it.
+  BLE_OVERRIDE: ${{ inputs.enable_ble == '0' && ' ENABLE_BLE=0' || '' }}
 
 jobs:
   build:
@@ -86,22 +93,21 @@ jobs:
     - name: Build KVMGo (version 1)
       run: |
         echo "Building KVMGo..."
-        echo "Feature flags: ENABLE_BLE=${{ env.ENABLE_BLE }}"
 
         # Build
         cd build
         $env:PATH = "C:\tools\risc-none-embed-gcc\bin;" + $env:PATH
         $env:RISC_COMPILER_PATH = "C:\tools\risc-none-embed-gcc"
         make clean
-        make -j4 ENABLE_BLE=${{ env.ENABLE_BLE }} BOARD_VERSION=1 all
-        riscv-none-embed-objcopy -O binary "openterface-km-firmware.elf" "openterface-km-firmware.bin"
-        riscv-none-embed-size --format=berkeley openterface-km-firmware.elf | Out-File -Encoding ascii openterface-km-firmware.siz
-        if ($LASTEXITCODE -eq 0) {
-          Write-Host "✓ KVMGo build succeeded" -ForegroundColor Green
-        } else {
+        make --no-print-directory PRODUCT=kvmgo show-config
+        make -j4 PRODUCT=kvmgo${{ env.BLE_OVERRIDE }} all
+        if ($LASTEXITCODE -ne 0) {
           Write-Host "✗ KVMGo build failed with exit code $LASTEXITCODE" -ForegroundColor Red
           exit 1
         }
+        riscv-none-embed-objcopy -O binary "openterface-km-firmware.elf" "openterface-km-firmware.bin"
+        riscv-none-embed-size --format=berkeley openterface-km-firmware.elf | Tee-Object -FilePath openterface-km-firmware.siz
+        Write-Host "✓ KVMGo build succeeded" -ForegroundColor Green
 
         # Copy artifact with version suffix to output directory
         Copy-Item "${{ env.BUILD_DIR }}\openterface-km-firmware.hex" "${{ env.OUTPUT_DIR }}\openterface-km-firmware-kvmgo.hex"
@@ -113,22 +119,21 @@ jobs:
     - name: Build Mini-KVM v1.2 (version 2)
       run: |
         echo "Building Mini-KVM v1.2..."
-        echo "Feature flags: ENABLE_BLE=${{ env.ENABLE_BLE }}"
 
         # Build
         cd build
         $env:PATH = "C:\tools\risc-none-embed-gcc\bin;" + $env:PATH
         $env:RISC_COMPILER_PATH = "C:\tools\risc-none-embed-gcc"
         make clean
-        make -j4 ENABLE_BLE=${{ env.ENABLE_BLE }} BOARD_VERSION=2 all
-        riscv-none-embed-objcopy -O binary "openterface-km-firmware.elf" "openterface-km-firmware.bin"
-        riscv-none-embed-size --format=berkeley openterface-km-firmware.elf | Out-File -Encoding ascii openterface-km-firmware.siz
-        if ($LASTEXITCODE -eq 0) {
-          Write-Host "✓ Mini-KVM v1.2 build succeeded" -ForegroundColor Green
-        } else {
+        make --no-print-directory PRODUCT=minikvm show-config
+        make -j4 PRODUCT=minikvm${{ env.BLE_OVERRIDE }} all
+        if ($LASTEXITCODE -ne 0) {
           Write-Host "✗ Mini-KVM v1.2 build failed with exit code $LASTEXITCODE" -ForegroundColor Red
           exit 1
         }
+        riscv-none-embed-objcopy -O binary "openterface-km-firmware.elf" "openterface-km-firmware.bin"
+        riscv-none-embed-size --format=berkeley openterface-km-firmware.elf | Tee-Object -FilePath openterface-km-firmware.siz
+        Write-Host "✓ Mini-KVM v1.2 build succeeded" -ForegroundColor Green
 
         # Copy artifact with version suffix to output directory
         Copy-Item "${{ env.BUILD_DIR }}\openterface-km-firmware.hex" "${{ env.OUTPUT_DIR }}\openterface-km-firmware-mini-kvm.hex"
@@ -140,22 +145,21 @@ jobs:
     - name: Build KeyMod Plus (version 3, external oscillator)
       run: |
         echo "Building KeyMod Plus..."
-        echo "Feature flags: ENABLE_BLE=1, ENABLE_OSCILLATOR=1"
 
         # Build
         cd build
         $env:PATH = "C:\tools\risc-none-embed-gcc\bin;" + $env:PATH
         $env:RISC_COMPILER_PATH = "C:\tools\risc-none-embed-gcc"
         make clean
-        make -j4 ENABLE_BLE=1 ENABLE_OSCILLATOR=1 BOARD_VERSION=3 BLE_NAME=KeyMod USB_WORK_MODE=hid_acm_ecm_bridge all
-        riscv-none-embed-objcopy -O binary "openterface-km-firmware.elf" "openterface-km-firmware.bin"
-        riscv-none-embed-size --format=berkeley openterface-km-firmware.elf | Out-File -Encoding ascii openterface-km-firmware.siz
-        if ($LASTEXITCODE -eq 0) {
-          Write-Host "✓ KeyMod Plus build succeeded" -ForegroundColor Green
-        } else {
+        make --no-print-directory PRODUCT=keymod-plus show-config
+        make -j4 PRODUCT=keymod-plus${{ env.BLE_OVERRIDE }} all
+        if ($LASTEXITCODE -ne 0) {
           Write-Host "✗ KeyMod Plus build failed with exit code $LASTEXITCODE" -ForegroundColor Red
           exit 1
         }
+        riscv-none-embed-objcopy -O binary "openterface-km-firmware.elf" "openterface-km-firmware.bin"
+        riscv-none-embed-size --format=berkeley openterface-km-firmware.elf | Tee-Object -FilePath openterface-km-firmware.siz
+        Write-Host "✓ KeyMod Plus build succeeded" -ForegroundColor Green
 
         # Copy artifact with version suffix to output directory
         Copy-Item "${{ env.BUILD_DIR }}\openterface-km-firmware.hex" "${{ env.OUTPUT_DIR }}\openterface-km-firmware-keymod-plus.hex"
@@ -167,22 +171,21 @@ jobs:
     - name: Build KeyMod Mini (version 3, internal RC oscillator)
       run: |
         echo "Building KeyMod Mini..."
-        echo "Feature flags: ENABLE_BLE=1, ENABLE_OSCILLATOR=0"
 
         # Build
         cd build
         $env:PATH = "C:\tools\risc-none-embed-gcc\bin;" + $env:PATH
         $env:RISC_COMPILER_PATH = "C:\tools\risc-none-embed-gcc"
         make clean
-        make -j4 ENABLE_BLE=1 ENABLE_OSCILLATOR=0 BOARD_VERSION=3 BLE_NAME=KeyMod USB_WORK_MODE=hid_ecm_bridge all
-        riscv-none-embed-objcopy -O binary "openterface-km-firmware.elf" "openterface-km-firmware.bin"
-        riscv-none-embed-size --format=berkeley openterface-km-firmware.elf | Out-File -Encoding ascii openterface-km-firmware.siz
-        if ($LASTEXITCODE -eq 0) {
-          Write-Host "✓ KeyMod Mini build succeeded" -ForegroundColor Green
-        } else {
+        make --no-print-directory PRODUCT=keymod-mini show-config
+        make -j4 PRODUCT=keymod-mini${{ env.BLE_OVERRIDE }} all
+        if ($LASTEXITCODE -ne 0) {
           Write-Host "✗ KeyMod Mini build failed with exit code $LASTEXITCODE" -ForegroundColor Red
           exit 1
         }
+        riscv-none-embed-objcopy -O binary "openterface-km-firmware.elf" "openterface-km-firmware.bin"
+        riscv-none-embed-size --format=berkeley openterface-km-firmware.elf | Tee-Object -FilePath openterface-km-firmware.siz
+        Write-Host "✓ KeyMod Mini build succeeded" -ForegroundColor Green
 
         # Copy artifact with version suffix to output directory
         Copy-Item "${{ env.BUILD_DIR }}\openterface-km-firmware.hex" "${{ env.OUTPUT_DIR }}\openterface-km-firmware-keymod-mini.hex"

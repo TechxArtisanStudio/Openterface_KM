@@ -19,12 +19,14 @@ BUILD_DIR="${SCRIPT_DIR}/build"
 OUTPUT_DIR="${SCRIPT_DIR}/output"
 
 # Default parameters
-ENABLE_BLE=1  # Enabled by default, only minikvm disables it
-USE_LTO=1     # LTO enabled for all boards
-ENABLE_OSCILLATOR=""
-BOARD_VERSION=""
-BLE_NAME=""
+# Per-board flags live in build/makefile (PRODUCT=...). Anything set here only
+# overrides that table.
+EXTRA_MAKE_ARGS=""
 TARGET_NAME=""
+
+# macOS ships no nproc, and an empty substitution turned this into a bare -j
+# (unbounded parallel jobs), which stalls the machine on a full LTO build.
+JOBS=$( (nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4) )
 
 # Compiler path - specify via --compiler or use env variable RISC_COMPILER_PATH
 RISC_COMPILER_PATH="${RISC_COMPILER_PATH:-}"
@@ -35,15 +37,16 @@ show_help() {
     echo ""
     echo "Usage: ./build.sh [options] <product version>"
     echo ""
-    echo "Product versions:"
-    echo "  kvmgo          Build KVMGo (BOARD_VERSION=1)"
-    echo "  minikvm        Build Mini-KVM v1.2 (BOARD_VERSION=2)"
-    echo "  keymod-plus    Build KeyMod Plus (external 32KHz oscillator, KVM-GO feature set)"
-    echo "  keymod-mini    Build KeyMod Mini (internal RC oscillator, no serial port)"
+    echo "Product versions (flags come from the PRODUCT table in build/makefile):"
+    echo "  kvmgo          KVMGo (BOARD_VERSION=1, HID+ACM+ECM bridge, no BLE)"
+    echo "  minikvm        Mini-KVM v1.2 (BOARD_VERSION=2, CDC COM+ECM, no BLE)"
+    echo "  keymod-plus    KeyMod Plus (BOARD_VERSION=3, external 32KHz oscillator, BLE)"
+    echo "  keymod-mini    KeyMod Mini (BOARD_VERSION=3, internal RC oscillator, BLE, no serial)"
     echo "  all            Build all versions"
     echo ""
     echo "Options:"
     echo "  --no-ble           Disable Bluetooth (saves ~14KB RAM)"
+    echo "  --make-arg VAR=V   Override one build/makefile flag for this run"
     echo "  --compiler PATH    Specify RISC-V compiler path"
     echo "  --help, -h         Show this help message"
     echo ""
@@ -99,39 +102,25 @@ create_output_dir() {
 # Build firmware
 build_firmware() {
     local target=$1
-    local board_version=$2
-    local enable_oscillator=$3
-    local ble_name=$4
-    local usb_work_mode=$5
 
     echo ""
     echo -e "${BLUE}========================================${NC}"
     echo -e "${BLUE}Building: ${target}${NC}"
     echo -e "${BLUE}========================================${NC}"
-    echo "  BOARD_VERSION:     ${board_version}"
-    echo "  ENABLE_BLE:        ${ENABLE_BLE}"
-    echo "  ENABLE_OSCILLATOR: ${enable_oscillator}"
-    echo "  BLE_NAME:          ${ble_name}"
-    echo "  USB_WORK_MODE:     ${usb_work_mode}"
-    echo ""
-
     cd "${BUILD_DIR}"
 
     # Clean
     make clean > /dev/null 2>&1 || true
 
-    # Build make arguments
-    local make_args="BOARD_VERSION=${board_version} ENABLE_BLE=${ENABLE_BLE} BLE_NAME=${ble_name} USE_LTO=${USE_LTO}"
-    if [ -n "${enable_oscillator}" ]; then
-        make_args="${make_args} ENABLE_OSCILLATOR=${enable_oscillator}"
-    fi
-    if [ -n "${usb_work_mode}" ]; then
-        make_args="${make_args} USB_WORK_MODE=${usb_work_mode}"
-    fi
+    # PRODUCT is the single flag table (build/makefile). Extra make arguments
+    # from the command line, e.g. --no-ble, override it.
+    local make_args="PRODUCT=${target} ${EXTRA_MAKE_ARGS}"
+
+    echo "  $(make --no-print-directory ${make_args} show-config)"
 
     # Compile
     echo -e "${YELLOW}Compiling...${NC}"
-    if ! make -j$(nproc) ${make_args} all; then
+    if ! make -j${JOBS} ${make_args} all; then
         echo -e "${RED}✗ Build failed: ${target}${NC}"
         return 1
     fi
@@ -168,8 +157,14 @@ while [[ $# -gt 0 ]]; do
             exit 0
             ;;
         --no-ble)
-            ENABLE_BLE=0
+            EXTRA_MAKE_ARGS="${EXTRA_MAKE_ARGS} ENABLE_BLE=0"
             shift
+            ;;
+        --make-arg)
+            # Pass a make variable straight through, overriding the PRODUCT
+            # table, e.g. --make-arg USB_WORK_MODE=hid_acm_ecm_bridge
+            EXTRA_MAKE_ARGS="${EXTRA_MAKE_ARGS} $2"
+            shift 2
             ;;
         --compiler)
             RISC_COMPILER_PATH="$2"
@@ -208,12 +203,8 @@ BUILD_FAILED=0
 # Build by target
 build_one() {
     local target=$1
-    local board_version=$2
-    local enable_oscillator=$3
-    local ble_name=$4
-    local usb_work_mode=$5
 
-    if build_firmware "${target}" "${board_version}" "${enable_oscillator}" "${ble_name}" "${usb_work_mode}"; then
+    if build_firmware "${target}"; then
         BUILD_SUCCESS=$((BUILD_SUCCESS + 1))
     else
         BUILD_FAILED=$((BUILD_FAILED + 1))
@@ -221,35 +212,14 @@ build_one() {
 }
 
 case ${TARGET} in
-    kvmgo)
-        ENABLE_BLE=1
-        USE_LTO=1
-        build_one "kvmgo" "1" "" "KVM-GO" "hid_acm_ecm_bridge"
-        ;;
-    minikvm)
-        ENABLE_BLE=0
-        USE_LTO=1
-        build_one "minikvm" "2" "" "Mini-KVM" "hid_acm_ecm"
-        ;;
-    keymod-plus)
-        ENABLE_BLE=1
-        USE_LTO=1
-        build_one "keymod-plus" "3" "1" "KeyMod" "hid_acm_ecm_bridge"
-        ;;
-    keymod-mini)
-        ENABLE_BLE=1
-        USE_LTO=1
-        build_one "keymod-mini" "3" "0" "KeyMod" "hid_ecm_bridge"
-        ;;
     all)
-        ENABLE_BLE=1
-        USE_LTO=1
-        build_one "kvmgo" "1" "" "KVM-GO" "hid_acm_ecm_bridge"
-        ENABLE_BLE=0
-        build_one "minikvm" "2" "" "Mini-KVM" "hid_acm_ecm"
-        ENABLE_BLE=1
-        build_one "keymod-plus" "3" "1" "KeyMod" "hid_acm_ecm_bridge"
-        build_one "keymod-mini" "3" "0" "KeyMod" "hid_ecm_bridge"
+        build_one "kvmgo"
+        build_one "minikvm"
+        build_one "keymod-plus"
+        build_one "keymod-mini"
+        ;;
+    *)
+        build_one "${TARGET}"
         ;;
 esac
 

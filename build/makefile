@@ -14,6 +14,47 @@ SRC_DIR := $(abspath $(dir $(CURDIR)))
 
 RM := rm -rf
 
+# ---------------------------------------------------------------------------
+# Product table — the only place that decides what a shipped image contains.
+# Keyed by product name, not BOARD_VERSION: keymod-plus and keymod-mini are the
+# same v3 silicon with different USB composites and different 32KHz clocks.
+# The four entry points that used to repeat these values (the CI workflow,
+# build.sh, the board targets further down, and the BOARD_VERSION fallbacks
+# below) had all drifted apart, so the CI image was not the bench-tested image.
+# Everything here is ?=, so a command-line override still wins:
+#   make PRODUCT=kvmgo ENABLE_BLE=1
+# ---------------------------------------------------------------------------
+PRODUCT ?=
+
+ifeq ($(PRODUCT),kvmgo)
+# BLE compiled out for now; both CDC ECM interfaces stay.
+BOARD_VERSION ?= 1
+ENABLE_BLE ?= 0
+USE_LTO ?= 1
+USB_WORK_MODE ?= hid_acm_ecm_bridge
+else ifeq ($(PRODUCT),minikvm)
+BOARD_VERSION ?= 2
+ENABLE_BLE ?= 0
+USE_LTO ?= 1
+USB_WORK_MODE ?= hid_acm_ecm
+else ifeq ($(PRODUCT),keymod-plus)
+BOARD_VERSION ?= 3
+ENABLE_BLE ?= 1
+USE_LTO ?= 1
+ENABLE_OSCILLATOR ?= 1
+USB_WORK_MODE ?= hid_acm_ecm_bridge
+else ifeq ($(PRODUCT),keymod-mini)
+BOARD_VERSION ?= 3
+ENABLE_BLE ?= 1
+USE_LTO ?= 1
+ENABLE_OSCILLATOR ?= 0
+USB_WORK_MODE ?= hid_ecm_bridge
+else ifneq ($(PRODUCT),)
+$(error Unknown PRODUCT '$(PRODUCT)' — use kvmgo, minikvm, keymod-plus or keymod-mini)
+else
+$(warning PRODUCT is not set — falling back to the defaults below, which is a KVM-GO-era hid_acm composite and not any shipping image. Build with PRODUCT=kvmgo|minikvm|keymod-plus|keymod-mini.)
+endif
+
 # Feature flags — define BEFORE includes so subdir.mk files can use them
 # BLE support: build with 'make ENABLE_BLE=0' to omit BLE (frees ~14 KB RAM)
 ENABLE_BLE ?= 1
@@ -30,12 +71,9 @@ ENABLE_STYLUS ?= 0
 
 BOARD_VERSION ?= 1
 
-# USB work mode per board version:
-#   KVMGo (v1) and Mini-KVM (v2): CDC COM only (hid_acm)
-#   KeyMod (v3):                  CDC COM + CDC ECM (hid_acm_ecm)
-# Note: Can be overridden from command line for specific targets.
-#       keymod-plus uses hid_acm_ecm_bridge (same as KVMGo) and
-#       keymod-mini uses hid_ecm_bridge (no CDC-ACM serial).
+# Fallback work mode for a bare `make` with no PRODUCT (legacy MounRiver IDE
+# builds). Every shipping image selects a product above; this block is what a
+# PRODUCT-less build gets, and it is NOT a shipping configuration.
 override ENABLE_UAC := 0
 ifndef USB_WORK_MODE
 ifneq ($(filter 1 2,$(BOARD_VERSION)),)
@@ -45,12 +83,15 @@ USB_WORK_MODE := hid_acm_ecm
 endif
 endif
 
-# USB work modes:
-#   hid_acm        = target HID only, host CDC ACM
-#   hid_uac_acm    = target HID+UAC, host CDC ACM+UAC bridge
-#   hid_acm_bridge = target CDC ACM enumeration scaffold + host CDC ACM
-#   hid_ecm_bridge = target/host CDC ECM enumeration scaffold
-#   hid_acm_ecm    = host CDC ACM + CDC ECM combined (keymod-plus)
+# USB work modes (see APP/include/usb_work_mode.h for the per-mode capability
+# flags):
+#   hid_acm             = target HID, host CDC ACM
+#   hid_uac_acm         = + UAC
+#   hid_acm_bridge      = target CDC ACM scaffold + host CDC ACM
+#   hid_ecm_bridge      = CDC ECM toward host and target, no CDC ACM  (keymod-mini)
+#   hid_uac_ecm         = ECM + UAC; no shipping product uses it
+#   hid_acm_ecm         = CDC ACM + CDC ECM                                   (minikvm)
+#   hid_acm_ecm_bridge  = CDC ACM + CDC ECM + target-side ECM bridge         (kvmgo, keymod-plus)
 USB_WORK_MODE ?= $(if $(filter 0,$(ENABLE_UAC)),hid_acm,hid_uac_acm)
 
 ifeq ($(USB_WORK_MODE),hid_acm)
@@ -159,18 +200,26 @@ openterface-km-firmware.siz \
 all:
 	$(MAKE) --no-print-directory main-build
 
-# KVMGo build configuration (BOARD_VERSION=1, CDC COM + ECM)
+# Print the flags a product resolves to. Entry points echo this instead of
+# restating the table, which is how build.sh and CI drifted from each other.
+show-config:
+	@echo "PRODUCT=$(PRODUCT) BOARD_VERSION=$(BOARD_VERSION) USB_WORK_MODE=$(USB_WORK_MODE) (mode $(USB_WORK_MODE_ID)) ENABLE_BLE=$(ENABLE_BLE) ENABLE_OSCILLATOR=$(ENABLE_OSCILLATOR) USE_LTO=$(USE_LTO) BLE_NAME=$(BLE_NAME) ENABLE_STYLUS=$(ENABLE_STYLUS)"
+
+# Board targets: convenience wrappers over the product table above, for the
+# MounRiver IDE and manual builds. They run cp/objcopy locally, so the CI
+# workflow calls make PRODUCT=... directly and copies with PowerShell.
 kvmgo:
-	$(MAKE) --no-print-directory BOARD_VERSION=1 ENABLE_BLE=1 BLE_NAME=KVM-GO USB_WORK_MODE=hid_acm_ecm_bridge
+	$(MAKE) --no-print-directory PRODUCT=kvmgo
 	@riscv-none-embed-objcopy -O binary "openterface-km-firmware.elf" "openterface-km-firmware.bin"
 	@cp openterface-km-firmware.elf openterface-km-firmware-kvmgo.elf
 	@cp openterface-km-firmware.bin openterface-km-firmware-kvmgo.bin
 	@cp openterface-km-firmware.hex openterface-km-firmware-kvmgo.hex
-	@echo "Built: openterface-km-firmware-kvmgo (CDC COM+ECM)"
+	@echo "Built: openterface-km-firmware-kvmgo (HID+ACM+ECM bridge, no BLE)"
 
 # Mini-KVM build configuration (BOARD_VERSION=2, CDC COM + ECM)
 minikvm:
-	$(MAKE) --no-print-directory BOARD_VERSION=2 ENABLE_BLE=1 BLE_NAME=Mini-KVM USB_WORK_MODE=hid_acm_ecm
+	$(MAKE) --no-print-directory PRODUCT=minikvm
+	@riscv-none-embed-objcopy -O binary "openterface-km-firmware.elf" "openterface-km-firmware.bin"
 	@cp openterface-km-firmware.elf openterface-km-firmware-minikvm.elf
 	@cp openterface-km-firmware.bin openterface-km-firmware-minikvm.bin
 	@cp openterface-km-firmware.hex openterface-km-firmware-minikvm.hex
@@ -178,7 +227,7 @@ minikvm:
 
 # KeyMod Plus build configuration (BOARD_VERSION=3, same personality as KVMGo)
 keymod-plus:
-	$(MAKE) --no-print-directory BOARD_VERSION=3 ENABLE_OSCILLATOR=1 ENABLE_BLE=1 BLE_NAME=KeyMod USB_WORK_MODE=hid_acm_ecm_bridge
+	$(MAKE) --no-print-directory PRODUCT=keymod-plus
 	@riscv-none-embed-objcopy -O binary "openterface-km-firmware.elf" "openterface-km-firmware.bin"
 	@cp openterface-km-firmware.elf openterface-km-firmware-keymod-plus.elf
 	@cp openterface-km-firmware.bin openterface-km-firmware-keymod-plus.bin
@@ -187,7 +236,7 @@ keymod-plus:
 
 # KeyMod Mini build configuration (BOARD_VERSION=3, no CDC-ACM serial)
 keymod-mini:
-	$(MAKE) --no-print-directory BOARD_VERSION=3 ENABLE_OSCILLATOR=0 ENABLE_BLE=1 BLE_NAME=KeyMod USB_WORK_MODE=hid_ecm_bridge
+	$(MAKE) --no-print-directory PRODUCT=keymod-mini
 	@riscv-none-embed-objcopy -O binary "openterface-km-firmware.elf" "openterface-km-firmware.bin"
 	@cp openterface-km-firmware.elf openterface-km-firmware-keymod-mini.elf
 	@cp openterface-km-firmware.bin openterface-km-firmware-keymod-mini.bin
