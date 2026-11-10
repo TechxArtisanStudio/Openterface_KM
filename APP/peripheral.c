@@ -446,11 +446,11 @@ static void Peripheral_PairStateCB(uint16_t connectionHandle, uint8_t state, uin
  * @fn      Peripheral_FactoryResetSecurity
  *
  * @brief   Erase every bond, drop the PIN override and restore a single bond
- *          slot. Shared by the 0x22 erase command and the reset gesture.
+ *          slot. Shared by the 0x22 erase command and the 5 s button hold.
  *
  * @return  none
  */
-static void Peripheral_FactoryResetSecurity(void)
+void Peripheral_FactoryResetSecurity(void)
 {
     (void)GAPBondMgr_SetParameter(GAPBOND_ERASE_ALLBONDS, 0, NULL);
     (void)BLE_PairConfig_ResetAll();

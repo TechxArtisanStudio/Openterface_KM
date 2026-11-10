@@ -3,7 +3,7 @@
 - 分支：`feature/ble-pairing-security`
 - 基线：`main` @ `1ee6c00`
 - 适用固件：KeyMod（`BOARD_VERSION=3`）、KVM-GO（`BOARD_VERSION=1`）等 `ENABLE_BLE` 机型
-- 状态：**M1 + M2 已实现**（见 §12）；M3 的按键长按经硬件核实**不可行**（BOOT 键只能烧录，运行时采不到，见 §11），M3 只剩 App 侧工作；§14 的 P1/P1b/P3 仍需台架验
+- 状态：**M1 + M2 + 按键长按已实现**（见 §12）；M3 只剩 App 侧工作；§14 的 P1/P1b/P3 仍需台架验
 - 决策沿革：2026-11-03 定 PIN 模型与"无配对窗口"原则；2026-11-09 上限从 4 改为 **1**（用户："一台手机更安全"），同日决定上限**改为可配置项存 Flash**，单绑定由此从硬约束变成默认档位；2026-11-10 初始 PIN 定为**全设备统一 666666**（用户要求），并开始实现
 
 ---
@@ -190,28 +190,27 @@ typedef struct {
 
 **v1 不做**。App 连上后先查 `0x22 0x03`，再决定提示"已占用/请解绑"——单绑定下这就是两态文案，代价只是多一次往返。等确有裸客户端（非本厂 App）需求时再加。
 
-## 11. 出厂重置
+## 11. 出厂重置（BOOT 键长按 5 s）
 
-**硬件结论（2026-11-10 核实，T-HW 关闭）：BOOT 按键在固件运行时读不到，5 s 长按不可实现。**
+**KeyMod 的 BOOT 键在固件运行时可以采样**（2026-11-10 用户核实），接在 **PB8**。实现是 [button.c](file:///Users/txa/project/Openterface_KM/APP/button.c) + [button.h](file:///Users/txa/project/Openterface_KM/APP/include/button.h#L18)，主循环每轮调 `Button_Poll()`（[peripheral_main.c:83](file:///Users/txa/project/Openterface_KM/APP/peripheral_main.c#L83)）。
 
-- KeyMod 的 MCU 是 **CH32V208GBU6**（QFN28，工程文件 `BLE_USB.wvproj` 的 `"mcu"` 字段）。该封装把 **BOOT0 与 PB8 合封在同一物理引脚**（数据手册第 19 页的合封说明；QFN28 也未引出 BOOT1/PB2，内部下拉到 GND）。
-- 合封后 **PB8 只保留输出驱动能力，所有输入功能被禁止**——这是合封芯片的电气特性，不是软件配置问题。同族 CH32V203G6 的官方说明写得更直白："进入用户程序后 PB8 仍可用但仅能输出，输入是无效值，BOOT0 按键状态无法被获取"。
-- 反证：`version == 1`（KVM-GO）固件把 PB8 当 SD 切换的**输入**用（[peripheral_main.c:56-57](file:///Users/txa/project/Openterface_KM/APP/peripheral_main.c#L56-L57)、[sd_switch.c:37-40](file:///Users/txa/project/Openterface_KM/APP/sd_switch.c#L37-L40)），说明 KVM-GO 用的是带以太网、BOOT0 独立的封装（QFN48/64/68），PB8 是普通 GPIO；KeyMod 的 QFN28 不是。
+时序：
 
-其余三条路也都不通：
+1. 按下 → 20 ms 消抖，开始计时；
+2. 持续按住 **5 s**（[button.c:81](file:///Users/txa/project/Openterface_KM/APP/button.c#L81)）→ 进入待确认，PC7 **100 ms 急闪**，提示松手；
+3. 松开 → 20 ms 消抖后执行 `Peripheral_FactoryResetSecurity()`（擦全部 bond → 清 PIN override → 上限回 1），再 `Peripheral_ScheduleSystemReset(500)` 重启（[button.c:99](file:///Users/txa/project/Openterface_KM/APP/button.c#L99)）；
+4. 未满 5 s 松开 → 静默取消，状态不变。
 
-- 按住 BOOT 再上电 → 芯片直接进 ROM ISP，用户程序根本没运行，谈不上"长按 5 s"。
-- KeyMod（version 3）没有任何其它按键/边沿输入：`sd_switch.c` 的 v3 分支是空实现，`HAL/KEY.c`（PB13 轮询）根本没编进镜像（不在 `build/APP/subdir.mk` 里）。
-- 掉电计数手势（插拔 N 次）不可行：没有 VBAT 电池，BKP/备份域随掉电清零，无法跨上电记住次数；`RCC` 复位标志也过不了断电。
+**为什么是"松手后"才重启**：按住时 BOOT0 为高，此刻 `NVIC_SystemReset()` 会让芯片复位后直接进 ROM ISP，而不是跑固件。把重启放到松手之后（BOOT0 已回低）才安全。LED 急闪因此同时承担两个语义："请松手"和"松手即执行"。
 
-**因此 v1 的出厂重置只有两条软件通路**，共用 `Peripheral_FactoryResetSecurity()`（擦 bond → 清 PIN override → 上限回 1 → 重启）：
+**电气约束**：PB8 在 QFN28 的 CH32V208GBU6 上与 BOOT0 合封，数据手册注明合封后该脚输入功能受限，因此这里按**浮空输入**配置、**绝不开内部上拉**——上拉会把 BOOT0 拉高，导致下次上电进 ISP。按键空闲为低（外部下拉）、按下为高，与烧录时"按住 BOOT 才进 ISP"一致。若原理图上按键不在 PB8，只改 [button.h:18](file:///Users/txa/project/Openterface_KM/APP/include/button.h#L18) 的端口/引脚宏即可。
 
-1. **USB `0x22 0x02`**（主路径）。KeyMod 本来就要插 USB 用，换到电脑上一个串口工具/`keymod-test` 点一下即可，代价是"需要一台电脑"。
-2. **已绑定手机经加密 BLE 发 `0x22 0x02`**（§6.1 的交接路径）。PIN 忘了但手机还在时用它；应答可能赶在 500 ms 后的重启之前发出。
+**上电防误触**：初始化时若读到高电平，先要求看到一次低电平才允许起计时（[button.c:52](file:///Users/txa/project/Openterface_KM/APP/button.c#L52)），避免接错网络或缺少下拉时反复进"待确认"。
 
-**给下一代硬件的建议**（若要"免电脑、纯物理按键"恢复）：把按键节点同时引到一个普通 GPIO（按键另一端仍接 VDD/BOOT0，GPIO 侧串 10 kΩ 限流并配内部下拉，作纯输入），或换双刀按键。**注意不能**把该 GPIO 与合封的 PB8 并成一个推挽节点，也不能在 PB8 上开内部上拉——500 kΩ 外部下拉是保证上电进 Flash 自举的，内部上拉拉高 BOOT0 会让设备上电进 ISP。
+**台架自检**：按住 5 s，LED 应开始急闪；松手后设备重启，USB `0x22 0x03` 返回 `count=0, max=1`，旧手机需在系统蓝牙里"忽略此设备"后才能用 666666 重新配对。按住后 LED 完全不闪 = 该脚没读到按键，先查原理图网络。
 
-**不做**：不加采不到值的按键轮询代码，不做隐式掉电手势（不可计数、且违背"无隐藏手势"原则）。`g_ble_led_state` 的 5/6 两态是配对成功/失败反馈，与按键无关，保留。
+USB `0x22 0x02`（[peripheral.c](file:///Users/txa/project/Openterface_KM/APP/peripheral.c#L453)）和加密 BLE 的 `0x22 0x02`（§6.1 换机路径）仍然存在，与按键共用同一个 `Peripheral_FactoryResetSecurity()`。单绑定下这个函数同时是日常换机流程的兜底。
+
 
 
 ## 12. 实施计划
@@ -228,14 +227,14 @@ typedef struct {
 | 6 | `APP/peripheral.c` | 实现 `pairStateCB`（LED 5/6、bond 刷新、模式切换）；passcodeCB 保持 NULL | M2 | 已实现 |
 | 7 | `APP/ble_pair_config.c/.h`（新） | Flash 记录 + `BLE_PairConfig_Init` 接入 `Peripheral_Init` | M2 | 已实现 |
 | 8 | `APP/peripheral.c` | `0x22 0x02` 实装、`0x04/0x05/0x06` 新增 | M2 | 已实现 |
-| 9 | —（取消） | 5 s 长按：CH32V208GBU6 的 BOOT0/PB8 合封、输入功能禁用，软件采不到；v1 走 USB `0x22 0x02` | M3 | 不做（§11） |
+| 9 | `APP/button.c` + `APP/include/button.h`（新） | 5 s 长按 → LED 急闪 → 松手执行出厂重置 + 重启；PB8 浮空输入 | M3 | 已实现 |
 | 10 | `keymod-test` | 配对引导 + PIN 输入框、`0x22 0x03/0x04/0x05/0x06/0x02` 接入、"解除本机绑定"按钮 + iOS"忽略此设备"提示、上限 UI | M2/M3 | 未开始 |
 
 实现备注：新文件必须登记进 `build/APP/subdir.mk`（三个列表：`C_SRCS`、`C_DEPS`、`OBJS`），该文件是 MounRiver 生成的静态清单，不做 glob。`bluetooth` 记录页 `0x0806A000` 位于 440 KB 代码区之内，与 ECM IP 配置页同一风险：镜像必须保持在 426 KB 以内（当前 ~220 KB）。
 
 **M1 — 关门**（1-4）：未配对即不可用，bond 仍可白嫖 666666。改动小、可独立台架验证。**风险**：旧版 App 直连失败，必须与 App 同步发版；USB 通路保留兜底。
 **M2 — 真 PIN + 单绑定**（5-8）：安全模型成立，初始 PIN 666666，可改。
-**M3 — 体验**（10）：上限调整 UI、App 配对引导；按键重置经硬件核实不可行（§11），已取消。
+**M3 — 体验**（9、10）：按键重置已实现（§11）、上限调整 UI、App 配对引导。
 
 一句话优先级：承重的是 §7 两层，三行代码把"任何路人"降级成"拿到初始 PIN 的人"。若只做一件事，做 M1。
 
@@ -261,6 +260,8 @@ typedef struct {
 | T14 | 回归 | BLE-Eth 隧道、CH9329 全命令、`0x19`、改名在加密链路上行为不变 |
 | T15 | （用户调到 4 时才需）连续配 6 台 + `ERASE_AUTO=0` | 不静默清空，栈实际上限可预期（P2） |
 | T16 | `0x22 0x04` 改成 123456 后重启 | 断电保持；旧 bond 不受影响，新配对应要求 123456 |
+| T17 | BOOT 键按住 5 s 后松开 | 第 5 s LED 急闪；松手后重启，`0x22 0x03` 为 count=0/max=1；旧手机"忽略设备"后可 666666 重配 |
+| T18 | BOOT 键按住 3 s 松开 | 无变化：不闪、不重启（提前松手取消） |
 
 ## 14. 待验证前提
 
@@ -273,7 +274,7 @@ P1、P1b 不成立则 M1 的机制需重做，开工第 0 步就该在台上验�
 | P2 | ROM bond 容量 ≥ 用户可配上限 | 上限钳位下调到实测值 | 仅当有人调到 >1，T15 |
 | P3 | `DISPLAY_ONLY` + 预设 passcode + passcodeCB=NULL 时手机侧弹 PIN 框 | 注册 passcodeCB 只做显示 | M2 第一天，T13 |
 | P4 | 密钥分发含必需 key（默认 `0x77`，`GAPBOND_PERI_KEY_DIST_LIST=0x406`）足以支持重连加密 | 调整分发 mask | M2，T4 |
-| T-HW | ~~KeyMod 板上是否有可 GPIO 采样的按键~~ | **已结论（2026-11-10）**：GBU6 的 BOOT0 与 PB8 合封、PB8 输入被禁止，采不到；v1 走 USB `0x22 0x02`（§11） | 已关闭 |
+| T-HW | ~~KeyMod 板上是否有可 GPIO 采样的按键~~ | **已结论（2026-11-10）**：按键可采样，接 PB8；按浮空输入实现 5 s 长按（§11） | 已关闭 |
 
 ## 15. 风险与已知不足
 

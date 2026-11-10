@@ -27,6 +27,7 @@
 #include "include/usb_mode_config.h"
 #include "include/default_target_config.h"
 #include "include/pwm_led.h"
+#include "include/button.h"
 #include "include/ecm_ip_config.h"
 
 /*********************************************************************
@@ -77,6 +78,10 @@ void Main_Circulation(void)
          * interrupt is lost due to EMI or other issues.
          */
         USBFS_CheckEndpointBusyTimeout();
+
+#if defined(ENABLE_BLE) && version == 3
+        Button_Poll();
+#endif
 
         /* Simple LED for DHCP debug: ON = g_dhcp_led_mode active, OFF = idle */
         uint32_t now = systick_ms;
@@ -185,7 +190,14 @@ void Main_Circulation(void)
 
         uint8_t ble_overrides_pc7 = 0;
 #if defined(ENABLE_BLE) && version == 3
-        if (g_ble_led_state) {
+        uint8_t button_level = Button_LedLevel();
+        if (button_level != BUTTON_LED_NONE) {
+            /* 5 s hold reached: blink to ask for release; the release applies
+             * the factory reset (see button.c). */
+            ble_overrides_pc7 = 1;
+            PWM_LED_SetBrightness(button_level ? 100 : 0);
+        }
+        else if (g_ble_led_state) {
             ble_overrides_pc7 = 1;
             switch (g_ble_led_state) {
                 case 1: PWM_LED_SetBrightness((systick_ms / 1000) % 2 ? 100 : 0); break;  // advertising slow blink
@@ -287,6 +299,10 @@ int main(void) {
 
     /* Initialize PC7 LED - must be after RGB_Init since RGB configures GPIOC/AFIO */
     PWM_LED_Init();
+
+#if defined(ENABLE_BLE) && version == 3
+    Button_Init();
+#endif
 
     /* Distinctive startup blink to verify firmware version is running */
 #if version == 3

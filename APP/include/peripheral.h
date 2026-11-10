@@ -109,6 +109,12 @@ void Peripheral_BleAdvParamCommand(uint8_t addr, uint8_t cmd_code, uint8_t *pdat
 uint16_t Peripheral_GetConnHandle(void);
 
 /*
+ * Erase every bond, clear the PIN override and restore the default bond slot.
+ * Shared by the 0x22 0x02 command and the 5 s button hold.
+ */
+void Peripheral_FactoryResetSecurity(void);
+
+/*
  * Schedule a system reset after a delay to allow BLE notifications
  * to be transmitted.
  */

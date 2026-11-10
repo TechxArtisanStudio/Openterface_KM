@@ -10,6 +10,7 @@ C_SRCS += \
 ../APP/ble_eth_protocol.c \
 ../APP/ble_name_config.c \
 ../APP/ble_pair_config.c \
+../APP/button.c \
 ../APP/CH32_TEMP.c \
 ../APP/ch32v20x_it.c \
 ../APP/ch32v20x_usbfs_device.c \
@@ -38,6 +39,7 @@ C_DEPS += \
 ./APP/ble_eth_protocol.d \
 ./APP/ble_name_config.d \
 ./APP/ble_pair_config.d \
+./APP/button.d \
 ./APP/CH32_TEMP.d \
 ./APP/ch32v20x_it.d \
 ./APP/ch32v20x_usbfs_device.d \
@@ -66,6 +68,7 @@ OBJS += \
 ./APP/ble_eth_protocol.o \
 ./APP/ble_name_config.o \
 ./APP/ble_pair_config.o \
+./APP/button.o \
 ./APP/CH32_TEMP.o \
 ./APP/ch32v20x_it.o \
 ./APP/ch32v20x_usbfs_device.o \
