@@ -25,7 +25,7 @@ Examples::
 
     # Arbitrary CH9329 commands
     python tools/test_ch9329_ecm.py --usb-direct --cmd 0x01       # get-info
-    python tools/test_ch9329_ecm.py --usb-direct --cmd 0x02 --payload 000004000000000000  # key 'A'
+    python tools/test_ch9329_ecm.py --usb-direct --cmd 0x02 --payload 0000040000000000  # key 'A'
     python tools/test_ch9329_ecm.py --usb-direct --raw-frame 57AB00010001  # raw CH9329
 
     # Via a CDC-ECM NIC (Linux / ECM-capable driver)
@@ -116,7 +116,6 @@ def build_ch9329_keyboard(modifier: int = 0, keys: list[int] | None = None) -> b
     payload = bytes([modifier, 0])  # modifier + reserved
     payload += bytes(keys[:6])
     payload += bytes(max(0, 6 - len(keys[:6])))  # pad key slots to 6
-    payload += bytes(2)  # trailing reserved padding (CH9329 expects 10-byte payload)
     return build_ch9329_frame(0x00, CH9329_CMD_KB_GENERAL, payload)
 
 
@@ -127,14 +126,15 @@ def build_ch9329_media(modifier: int = 0) -> bytes:
 
 def build_ch9329_abs_mouse(buttons: int = 0, x: int = 0, y: int = 0) -> bytes:
     """Build a CH9329 absolute mouse report (cmd 0x04)."""
-    payload = struct.pack("<BHH", buttons & 0x07, x & 0xFFFF, y & 0xFFFF)
+    payload = struct.pack("<BBHHB", 0, buttons & 0x07, x & 0xFFFF, y & 0xFFFF, 0)
     return build_ch9329_frame(0x00, CH9329_CMD_MS_ABS, payload)
 
 
 def build_ch9329_rel_mouse(buttons: int = 0, dx: int = 0, dy: int = 0, wheel: int = 0) -> bytes:
     """Build a CH9329 relative mouse report (cmd 0x05)."""
     payload = struct.pack(
-        "<BbbB",
+        "<BBbbB",
+        0,  # reserved
         buttons & 0x07,
         dx & 0xFF if dx >= 0 else -((-dx) & 0xFF),
         dy & 0xFF if dy >= 0 else -((-dy) & 0xFF),
