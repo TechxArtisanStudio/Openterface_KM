@@ -27,9 +27,8 @@ RM := rm -rf
 PRODUCT ?=
 
 ifeq ($(PRODUCT),kvmgo)
-# BLE compiled out for now; both CDC ECM interfaces stay.
 BOARD_VERSION ?= 1
-ENABLE_BLE ?= 0
+ENABLE_BLE ?= 1
 USE_LTO ?= 1
 USB_WORK_MODE ?= hid_acm_ecm_bridge
 else ifeq ($(PRODUCT),minikvm)
