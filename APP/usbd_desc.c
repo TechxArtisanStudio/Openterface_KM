@@ -1431,11 +1431,13 @@ const uint8_t MyEcmMacInfo[ ] =
 };
 
 /* Target CDC ECM MAC address string: ASCII hex, no separators.
- * Must match ECM_TARGET_DEV_MAC in ecm_bridge.c: the iMACAddress this string
- * feeds is the address the target host believes we have, while every ARP,
- * GARP and ICMP frame we emit carries ECM_TARGET_DEV_MAC. Diverging copies
- * make the host's own NIC address disagree with what it learns about us.
- * Target MAC: 02:00:00:00:03:00 */
+ * This iMACAddress is the descriptor MAC macOS adopts as its OWN interface
+ * address (e.g. en11 = 02:00:00:00:03:00). It must therefore DIFFER from
+ * ECM_TARGET_DEV_MAC / g_dev_mac (02:00:00:00:03:32), the source MAC we put on
+ * every ARP/GARP/ICMP/TCP frame: if the two match, macOS drops our frames as
+ * self-MAC and the target can never be ARP-resolved (SSH CONNECT times out
+ * with 0xE1). Same split as the host side (...00:02 descriptor vs ...00:32 peer).
+ * Descriptor MAC: 02:00:00:00:03:00 */
 const uint8_t MyTargetEcmMacInfo[ ] =
 {
     0x1A,

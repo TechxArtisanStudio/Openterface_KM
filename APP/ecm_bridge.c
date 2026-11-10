@@ -90,8 +90,13 @@ static uint8_t ecm_target_dev_ip[4];
    distinct peer MAC or macOS ignores them as self-MAC replies. */
 static const uint8_t ECM_DEV_MAC[6] = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x32 };
 
-/* Firmware-side peer identity on the Target CDC ECM link (USBFS side). */
-static const uint8_t ECM_TARGET_DEV_MAC[6] = { 0x02, 0x00, 0x00, 0x00, 0x03, 0x00 };
+/* Firmware-side peer identity on the Target CDC ECM link (USBFS side).
+ * Must DIFFER from the target descriptor MAC (MyTargetEcmMacInfo =
+ * 02:00:00:00:03:00): macOS adopts that descriptor MAC as its own interface
+ * address, so any ARP/GARP/ICMP frame we emit with the same source MAC is
+ * dropped as a self-MAC frame and the target can never be ARP-resolved.
+ * Mirrors the host-side ECM_DEV_MAC (...00:32 vs descriptor ...00:02). */
+static const uint8_t ECM_TARGET_DEV_MAC[6] = { 0x02, 0x00, 0x00, 0x00, 0x03, 0x32 };
 
 typedef struct {
     uint8_t data[ECM_BRIDGE_MTU_FRAME_SIZE];

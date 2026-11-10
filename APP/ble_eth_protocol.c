@@ -157,8 +157,11 @@ static uint8_t compute_rx_window(void)
    Set by peripheral.c via BLE_Eth_SetEcmtxCb(). */
 static ble_eth_ecm_tx_cb_t g_ecm_tx_cb;
 
-/* Firmware-side peer identity on the target CDC ECM link. */
-static const uint8_t g_dev_mac[6] = { 0x02, 0x00, 0x00, 0x00, 0x03, 0x00 };
+/* Firmware-side peer identity on the target CDC ECM link. Must stay equal to
+ * ECM_TARGET_DEV_MAC in ecm_bridge.c and DIFFER from the target descriptor MAC
+ * (02:00:00:00:03:00) that macOS adopts as its own interface MAC — otherwise
+ * macOS drops our ARP/TCP frames as self-MAC and the tunnel never resolves. */
+static const uint8_t g_dev_mac[6] = { 0x02, 0x00, 0x00, 0x00, 0x03, 0x32 };
 static const uint8_t g_host_mac[6] = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
 /* Source IP used for tunneled TCP frames and ARP requests. Must match the
  * bridge's target-side IP, otherwise the target PC drops the packets. */
