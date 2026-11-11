@@ -295,16 +295,22 @@ ifeq ($(ENABLE_BLE),1)
 CFLAGS += -DENABLE_BLE
 CFLAGS += -DBLE_DEVICE_NAME="\"$(BLE_NAME)\""
 # BLE heap size in bytes — WCH minimum is 6144 (6 KB); default was 10240.
-# The working baseline used 6 KB. Keep that default unless a specific board
-# needs more heap for BLE bring-up.
-BLE_MEMHEAP_SIZE ?= 6144
+# 8 KB covers the larger controller packet cache below with headroom for GATT
+# allocations (the ATT pool and the controller cache share this heap).
+BLE_MEMHEAP_SIZE ?= 8192
 CFLAGS += -DBLE_MEMHEAP_SIZE=$(BLE_MEMHEAP_SIZE)
 # Max BLE packet length (ATT_MTU = BLE_BUFF_MAX_LEN - 4).
 # 64 is the WCH default; fully adequate for HID keyboard/mouse reports.
 BLE_BUFF_MAX_LEN ?= 64
 CFLAGS += -DBLE_BUFF_MAX_LEN=$(BLE_BUFF_MAX_LEN)
-# Max TX packets per connection event (1 is sufficient for HID traffic).
-BLE_TX_NUM_EVENT ?= 1
+# Controller packet cache, shared by TX and RX (WCH default 5). Four TX
+# packets per event would leave the RX side a single buffer, so raise the pool.
+BLE_BUFF_NUM ?= 8
+CFLAGS += -DBLE_BUFF_NUM=$(BLE_BUFF_NUM)
+# Max TX packets per connection event. One is enough for HID reports, but it
+# also caps every notification stream (BLE-Eth, CH9329 replies) to one packet
+# per interval; four lifts that ceiling and drains ACKs sooner.
+BLE_TX_NUM_EVENT ?= 4
 CFLAGS += -DBLE_TX_NUM_EVENT=$(BLE_TX_NUM_EVENT)
 # We only use peripheral role, no central connections needed.
 CFLAGS += -DCENTRAL_MAX_CONNECTION=0
@@ -337,6 +343,7 @@ $(BUILD_CONFIG_STAMP): FORCE
 		printf 'ENABLE_OSCILLATOR=%s\n' "$(ENABLE_OSCILLATOR)"; \
 		printf 'BLE_MEMHEAP_SIZE=%s\n' "$(BLE_MEMHEAP_SIZE)"; \
 		printf 'BLE_BUFF_MAX_LEN=%s\n' "$(BLE_BUFF_MAX_LEN)"; \
+		printf 'BLE_BUFF_NUM=%s\n' "$(BLE_BUFF_NUM)"; \
 		printf 'BLE_TX_NUM_EVENT=%s\n' "$(BLE_TX_NUM_EVENT)"; \
 	} > "$@.tmp"
 	@if test ! -f "$@" || test "$$(cat "$@.tmp")" != "$$(cat "$@")"; then \

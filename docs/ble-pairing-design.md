@@ -136,7 +136,39 @@ ROM 栈自身的 bond 容量上限未公开（P2）。默认 1 意味着**这个
 
 USB 侧（ACM/CH9329 串行通路）**不加**准入：插线本身即占有证明，且必须保留它作为"BLE 把自己锁死"时的恢复路径。
 
+### 7.1 连接后立即请求加密（鼠标延迟修复，2026-11-10）
+
+M2 合入后用户反馈鼠标出现 1–2 s 延迟。根因不在报文通路（MS_REL 队列 64 条 drop-oldest、主循环每轮排空，USB EP 忙等上限 20 ms，BLE 发送 1 包/连接事件 ≈ 12.5 ms，都堆不出秒级），而在**准入闸门的上游**：
+
+1. 固件原先从不主动发起安全流程，链路在 host 第一次访问受保护属性之前一直是明文；
+2. 首连时 App 的 CCCD/FFF2 写被 ATT 以 0x0F 拒绝；
+3. iOS 对失败的 CCCD 写**不重试**，App 自己 0.5 s 后只重订阅一次，且 `connectionState` 未到 `.connected` 前 `sendTouchData` 全部丢弃。
+
+于是每次（重）连都有 0.5–2 s 的指针死窗口，正好是用户感知到的延迟。修法是让从机在链路建立后主动发起加密（Slave Security Request）：
+
+- `Peripheral_LinkEstablished` 里 `tmos_start_task(Peripheral_TaskID, SBP_SECURITY_REQ_EVT, 4)`（4 tick ≈ 2.5 ms，等连接事件稳定），[peripheral.c:947](file:///Users/txa/project/Openterface_KM/APP/peripheral.c#L947)；
+- 事件处理调 `GAPBondMgr_PeriSecurityReq(handle)`，仅在已连接且未 `LINK_ENCRYPTED` 时；已绑定链路在一个连接事件内加密，首配链路立即弹 PIN 输入，[peripheral.c:825-835](file:///Users/txa/project/Openterface_KM/APP/peripheral.c#L825-L835)；
+- `Peripheral_LinkTerminated` 里 `tmos_stop_task` 防止残留事件在下一链路误触发，[peripheral.c:979](file:///Users/txa/project/Openterface_KM/APP/peripheral.c#L979)。
+
+副作用：加密时机从"host 首次写"提前到"连上即做"，**P1b（NO_PAIRING 是否拦已绑定链路加密）从边缘前提变成必测**——满员时老手机重连必须仍能加密成功，T4 覆盖此路径。
+
 死代码清理：删 `SimpleProfile_AddService` 调用及 `gattprofile.c` 里对应的注释块。这是卫生问题，不影响安全（§1 已说明注册体是注释掉的）。
+
+### 7.2 持续拖动时的延迟：HID 报文 ACK + 链路预算（2026-11-11）
+
+§7.1 消除的是**连接瞬间**的死窗口。用户复查 iOS 客户端：连上后开头不再卡，但**持续拖动**时指针仍落后手指 1–2 s，且越拖越远。这是稳态问题，与配对准入无关（`18b3b8c` 对热路径只加了权限位和一次 `linkDB_State`），三层叠加：
+
+1. **每个 HID 报文都被 ACK**：`ble_usb_ServiceEvt` 对 BLE 来的 CH9329 命令统一开 `g_ble_ch9329_response`（[peripheral.c:1269](file:///Users/txa/project/Openterface_KM/APP/peripheral.c#L1269)），鼠标/键盘 case 无条件 `resp_mode=1`（[usbd_compostie_km.c:286](file:///Users/txa/project/Openterface_KM/APP/usbd_compostie_km.c#L286)）→ 每个移动 = 上行 11 B + 下行 7 B 通知。
+2. **出向预算只有 1 包/连接事件**：`BLE_TX_NUM_EVENT=1`、控制器缓存 5 包**收发共享**（[wchble.h:87-93](file:///Users/txa/project/Openterface_KM/LIB/wchble.h#L87-L93)）；固件申请 12.5 ms 被 iOS 拒绝（App 类配件下限 15 ms，实测多落 30 ms）→ 33–66 包/s，ACK 把预算吃满。
+3. **App 每个触摸采样发一包**：不合流、不查 `canSendWriteWithoutResponse`（[BLEManager.swift:1056](file:///Users/txa/project/Openterface_KeyCmd_iOS/KeyCmd/Managers/BLEManager.swift#L1056)），60–120 包/s 超过链路供给 → 积压在手机侧发送队列，松手后才排空。
+
+固件侧修复（2026-11-11 已实现）：
+
+- **B — HID 报告不回 ACK**：新增 `BLE_CH9329_RESP_NONE`，HID 命令（0x02/0x03/0x04/0x05）从 BLE 来时不产生任何应答；查询类命令（0x01/0x08/0x19/0x22/0x23/0x26/0x27/0x30…）仍走 BLE 应答，安全面板/改名/ECM 读取不受影响（[peripheral.h:81-96](file:///Users/txa/project/Openterface_KM/APP/include/peripheral.h#L81-L96)、[usbd_compostie_km.c:119-134](file:///Users/txa/project/Openterface_KM/APP/usbd_compostie_km.c#L119-L134)）。
+- **C — 抬链路上限**：申请区间 10→12（15 ms，[peripheral.c:66-72](file:///Users/txa/project/Openterface_KM/APP/peripheral.c#L66-L72)）；`BLE_TX_NUM_EVENT=4`；同时 `BLE_BUFF_NUM 5→8`（4 个 TX 会把共享缓存压到只剩 1 个 RX）与 `BLE_MEMHEAP_SIZE 6144→8192`（[makefile:297-312](file:///Users/txa/project/Openterface_KM/build/makefile#L297-L312)）。RAM 占用 53160/65536 = 81%。
+- 兼容性代价：依赖 HID ACK 判错的第三方客户端看不到应答（本厂 App 不依赖；`keymod-test` 需单独确认）。
+
+**未做**：App 侧仍逐采样发送，没有合流和 `peripheralIsReady` 门控。若台架仍有滞后，下一步按 ~40 Hz 累积 dx/dy 合流 + `canSendWriteWithoutResponse` 门控改客户端。
 
 ## 8. `0x22 CMD_BLE_SECURITY` 命令集
 
@@ -229,6 +261,9 @@ USB `0x22 0x02`（[peripheral.c](file:///Users/txa/project/Openterface_KM/APP/pe
 | 8 | `APP/peripheral.c` | `0x22 0x02` 实装、`0x04/0x05/0x06` 新增 | M2 | 已实现 |
 | 9 | `APP/button.c` + `APP/include/button.h`（新） | 5 s 长按 → LED 急闪 → 松手执行出厂重置 + 重启；PB8 浮空输入 | M3 | 已实现 |
 | 10 | `keymod-test` | 配对引导 + PIN 输入框、`0x22 0x03/0x04/0x05/0x06/0x02` 接入、"解除本机绑定"按钮 + iOS"忽略此设备"提示、上限 UI | M2/M3 | 未开始 |
+| 11 | `APP/peripheral.c` | 连接后 4 tick 主动 `GAPBondMgr_PeriSecurityReq` + 断开停表（消除 App 首连 0.5 s 死窗口，§7.1） | M1/M2 | 已实现 |
+| 12 | `APP/peripheral.c`、`APP/usbd_compostie_km.c`、`peripheral.h` | HID 报告（0x02/0x03/0x04/0x05）从 BLE 来时不回 ACK（`BLE_CH9329_RESP_NONE`，§7.2） | M4 | 已实现 |
+| 13 | `build/makefile`、`APP/peripheral.c` | 连接间隔 12.5→15 ms、`BLE_TX_NUM_EVENT=4`、`BLE_BUFF_NUM=8`、堆 8 KB（§7.2） | M4 | 已实现 |
 
 实现备注：新文件必须登记进 `build/APP/subdir.mk`（三个列表：`C_SRCS`、`C_DEPS`、`OBJS`），该文件是 MounRiver 生成的静态清单，不做 glob。`bluetooth` 记录页 `0x0806A000` 位于 440 KB 代码区之内，与 ECM IP 配置页同一风险：镜像必须保持在 426 KB 以内（当前 ~220 KB）。
 
@@ -247,7 +282,7 @@ USB `0x22 0x02`（[peripheral.c](file:///Users/txa/project/Openterface_KM/APP/pe
 | T1 | 未加密写 FFF2 / 写 CCCD | ATT 错误 **0x0F** INSUFFICIENT_ENCRYPT；`linkDB_State` 兜底命中 |
 | T2 | 用 666666 配对 | 成功、bond 落盘、LED 态 5、`0x22 0x03` 返回 count=1, max=1 |
 | T3 | 错 PIN 配对 | 失败断链、count 不变、LED 态 6、可重试 |
-| T4 | 配对后重启 | 已绑定手机免输入直接加密重连（验证 P1b） |
+| T4 | 配对后重启 | 已绑定手机免输入直接加密重连（验证 P1b；满员下调到 1 也要验） |
 | T5 | 占用中第二台配对 | **失败**（`NO_PAIRING` 生效） |
 | T6 | App 解绑 → 系统"忽略设备" → 新手机用 666666 配对 | 全程不需要 USB（§6.1 主路径成立） |
 | T7 | USB `0x22 0x02` | bond 清空、PIN override 清、上限回 1、666666 可配 |
@@ -262,6 +297,10 @@ USB `0x22 0x02`（[peripheral.c](file:///Users/txa/project/Openterface_KM/APP/pe
 | T16 | `0x22 0x04` 改成 123456 后重启 | 断电保持；旧 bond 不受影响，新配对应要求 123456 |
 | T17 | BOOT 键按住 5 s 后松开 | 第 5 s LED 急闪；松手后重启，`0x22 0x03` 为 count=0/max=1；旧手机"忽略设备"后可 666666 重配 |
 | T18 | BOOT 键按住 3 s 松开 | 无变化：不闪、不重启（提前松手取消） |
+| T19 | 已绑定手机重连后立即拖鼠标 | FFF1 一次订阅即成功（无 0.5 s 重试），从首帧起指针跟手；首配时 PIN 框在连接瞬间弹出 |
+| T20 | 连续拖动 10 s（iOS，ProMotion 机型） | 滞后不累积；指针与手指间距恒定在 150 ms 内；FFF1 上不再出现按移动速率刷屏的 7 B ACK |
+| T21 | BLE 上发 0x01/0x22 0x03/0x23/0x26 查询 | 应答照常（安全面板、改名、ECM 读取可用）；确认 B 只掐 HID 的 ACK |
+| T22 | B 已生效后仍有残留滞后 | 记录协商后的 connInterval（外设侧临时打印 `peripheralConnList.connInterval`）；若仍 30 ms，转 App 侧合流/流控 |
 
 ## 14. 待验证前提
 
@@ -270,7 +309,7 @@ P1、P1b 不成立则 M1 的机制需重做，开工第 0 步就该在台上验�
 | ID | 前提 | 若不成立 | 何时验 |
 |---|---|---|---|
 | P1 | ROM ATT 层真的检查属性权限的 encryption 位 | ①形同虚设，全靠②兜底 + 需改为显式 reject 并回错误码 | M1 第一件事，T1 |
-| P1b | `GAPBOND_PAIRING_MODE_NO_PAIRING` 不拦已绑定链路的加密命令 | 满员时老手机连不上 → 降级为"满员只靠广播位 + App 拒绝，固件保持 WAIT_FOR_REQ" | M2，T4/T5 |
+| P1b | `GAPBOND_PAIRING_MODE_NO_PAIRING` 不拦已绑定链路的加密命令 | 满员时老手机连不上 → 降级为"满员只靠广播位 + App 拒绝，固件保持 WAIT_FOR_REQ" | M2，T4/T5/T19（§7.1 改为连上即请求加密后升为必测） |
 | P2 | ROM bond 容量 ≥ 用户可配上限 | 上限钳位下调到实测值 | 仅当有人调到 >1，T15 |
 | P3 | `DISPLAY_ONLY` + 预设 passcode + passcodeCB=NULL 时手机侧弹 PIN 框 | 注册 passcodeCB 只做显示 | M2 第一天，T13 |
 | P4 | 密钥分发含必需 key（默认 `0x77`，`GAPBOND_PERI_KEY_DIST_LIST=0x406`）足以支持重连加密 | 调整分发 mask | M2，T4 |

@@ -37,6 +37,7 @@ extern "C" {
 #define SBP_PROCESS_BLEETH_TX_EVT 0x0080
 #define SBP_SYSTEM_RESET_EVT    0x0100
 #define SBP_PAIR_LED_EVT        0x0200
+#define SBP_SECURITY_REQ_EVT    0x0400
 
 /*********************************************************************
  * MACROS
@@ -77,16 +78,20 @@ uint8_t app_usb_notify(uint8_t *SendBuf, uint8_t l);
  */
 uint8_t Peripheral_IsCh9329CommandByte(uint8_t cmd);
 
-/*
- * Enable/disable BLE CH9329 response routing.
- * When enabled, CH9329_SendResponse will send responses via BLE notification
- * instead of USB EP3. Must be set before dispatching a CH9329 command from BLE.
- */
-void Peripheral_SetBleCh9329Response(uint8_t enable);
+/* Where CH9329_SendResponse puts a response. */
+#define BLE_CH9329_RESP_USB   0   /* USB EP3 queue (default, USB serial path) */
+#define BLE_CH9329_RESP_BLE   1   /* FFF1 notification */
+#define BLE_CH9329_RESP_NONE  2   /* dropped: HID reports over BLE get no ACK */
 
 /*
- * Check if BLE CH9329 response routing is enabled.
- * Called by CH9329_SendResponse to determine where to send the response.
+ * Select where CH9329 responses go.
+ * Must be set before dispatching a CH9329 command received from BLE.
+ */
+void Peripheral_SetBleCh9329Response(uint8_t mode);
+
+/*
+ * Read the current response routing mode.
+ * Called by CH9329_SendResponse to decide where to send the response.
  */
 uint8_t Peripheral_GetBleCh9329Response(void);
 

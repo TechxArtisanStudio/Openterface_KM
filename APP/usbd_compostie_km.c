@@ -89,8 +89,8 @@ void MCU_Sleep_Wakeup_Operate( void )
  extern uint8_t sd_card_channel_state; 
 
 /* CH9329_SendResponse enqueues the response packet instead of sending directly.
- * When BLE CH9329 response routing is enabled (via Peripheral_SetBleCh9329Response),
- * the response is sent via BLE notification instead of USB EP3 queue. */
+ * Peripheral_SetBleCh9329Response selects the path: USB EP3 queue (default),
+ * FFF1 notification, or dropped (HID reports over BLE). */
 void CH9329_SendResponse(uint8_t addr, uint8_t cmd_code, uint8_t* pdata,
                          uint8_t len, uint8_t resp_mode)
 {
@@ -117,11 +117,19 @@ void CH9329_SendResponse(uint8_t addr, uint8_t cmd_code, uint8_t* pdata,
     packet[index++] = checksum;
 
 #ifdef ENABLE_BLE
-    /* If response is for a BLE CH9329 command, send via BLE notification */
-    if (Peripheral_GetBleCh9329Response())
+    /* BLE-originated commands answer over BLE; HID reports are answered
+     * nowhere because the ACK stream would crowd out the inbound writes. */
     {
-        app_usb_notify(packet, index);
-        return;
+        uint8_t ble_resp_mode = Peripheral_GetBleCh9329Response();
+        if (ble_resp_mode == BLE_CH9329_RESP_NONE)
+        {
+            return;
+        }
+        if (ble_resp_mode == BLE_CH9329_RESP_BLE)
+        {
+            app_usb_notify(packet, index);
+            return;
+        }
     }
 #endif
 

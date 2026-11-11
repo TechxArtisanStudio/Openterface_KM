@@ -63,10 +63,13 @@
 #define DEFAULT_DISCOVERABLE_MODE            GAP_ADTYPE_FLAGS_GENERAL
 
 // Minimum connection interval (units of 1.25ms, 6=7.5ms)
-#define DEFAULT_DESIRED_MIN_CONN_INTERVAL    10
+// iOS rejects anything below 15ms for non-HID app accessories, so asking for
+// 12.5ms meant the interval request was refused and the link stayed at the
+// 30ms default — half the connection events, double the cursor lag.
+#define DEFAULT_DESIRED_MIN_CONN_INTERVAL    12
 
 // Maximum connection interval (units of 1.25ms, 100=125ms)
-#define DEFAULT_DESIRED_MAX_CONN_INTERVAL   10
+#define DEFAULT_DESIRED_MAX_CONN_INTERVAL   12
 
 // Slave latency to use parameter update
 #define DEFAULT_DESIRED_SLAVE_LATENCY        0
@@ -341,17 +344,34 @@ uint8_t Peripheral_IsCh9329CommandByte(uint8_t cmd)
     }
 }
 
+/* HID reports: keyboard, media keys, absolute/relative mouse. The client
+ * pushes these at input rate, so replying to each one would burn the
+ * peripheral's TX budget and back-pressure the inbound writes. */
+static uint8_t Peripheral_IsHidReportCommandByte(uint8_t cmd)
+{
+    switch (cmd)
+    {
+        case CMD_SEND_KB_GENERAL_DATA:
+        case CMD_SEND_KB_MEDIA_DATA:
+        case CMD_SEND_MS_ABS_DATA:
+        case CMD_SEND_MS_REL_DATA:
+            return 1;
+
+        default:
+            return 0;
+    }
+}
+
 /*********************************************************************
  * @fn      Peripheral_SetBleCh9329Response
  *
- * @brief   Enable/disable BLE CH9329 response routing.
- *          When enabled, CH9329_SendResponse sends via BLE notification.
+ * @brief   Select where CH9329 responses go (USB queue, BLE, or nowhere).
  *
- * @param   enable - 1 to enable, 0 to disable
+ * @param   mode - BLE_CH9329_RESP_USB / _BLE / _NONE
  */
-void Peripheral_SetBleCh9329Response(uint8_t enable)
+void Peripheral_SetBleCh9329Response(uint8_t mode)
 {
-    g_ble_ch9329_response = enable;
+    g_ble_ch9329_response = mode;
 }
 
 /*********************************************************************
@@ -822,6 +842,18 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
         return (events ^ SBP_PAIR_LED_EVT);
     }
 
+    if(events & SBP_SECURITY_REQ_EVT)
+    {
+        /* Slave Security Request: encrypts a bonded link right after connect
+         * and starts pairing (PIN entry) on a first, unpaired connection. */
+        if(peripheralConnList.connHandle != GAP_CONNHANDLE_INIT &&
+           !linkDB_State(peripheralConnList.connHandle, LINK_ENCRYPTED))
+        {
+            (void)GAPBondMgr_PeriSecurityReq(peripheralConnList.connHandle);
+        }
+        return (events ^ SBP_SECURITY_REQ_EVT);
+    }
+
     // Discard unknown events
     return 0;
 }
@@ -925,6 +957,15 @@ static void Peripheral_LinkEstablished(gapRoleEvent_t *pEvent)
         // Start read rssi
         tmos_start_task(Peripheral_TaskID, SBP_READ_RSSI_EVT, SBP_READ_RSSI_EVT_PERIOD);
 
+        /* Require encryption from our side as soon as the link exists. Without
+         * this the link stays plaintext until the host's first FFF2/CCCD access
+         * bounces with ATT 0x0F, and the host does not necessarily retry: iOS
+         * drops the pending CCCD write (the app re-subscribes once after 0.5 s),
+         * so every mouse report in that window is lost. Asking here encrypts a
+         * bonded link within one connection event and raises the PIN prompt
+         * immediately on an unpaired first connection. */
+        tmos_start_task(Peripheral_TaskID, SBP_SECURITY_REQ_EVT, 4);
+
 
         // Auto-connect to default target if configured
         if (DefaultTargetConfig_IsEnabled()) {
@@ -955,6 +996,7 @@ static void Peripheral_LinkTerminated(gapRoleEvent_t *pEvent)
         tmos_stop_task(Peripheral_TaskID, SBP_PERIODIC_EVT);
         tmos_stop_task(Peripheral_TaskID, SBP_READ_RSSI_EVT);
         tmos_stop_task(Peripheral_TaskID, SBP_PROCESS_BLEETH_TX_EVT);
+        tmos_stop_task(Peripheral_TaskID, SBP_SECURITY_REQ_EVT);
 
         /* Drop tunnel state and any queued notifications for the dead link. */
         BLE_Eth_OnLinkLost();
@@ -1220,10 +1262,15 @@ void ble_usb_ServiceEvt(uint16_t connection_handle, ble_usb_evt_t *p_evt)
             }
             else if (has_frame_header && Peripheral_IsCh9329CommandByte(data[3]))
             {
-                /* CH9329 command from BLE — route response via BLE notification */
-                Peripheral_SetBleCh9329Response(1);
+                /* CH9329 command from BLE. Only commands that carry state get
+                 * a reply: an ACK per HID report competes with the inbound
+                 * stream for the TX slot of every connection event, which is
+                 * what made the iOS cursor trail the finger by seconds. */
+                Peripheral_SetBleCh9329Response(Peripheral_IsHidReportCommandByte(data[3])
+                                                    ? BLE_CH9329_RESP_NONE
+                                                    : BLE_CH9329_RESP_BLE);
                 CH9329_DataParser((uint8_t *)data, len);
-                Peripheral_SetBleCh9329Response(0);
+                Peripheral_SetBleCh9329Response(BLE_CH9329_RESP_USB);
             }
             else
             {
@@ -1452,7 +1499,7 @@ void Peripheral_SecurityCommand(uint8_t addr, uint8_t cmd_code, uint8_t *pdata, 
             return;
 
         case 0x05:  /* Set slot limit — USB only, it changes the access model */
-            if (Peripheral_GetBleCh9329Response()) {
+            if (Peripheral_GetBleCh9329Response() != BLE_CH9329_RESP_USB) {
                 status = STATUS_ERR_PARAM;
                 CH9329_SendResponse(addr, cmd_code, &status, 1, 0);
                 return;
