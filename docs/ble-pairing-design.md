@@ -37,7 +37,7 @@ bonding 参数名义上开着，实际任何路人手机都能操控设备。逐
 
 ## 3. 设计原则
 
-1. **PIN = 信任根**。初始 6 位 PIN `666666`，可改为私有 PIN；`MITM=TRUE` + `GAPBOND_IO_CAP_DISPLAY_ONLY`。设备无屏无键，PIN 只从手机侧输入，固件永不通过 BLE 回传 PIN。
+1. **PIN = 信任根**。初始 6 位 PIN `666666`，可改为私有 PIN；`MITM=TRUE` + `GAPBOND_IO_CAP_DISPLAY_ONLY`。设备无屏无键，PIN 只从手机侧输入；设置时不回显，仅允许经 USB 或已加密 BLE 用 `0x22 0x07` 显式读回（2026-11-12 起，见 §8）——读回只对已绑定的现任手机开放，未加密链路拿不到。
 2. **准入压在协议栈层**，不靠藏广播、不靠应用层判断。应用层判断只作纵深兜底（因为 ROM 行为不可读，见 P1）。
 3. **UI 极简**：无配对窗口、无短按、无多色 LED。绑定槽空则随时可配，占用则拒绝。
 4. **改安全参数分级授权**：绑定上限只走 USB（它决定访问模型）；改 PIN 可以走 USB 或已加密 BLE（现任手机自己）；已认证 BLE 链路还能解绑自己。
@@ -182,6 +182,7 @@ M2 合入后用户反馈鼠标出现 1–2 s 延迟。根因不在报文通路�
 | `0x04` | **新**：设置 PIN override | 6 字节 ASCII 数字，校验 0..999999 | USB 或加密 BLE，**不回显 PIN** |
 | `0x05` | **新**：设置绑定上限 | 1 字节，钳位 1..4 | **仅 USB**（原则 4） |
 | `0x06` | **新**：读绑定上限 | 应答 `[status, max_bonds]` | USB 或加密 BLE |
+| `0x07` | **新**（2026-11-12）：读有效 PIN | 应答 `[status]` + 6 字节 ASCII（override 或 `666666`） | USB 或加密 BLE；旧固件返回 `E2` |
 
 注意与 BLE-Eth ECM IP 命令的字节复用消歧规则：`0x22 [0x03]` 保留给 CH9329 bond 查询，`0x22 [0x04]+9/13/21B` 等形状走 BLE-Eth（[peripheral.c:201-234](file:///Users/txa/project/Openterface_KM/APP/peripheral.c#L201-L234)）。新增 0x04/0x05/0x06 单字节子命令必须复核不与 `Peripheral_IsBleEthEcmIpFrame` 的形状判据冲突——0x04 已被 ECM "reset to defaults" 占用，故 PIN 子命令的判据必须靠长度区分（PIN 是 6 字节 ASCII，非 9/13/21）。这是实现时的具体坑，测试矩阵 T11 覆盖。
 

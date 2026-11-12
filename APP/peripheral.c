@@ -314,8 +314,9 @@ uint8_t Peripheral_IsCh9329CommandByte(uint8_t cmd)
                                         *        continuous-TX test mode (extension). */
 
         case CMD_BLE_SECURITY:         /* 0x22 - Manage BLE security / pairing:
-                                        *        open pairing window, erase bonds,
-                                        *        or query bond count (extension). */
+                                        *        erase bonds, query bond count,
+                                        *        set or read the pairing PIN
+                                        *        (extension). */
 
         case CMD_BLE_SET_NAME:         /* 0x23 - Set BLE device name (persisted to
                                         *        Flash) or reset to factory default
@@ -1435,7 +1436,7 @@ int RingMem_Protection(uint8_t enable)
  */
 void Peripheral_SecurityCommand(uint8_t addr, uint8_t cmd_code, uint8_t *pdata, uint8_t data_len)
 {
-    uint8_t response[4];
+    uint8_t response[8];
     uint8_t status = STATUS_SUCCESS;
     uint8_t bond_count = 0;
     uint8_t max_bonds;
@@ -1526,6 +1527,16 @@ void Peripheral_SecurityCommand(uint8_t addr, uint8_t cmd_code, uint8_t *pdata, 
             response[0] = STATUS_SUCCESS;
             response[1] = BLE_PairConfig_GetMaxBonds();
             CH9329_SendResponse(addr, cmd_code, response, 2, 1);
+            return;
+
+        case 0x07:  /* Read the effective PIN as six ASCII digits */
+            pin = BLE_PairConfig_GetEffectivePin();
+            response[0] = STATUS_SUCCESS;
+            for (i = 0; i < 6; i++) {
+                response[6 - i] = (uint8_t)('0' + (pin % 10u));
+                pin /= 10u;
+            }
+            CH9329_SendResponse(addr, cmd_code, response, 7, 1);
             return;
 
         default:
