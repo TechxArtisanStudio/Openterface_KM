@@ -2,7 +2,7 @@
 
 - 分支：`feature/ble-pairing-security`
 - 基线：`main` @ `1ee6c00`
-- 适用固件：KeyMod（`BOARD_VERSION=3`）、KVM-GO（`BOARD_VERSION=1`）等 `ENABLE_BLE` 机型
+- 适用固件：KeyMod（`BOARD_VERSION=3`）等 `ENABLE_BLE` 机型；KVM-GO 当前发布版本不含蓝牙
 - 状态：**M1 + M2 + 按键长按已实现**（见 §12）；M3 只剩 App 侧工作；§14 的 P1/P1b/P3 仍需台架验
 - 决策沿革：2026-11-03 定 PIN 模型与"无配对窗口"原则；2026-11-09 上限从 4 改为 **1**（用户："一台手机更安全"），同日决定上限**改为可配置项存 Flash**，单绑定由此从硬约束变成默认档位；2026-11-10 初始 PIN 定为**全设备统一 666666**（用户要求），并开始实现
 
