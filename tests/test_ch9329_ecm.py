@@ -569,6 +569,7 @@ def _send_ecm_frames_ssh(
     ssh_password: str | None = None,
     ssh_key: str | None = None,
     target_iface: str = "eth0",
+    use_sudo: bool = False,
     timeout_ms: int,
     verbose: bool,
     expect_response: bool = True,
@@ -595,8 +596,8 @@ frames = [
 
 iface = "{target_iface}"
 timeout_ms = {timeout_ms}
-expect_response = {str(expect_response).lower()}
-verbose = {str(verbose).lower()}
+expect_response = {str(expect_response)}
+verbose = {str(verbose)}
 
 sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0003))
 sock.bind((iface, 0))
@@ -642,8 +643,16 @@ sock.close()
         if ssh_password:
             ssh_cmd = ["sshpass", "-p", ssh_password] + ssh_cmd
 
+        # Encode the script as base64 to avoid shell escaping issues
+        import base64
+        script_b64 = base64.b64encode(remote_script.encode()).decode()
+
+        # Build the remote command with optional sudo
+        python_cmd = "sudo python3" if use_sudo else "python3"
+        full_cmd = ssh_cmd + [f"echo '{script_b64}' | base64 -d | {python_cmd}"]
+
         result = subprocess.run(
-            ssh_cmd + [remote_script],
+            full_cmd,
             capture_output=True,
             text=True,
             timeout=timeout_ms / 1000.0 + 5,
@@ -806,6 +815,8 @@ def main():
     ssh_grp.add_argument("--ssh-key", type=str, help="Path to SSH private key.")
     ssh_grp.add_argument("--ssh-iface", type=str, default="eth0",
                          help="Remote interface to send frames from (default: eth0).")
+    ssh_grp.add_argument("--ssh-sudo", action="store_true",
+                         help="Run remote script with sudo (required for raw sockets).")
 
     # USB work mode convenience commands
     mode_grp = parser.add_argument_group("USB work mode (cmd 0x30)")
@@ -866,6 +877,7 @@ def main():
             ssh_password=args.ssh_password,
             ssh_key=args.ssh_key,
             target_iface=args.ssh_iface,
+            use_sudo=args.ssh_sudo,
             timeout_ms=args.timeout,
             verbose=args.verbose,
             expect_response=expect_response,
