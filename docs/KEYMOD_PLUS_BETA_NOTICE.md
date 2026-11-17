@@ -82,6 +82,51 @@ When reporting Bluetooth-related issues, please mention:
 - Other 2.4 GHz devices nearby (WiFi, microwaves, etc.)
 - Whether the issue persists when devices are < 1 meter apart
 
+## Beta Firmware Release Strategy
+
+### Important: No Official Release
+
+The `keymod-plus-beta` firmware is **NOT officially released** through the standard release channels. This is intentional to **avoid confusion** with production unit users who should use the standard `keymod-plus` or `main` branch firmware.
+
+### How to Get Beta Firmware
+
+Beta firmware builds are available exclusively through **GitHub Actions** build artifacts. Every commit to the `keymod-plus-beta` branch triggers an automated build.
+
+**Steps to download the latest beta firmware:**
+
+1. Go to the GitHub Actions page for the `keymod-plus-beta` branch:
+   ```
+   https://github.com/TechxArtisanStudio/Openterface_KM/actions?query=branch%3Akeymod-plus-beta
+   ```
+
+2. Click on the latest workflow run (the most recent build at the top).
+
+3. Scroll down to the **Artifacts** section at the bottom of the page.
+
+4. Download the firmware artifact (usually named something like `firmware-beta` or similar).
+
+5. Extract the downloaded archive and flash the firmware to your beta unit.
+
+**Example build:**
+- https://github.com/TechxArtisanStudio/Openterface_KM/actions/runs/44035133047
+
+### Why GitHub Actions Only?
+
+- **Keeps beta separate from production**: Production users won't accidentally download beta firmware
+- **Always up-to-date**: Each commit triggers a new build with the latest features and fixes
+- **Traceable**: Each build is linked to a specific commit hash for debugging
+- **Easy access**: Beta testers can always find the latest build without waiting for official releases
+
+### Staying Updated
+
+To get the latest beta features and fixes:
+
+1. **Watch the repository** on GitHub to receive notifications
+2. **Check GitHub Actions** periodically for new builds on the `keymod-plus-beta` branch
+3. **Report issues** when you find them — this helps us improve both beta and production firmware
+
+---
+
 ## Production Release
 
 Production Keymod-Plus units will:
@@ -89,10 +134,12 @@ Production Keymod-Plus units will:
 - Meet full Bluetooth specification for range and signal strength
 - Use the standard `keymod-plus` or `main` branch firmware
 - **Not** have the 5–10 dB signal penalty
+- Be available through official release channels
 
 ---
 
 **Branch:** `keymod-plus-beta`  
 **Target Audience:** Official Keymod-Plus Beta Testers Only  
 **Hardware:** Early R&D Prototype Units (No External BT Crystal)  
+**Firmware Access:** GitHub Actions builds only (no official release)  
 **Date:** November 2026
