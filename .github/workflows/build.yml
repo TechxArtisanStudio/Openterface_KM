@@ -36,7 +36,9 @@ env:
   # The per-board flag table lives in build/makefile (PRODUCT=kvmgo|minikvm|
   # keymod-plus|keymod-mini). This is the only knob left here, and it can only
   # turn BLE off — it never turns BLE on for a product that ships without it.
-  BLE_OVERRIDE: ${{ inputs.enable_ble == '0' && ' ENABLE_BLE=0' || '' }}
+  # For push/pull_request events, inputs.enable_ble is undefined, so we only
+  # apply the override for workflow_dispatch/workflow_call events.
+  BLE_OVERRIDE: ${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call') && inputs.enable_ble == '0' && ' ENABLE_BLE=0' || '' }}
 
 jobs:
   build:
