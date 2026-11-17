@@ -121,20 +121,40 @@ def build_ch9329_keyboard(modifier: int = 0, keys: list[int] | None = None) -> b
 
 
 def build_ch9329_media(modifier: int = 0) -> bytes:
-    """Build a CH9329 media-key report (cmd 0x03)."""
-    return build_ch9329_frame(0x00, CH9329_CMD_KB_MEDIA, bytes([modifier, 0]))
+    """Build a CH9329 media-key report (cmd 0x03).
+
+    modifier is the media key bitmap (0x02 = Consumer Control).
+    Format: [report_id, byte1, byte2, byte3]
+    - report_id=0x01 (ACPI): 2 bytes [0x01, acpi_code]
+    - report_id=0x02 (Consumer): 4 bytes [0x02, byte1, byte2, byte3]
+    - report_id=0x03 (Apple): 2 bytes [0x03, brightness_code]
+    """
+    if modifier == 0x02:
+        # Consumer Control: 4 bytes
+        return build_ch9329_frame(0x00, CH9329_CMD_KB_MEDIA, bytes([0x02, 0x01, 0x00, 0x00]))  # Play/Pause
+    else:
+        # Default: ACPI key (2 bytes)
+        return build_ch9329_frame(0x00, CH9329_CMD_KB_MEDIA, bytes([0x01, modifier & 0xFF]))
 
 
 def build_ch9329_abs_mouse(buttons: int = 0, x: int = 0, y: int = 0) -> bytes:
     """Build a CH9329 absolute mouse report (cmd 0x04)."""
-    payload = struct.pack("<BHH", buttons & 0x07, x & 0xFFFF, y & 0xFFFF)
+    payload = struct.pack(
+        "<BBHHB",
+        0x00,  # Reserved byte (data[0])
+        buttons & 0x07,
+        x & 0xFFFF,
+        y & 0xFFFF,
+        0x00,  # Wheel (data[6])
+    )
     return build_ch9329_frame(0x00, CH9329_CMD_MS_ABS, payload)
 
 
 def build_ch9329_rel_mouse(buttons: int = 0, dx: int = 0, dy: int = 0, wheel: int = 0) -> bytes:
     """Build a CH9329 relative mouse report (cmd 0x05)."""
     payload = struct.pack(
-        "<BbbB",
+        "<BBbbB",
+        0x00,  # Reserved byte (data[0])
         buttons & 0x07,
         dx & 0xFF if dx >= 0 else -((-dx) & 0xFF),
         dy & 0xFF if dy >= 0 else -((-dy) & 0xFF),
