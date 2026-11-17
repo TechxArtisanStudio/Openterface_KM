@@ -116,7 +116,7 @@ def build_ch9329_keyboard(modifier: int = 0, keys: list[int] | None = None) -> b
     payload = bytes([modifier, 0])  # modifier + reserved
     payload += bytes(keys[:6])
     payload += bytes(max(0, 6 - len(keys[:6])))  # pad key slots to 6
-    payload += bytes(2)  # trailing reserved padding (CH9329 expects 10-byte payload)
+    # Total: 2 + 6 = 8 bytes (standard CH9329 keyboard payload)
     return build_ch9329_frame(0x00, CH9329_CMD_KB_GENERAL, payload)
 
 
