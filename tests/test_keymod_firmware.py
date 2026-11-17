@@ -94,7 +94,6 @@ def build_keyboard(modifier: int = 0, keys: "Optional[list]" = None) -> bytes:
     payload = bytes([modifier & 0xFF, 0x00])
     payload += bytes(keys[:6])
     payload += bytes(max(0, 6 - len(keys[:6])))
-    payload += bytes(2)  # trailing reserved
     return build_ch9329(0x00, CH9329_CMD_KB_GENERAL, payload)
 
 
@@ -115,7 +114,8 @@ def build_abs_mouse(buttons: int = 0, x: int = 0, y: int = 0, wheel: int = 0) ->
 def build_rel_mouse(buttons: int = 0, dx: int = 0, dy: int = 0, wheel: int = 0) -> bytes:
     """Build CH9329 relative mouse report (cmd 0x05)."""
     payload = struct.pack(
-        "<BbbB",
+        "<BBbbB",
+        0,  # reserved
         buttons & 0x07,
         dx if dx >= 0 else -((-dx) & 0xFF),
         dy if dy >= 0 else -((-dy) & 0xFF),
@@ -405,7 +405,7 @@ class TestCH9329Protocol:
 
     def test_keyboard_single_key(self):
         frame = build_keyboard(0, [0x04])  # 'a'
-        assert len(frame) == 16  # 5 header + 10 payload + 1 checksum
+        assert frame == bytes.fromhex("57ab000208000004000000000010")
         parsed = parse_ch9329(frame)
         assert parsed is not None
         assert parsed["cmd"] == CH9329_CMD_KB_GENERAL
@@ -415,24 +415,28 @@ class TestCH9329Protocol:
     def test_keyboard_modifier_bits(self):
         # Ctrl+Shift+A
         frame = build_keyboard(0x03, [0x04])
+        assert frame == bytes.fromhex("57ab000208030004000000000013")
         parsed = parse_ch9329(frame)
         assert parsed["payload"][0] == 0x03
 
     def test_keyboard_six_keys(self):
         keys = [0x04, 0x05, 0x06, 0x07, 0x08, 0x09]
         frame = build_keyboard(0, keys)
+        assert frame == bytes.fromhex("57ab000208000004050607080933")
         parsed = parse_ch9329(frame)
         assert parsed["payload"][2:8] == bytes(keys)
 
     def test_keyboard_release(self):
         frame = build_keyboard()
         parsed = parse_ch9329(frame)
-        assert parsed["payload"] == bytes(10)
+        assert frame == bytes.fromhex("57ab00020800000000000000000c")
+        assert parsed["payload"] == bytes(8)
 
     def test_keyboard_max_six_keys_truncates(self):
         """Only first 6 keys should be sent."""
         keys = [0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B]
         frame = build_keyboard(0, keys)
+        assert frame == bytes.fromhex("57ab000208000004050607080933")
         parsed = parse_ch9329(frame)
         assert parsed["payload"][2:8] == bytes(keys[:6])
 
@@ -460,6 +464,7 @@ class TestCH9329Protocol:
 
     def test_abs_mouse_basic(self):
         frame = build_abs_mouse(1, 100, 200)
+        assert frame == bytes.fromhex("57ab00040700016400c800003a")
         parsed = parse_ch9329(frame)
         assert parsed["cmd"] == CH9329_CMD_MS_ABS
         assert len(parsed["payload"]) == 7  # 7-byte payload per protocol
@@ -495,31 +500,36 @@ class TestCH9329Protocol:
 
     def test_rel_mouse_basic(self):
         frame = build_rel_mouse(0, 10, -5, 0)
+        assert frame == bytes.fromhex("57ab00050500000afb0011")
         parsed = parse_ch9329(frame)
         assert parsed["cmd"] == CH9329_CMD_MS_REL
-        dx = struct.unpack("<b", parsed["payload"][1:2])[0]
-        dy = struct.unpack("<b", parsed["payload"][2:3])[0]
+        dx = struct.unpack("<b", parsed["payload"][2:3])[0]
+        dy = struct.unpack("<b", parsed["payload"][3:4])[0]
         assert dx == 10
         assert dy == -5
 
     def test_rel_mouse_with_wheel(self):
         frame = build_rel_mouse(0, 0, 0, 3)
+        assert frame == bytes.fromhex("57ab00050500000000030f")
         parsed = parse_ch9329(frame)
-        wheel = parsed["payload"][3]
+        wheel = parsed["payload"][4]
         assert wheel == 3
 
     def test_rel_mouse_negative_movement(self):
         frame = build_rel_mouse(0, -128, -128, 0)
+        assert frame == bytes.fromhex("57ab00050500008080000c")
         parsed = parse_ch9329(frame)
-        dx = struct.unpack("<b", parsed["payload"][1:2])[0]
-        dy = struct.unpack("<b", parsed["payload"][2:3])[0]
+        dx = struct.unpack("<b", parsed["payload"][2:3])[0]
+        dy = struct.unpack("<b", parsed["payload"][3:4])[0]
         assert dx == -128
         assert dy == -128
 
     def test_rel_mouse_buttons(self):
         frame = build_rel_mouse(3, 0, 0, 0)  # left+right click
+        assert frame == bytes.fromhex("57ab00050500030000000f")
         parsed = parse_ch9329(frame)
-        assert parsed["payload"][0] == 3
+        assert parsed["payload"][0] == 0  # reserved
+        assert parsed["payload"][1] == 3
 
     # --- USB Work Mode (cmd 0x30) ---
 
