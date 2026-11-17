@@ -48,10 +48,16 @@ ENABLE_BLE ?= 1
 USE_LTO ?= 1
 ENABLE_OSCILLATOR ?= 0
 USB_WORK_MODE ?= hid_ecm_bridge
+else ifeq ($(PRODUCT),keymod-plus-beta)
+BOARD_VERSION ?= 3
+ENABLE_BLE ?= 1
+USE_LTO ?= 1
+ENABLE_OSCILLATOR ?= 0
+USB_WORK_MODE ?= hid_acm_ecm_bridge
 else ifneq ($(PRODUCT),)
-$(error Unknown PRODUCT '$(PRODUCT)' — use kvmgo, minikvm, keymod-plus or keymod-mini)
+$(error Unknown PRODUCT '$(PRODUCT)' — use kvmgo, minikvm, keymod-plus, keymod-plus-beta or keymod-mini)
 else
-$(warning PRODUCT is not set — falling back to the defaults below, which is a KVM-GO-era hid_acm composite and not any shipping image. Build with PRODUCT=kvmgo|minikvm|keymod-plus|keymod-mini.)
+$(warning PRODUCT is not set — falling back to the defaults below, which is a KVM-GO-era hid_acm composite and not any shipping image. Build with PRODUCT=kvmgo|minikvm|keymod-plus|keymod-plus-beta|keymod-mini.)
 endif
 
 # Feature flags — define BEFORE includes so subdir.mk files can use them
@@ -233,6 +239,15 @@ keymod-plus:
 	@cp openterface-km-firmware.hex openterface-km-firmware-keymod-plus.hex
 	@echo "Built: openterface-km-firmware-keymod-plus (HID+ACM+ECM bridge, osc=on)"
 
+# KeyMod Plus Beta — same as keymod-plus but with internal RC oscillator (no external crystal)
+keymod-plus-beta:
+	$(MAKE) --no-print-directory PRODUCT=keymod-plus-beta
+	@riscv-none-embed-objcopy -O binary "openterface-km-firmware.elf" "openterface-km-firmware.bin"
+	@cp openterface-km-firmware.elf openterface-km-firmware-keymod-plus-beta.elf
+	@cp openterface-km-firmware.bin openterface-km-firmware-keymod-plus-beta.bin
+	@cp openterface-km-firmware.hex openterface-km-firmware-keymod-plus-beta.hex
+	@echo "Built: openterface-km-firmware-keymod-plus-beta (HID+ACM+ECM bridge, osc=off)"
+
 # KeyMod Mini build configuration (BOARD_VERSION=3, no CDC-ACM serial)
 keymod-mini:
 	$(MAKE) --no-print-directory PRODUCT=keymod-mini
@@ -383,7 +398,7 @@ clean:
 
 secondary-outputs: $(SECONDARY_FLASH) $(SECONDARY_LIST) $(SECONDARY_SIZE)
 
-.PHONY: all clean dependents bin flash probe FORCE keymod-plus keymod-mini kvmgo minikvm
+.PHONY: all clean dependents bin flash probe FORCE keymod-plus keymod-plus-beta keymod-mini kvmgo minikvm
 
 FORCE:
 
