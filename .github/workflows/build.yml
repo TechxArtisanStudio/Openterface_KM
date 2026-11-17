@@ -194,6 +194,32 @@ jobs:
         Copy-Item "${{ env.BUILD_DIR }}\openterface-km-firmware.map" "${{ env.OUTPUT_DIR }}\openterface-km-firmware-keymod-mini.map"
         Copy-Item "${{ env.BUILD_DIR }}\openterface-km-firmware.siz" "${{ env.OUTPUT_DIR }}\openterface-km-firmware-keymod-mini.siz"
 
+    - name: Build KeyMod Plus Beta (version 3, internal RC oscillator)
+      run: |
+        echo "Building KeyMod Plus Beta..."
+
+        # Build
+        cd build
+        $env:PATH = "C:\tools\risc-none-embed-gcc\bin;" + $env:PATH
+        $env:RISC_COMPILER_PATH = "C:\tools\risc-none-embed-gcc"
+        make clean
+        make --no-print-directory PRODUCT=keymod-plus-beta show-config
+        make -j4 PRODUCT=keymod-plus-beta${{ env.BLE_OVERRIDE }} all
+        if ($LASTEXITCODE -ne 0) {
+          Write-Host "✗ KeyMod Plus Beta build failed with exit code $LASTEXITCODE" -ForegroundColor Red
+          exit 1
+        }
+        riscv-none-embed-objcopy -O binary "openterface-km-firmware.elf" "openterface-km-firmware.bin"
+        riscv-none-embed-size --format=berkeley openterface-km-firmware.elf | Tee-Object -FilePath openterface-km-firmware.siz
+        Write-Host "✓ KeyMod Plus Beta build succeeded" -ForegroundColor Green
+
+        # Copy artifact with version suffix to output directory
+        Copy-Item "${{ env.BUILD_DIR }}\openterface-km-firmware.hex" "${{ env.OUTPUT_DIR }}\openterface-km-firmware-keymod-plus-beta.hex"
+        Copy-Item "${{ env.BUILD_DIR }}\openterface-km-firmware.bin" "${{ env.OUTPUT_DIR }}\openterface-km-firmware-keymod-plus-beta.bin"
+        Copy-Item "${{ env.BUILD_DIR }}\openterface-km-firmware.elf" "${{ env.OUTPUT_DIR }}\openterface-km-firmware-keymod-plus-beta.elf"
+        Copy-Item "${{ env.BUILD_DIR }}\openterface-km-firmware.map" "${{ env.OUTPUT_DIR }}\openterface-km-firmware-keymod-plus-beta.map"
+        Copy-Item "${{ env.BUILD_DIR }}\openterface-km-firmware.siz" "${{ env.OUTPUT_DIR }}\openterface-km-firmware-keymod-plus-beta.siz"
+
     - name: Upload KVMGo firmware
       uses: actions/upload-artifact@v4
       with:
@@ -233,4 +259,14 @@ jobs:
         path: |
           ${{ env.OUTPUT_DIR }}\openterface-km-firmware-keymod-mini.hex
           ${{ env.OUTPUT_DIR }}\openterface-km-firmware-keymod-mini.bin
+
+    - name: Upload KeyMod Plus Beta firmware (internal RC oscillator)
+      uses: actions/upload-artifact@v4
+      with:
+        name: openterface-km-firmware-keymod-plus-beta
+        if-no-files-found: error
+        retention-days: 7
+        path: |
+          ${{ env.OUTPUT_DIR }}\openterface-km-firmware-keymod-plus-beta.hex
+          ${{ env.OUTPUT_DIR }}\openterface-km-firmware-keymod-plus-beta.bin
 
