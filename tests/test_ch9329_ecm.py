@@ -6,7 +6,7 @@ are IPv4/TCP and contain valid CH9329 frames, routing them into the CH9329
 command parser.  This script builds the full Ethernet / IPv4 / TCP wrapper
 around CH9329 frames so the firmware recognises them as control frames.
 
-Two transport modes are supported:
+Three transport modes are supported:
 
 1. ``--usb-direct`` — uses pyusb/libusb to write raw Ethernet frames to the
    CDC-ECM bulk OUT endpoint.  Works on stock Windows (install libusb via
@@ -14,6 +14,9 @@ Two transport modes are supported:
 
 2. ``--iface <name>`` — sends raw Ethernet frames through a bound CDC-ECM
    network interface.  Requires Linux/macOS or an ECM-capable Windows driver.
+
+3. ``--ssh`` — sends frames via SSH to a remote machine that then transmits
+   them on the specified interface.  Useful for testing from a remote host.
 
 Examples::
 
@@ -30,6 +33,10 @@ Examples::
 
     # Via a CDC-ECM NIC (Linux / ECM-capable driver)
     python tools/test_ch9329_ecm.py --iface usb0 --read
+
+    # Via SSH to a remote machine
+    python tools/test_ch9329_ecm.py --ssh --ssh-host 192.168.1.100 --ssh-user pi --keyboard a
+    python tools/test_ch9329_ecm.py --ssh --ssh-host 192.168.1.100 --ssh-user pi --ssh-key ~/.ssh/id_rsa --keyboard a
 """
 
 from __future__ import annotations
@@ -37,6 +44,7 @@ from __future__ import annotations
 import argparse
 import socket
 import struct
+import subprocess
 import sys
 import time
 
@@ -116,25 +124,45 @@ def build_ch9329_keyboard(modifier: int = 0, keys: list[int] | None = None) -> b
     payload = bytes([modifier, 0])  # modifier + reserved
     payload += bytes(keys[:6])
     payload += bytes(max(0, 6 - len(keys[:6])))  # pad key slots to 6
-    payload += bytes(2)  # trailing reserved padding (CH9329 expects 10-byte payload)
+    # Total: 2 + 6 = 8 bytes (standard CH9329 keyboard payload)
     return build_ch9329_frame(0x00, CH9329_CMD_KB_GENERAL, payload)
 
 
 def build_ch9329_media(modifier: int = 0) -> bytes:
-    """Build a CH9329 media-key report (cmd 0x03)."""
-    return build_ch9329_frame(0x00, CH9329_CMD_KB_MEDIA, bytes([modifier, 0]))
+    """Build a CH9329 media-key report (cmd 0x03).
+
+    modifier is the media key bitmap (0x02 = Consumer Control).
+    Format: [report_id, byte1, byte2, byte3]
+    - report_id=0x01 (ACPI): 2 bytes [0x01, acpi_code]
+    - report_id=0x02 (Consumer): 4 bytes [0x02, byte1, byte2, byte3]
+    - report_id=0x03 (Apple): 2 bytes [0x03, brightness_code]
+    """
+    if modifier == 0x02:
+        # Consumer Control: 4 bytes
+        return build_ch9329_frame(0x00, CH9329_CMD_KB_MEDIA, bytes([0x02, 0x01, 0x00, 0x00]))  # Play/Pause
+    else:
+        # Default: ACPI key (2 bytes)
+        return build_ch9329_frame(0x00, CH9329_CMD_KB_MEDIA, bytes([0x01, modifier & 0xFF]))
 
 
 def build_ch9329_abs_mouse(buttons: int = 0, x: int = 0, y: int = 0) -> bytes:
     """Build a CH9329 absolute mouse report (cmd 0x04)."""
-    payload = struct.pack("<BHH", buttons & 0x07, x & 0xFFFF, y & 0xFFFF)
+    payload = struct.pack(
+        "<BBHHB",
+        0x00,  # Reserved byte (data[0])
+        buttons & 0x07,
+        x & 0xFFFF,
+        y & 0xFFFF,
+        0x00,  # Wheel (data[6])
+    )
     return build_ch9329_frame(0x00, CH9329_CMD_MS_ABS, payload)
 
 
 def build_ch9329_rel_mouse(buttons: int = 0, dx: int = 0, dy: int = 0, wheel: int = 0) -> bytes:
     """Build a CH9329 relative mouse report (cmd 0x05)."""
     payload = struct.pack(
-        "<BbbB",
+        "<BBbbB",
+        0x00,  # Reserved byte (data[0])
         buttons & 0x07,
         dx & 0xFF if dx >= 0 else -((-dx) & 0xFF),
         dy & 0xFF if dy >= 0 else -((-dy) & 0xFF),
@@ -529,6 +557,134 @@ def _send_ecm_frames_iface(
 
 
 # ---------------------------------------------------------------------------
+# Transport: SSH to remote machine that sends CH9329 frames
+# ---------------------------------------------------------------------------
+
+def _send_ecm_frames_ssh(
+    frames: list[bytes],
+    *,
+    ssh_host: str,
+    ssh_user: str,
+    ssh_port: int = 22,
+    ssh_password: str | None = None,
+    ssh_key: str | None = None,
+    target_iface: str = "eth0",
+    use_sudo: bool = False,
+    timeout_ms: int,
+    verbose: bool,
+    expect_response: bool = True,
+) -> list[dict]:
+    """Send CH9329 frames via SSH to a remote machine.
+
+    The remote machine must have the test script and send the frames
+    using raw sockets on the specified interface.
+    """
+    responses = []
+
+    # Build the remote command that will send the frames
+    # We'll use Python on the remote machine to send raw frames
+    remote_script = '''
+import socket
+import sys
+import time
+
+frames = [
+'''
+    for frame in frames:
+        remote_script += f'    bytes.fromhex("{frame.hex()}"),\n'
+    remote_script += f''']
+
+iface = "{target_iface}"
+timeout_ms = {timeout_ms}
+expect_response = {str(expect_response)}
+verbose = {str(verbose)}
+
+sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0003))
+sock.bind((iface, 0))
+
+for frame in frames:
+    if verbose:
+        print(f"TX {{len(frame)}} bytes: {{frame.hex(' ')}}")
+    sock.send(frame)
+    time.sleep(0.05)
+
+if expect_response:
+    sock.settimeout(timeout_ms / 1000.0)
+    try:
+        raw = sock.recv(1514)
+        if verbose:
+            print(f"RX {{len(raw)}} bytes: {{raw.hex(' ')}}")
+        # Output the raw response as hex for parsing
+        print(f"RESPONSE:{{raw.hex()}}")
+    except socket.timeout:
+        if verbose:
+            print("No response from device (timeout).")
+
+sock.close()
+'''
+
+    # Build SSH command
+    ssh_cmd = ["ssh"]
+    if ssh_key:
+        ssh_cmd.extend(["-i", ssh_key])
+    ssh_cmd.extend([
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=/dev/null",
+        "-p", str(ssh_port),
+        f"{ssh_user}@{ssh_host}",
+    ])
+
+    if verbose:
+        print(f"SSH command: {' '.join(ssh_cmd)}")
+        print(f"Remote script:\n{remote_script}")
+
+    try:
+        # Use sshpass if password is provided
+        if ssh_password:
+            ssh_cmd = ["sshpass", "-p", ssh_password] + ssh_cmd
+
+        # Encode the script as base64 to avoid shell escaping issues
+        import base64
+        script_b64 = base64.b64encode(remote_script.encode()).decode()
+
+        # Build the remote command with optional sudo
+        python_cmd = "sudo python3" if use_sudo else "python3"
+        full_cmd = ssh_cmd + [f"echo '{script_b64}' | base64 -d | {python_cmd}"]
+
+        result = subprocess.run(
+            full_cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout_ms / 1000.0 + 5,
+        )
+
+        if verbose:
+            print(f"SSH stdout: {result.stdout}")
+            print(f"SSH stderr: {result.stderr}")
+            print(f"SSH return code: {result.returncode}")
+
+        if result.returncode != 0:
+            print(f"SSH command failed: {result.stderr}", file=sys.stderr)
+            return responses
+
+        # Parse response from remote output
+        for line in result.stdout.splitlines():
+            if line.startswith("RESPONSE:"):
+                raw_hex = line[9:]  # Remove "RESPONSE:" prefix
+                raw = bytes.fromhex(raw_hex)
+                resp = _decode_ecm_response(raw, verbose)
+                if resp is not None:
+                    responses.append(resp)
+
+    except subprocess.TimeoutExpired:
+        print("SSH command timed out.", file=sys.stderr)
+    except FileNotFoundError as e:
+        print(f"Required program not found: {e}", file=sys.stderr)
+
+    return responses
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -645,6 +801,22 @@ def main():
         "--iface", type=str,
         help="CDC-ECM network interface name (e.g., usb0).",
     )
+    transport.add_argument(
+        "--ssh", action="store_true",
+        help="Send frames via SSH to a remote machine.",
+    )
+
+    # SSH transport options
+    ssh_grp = parser.add_argument_group("SSH transport options")
+    ssh_grp.add_argument("--ssh-host", type=str, help="SSH host to connect to.")
+    ssh_grp.add_argument("--ssh-user", type=str, help="SSH username.")
+    ssh_grp.add_argument("--ssh-port", type=int, default=22, help="SSH port (default: 22).")
+    ssh_grp.add_argument("--ssh-password", type=str, help="SSH password (or use SSH key).")
+    ssh_grp.add_argument("--ssh-key", type=str, help="Path to SSH private key.")
+    ssh_grp.add_argument("--ssh-iface", type=str, default="eth0",
+                         help="Remote interface to send frames from (default: eth0).")
+    ssh_grp.add_argument("--ssh-sudo", action="store_true",
+                         help="Run remote script with sudo (required for raw sockets).")
 
     # USB work mode convenience commands
     mode_grp = parser.add_argument_group("USB work mode (cmd 0x30)")
@@ -681,6 +853,11 @@ def main():
 
     args = parser.parse_args()
 
+    # Validate SSH arguments
+    if args.ssh:
+        if not args.ssh_host or not args.ssh_user:
+            parser.error("--ssh requires --ssh-host and --ssh-user")
+
     frames, expect_response = _build_frames_from_args(args)
     if not frames:
         parser.error("No operation specified. Use --read, --write-mode, --cmd, --keyboard, etc.")
@@ -689,6 +866,20 @@ def main():
         responses = _send_ecm_frames_usb(
             frames, vid=args.vid, pid=args.pid,
             timeout_ms=args.timeout, verbose=args.verbose,
+            expect_response=expect_response,
+        )
+    elif args.ssh:
+        responses = _send_ecm_frames_ssh(
+            frames,
+            ssh_host=args.ssh_host,
+            ssh_user=args.ssh_user,
+            ssh_port=args.ssh_port,
+            ssh_password=args.ssh_password,
+            ssh_key=args.ssh_key,
+            target_iface=args.ssh_iface,
+            use_sudo=args.ssh_sudo,
+            timeout_ms=args.timeout,
+            verbose=args.verbose,
             expect_response=expect_response,
         )
     else:

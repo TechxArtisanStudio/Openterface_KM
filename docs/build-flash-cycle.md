@@ -2,140 +2,186 @@
 
 ## Overview
 
-Firmware must be **built on a Windows machine** (MounRiver Studio toolchain) and **flashed locally** (macOS/linux via `wchisp`). The local xpack GCC toolchain produces non-booting binaries.
+Firmware can be **built and flashed entirely on Linux** using the MounRiver Studio (MRS) Linux toolchain and `wchisp`. No Windows machine is required.
 
-## Recommended Automation
-
-For day-to-day use, prefer the wrapper script in [tools/build_flash_cycle.sh](../tools/build_flash_cycle.sh). It performs the full cycle described below:
-
-1. Clean local object files.
-2. Zip and upload the project to the Windows builder.
-3. Expand and build with `tools/build_firmware.sh` on Windows/MSYS2.
-4. Download `openterface-km-firmware.bin` back to the local machine.
-5. Enter ISP mode over the control serial port and flash with `wchisp`.
-6. Release BOOT, power-cycle the target, and verify that the firmware enumerates again.
-
-Quick run:
-
-```bash
-bash tools/build_flash_cycle.sh
-```
-
-Dry-run the command sequence without touching the device or remote host:
-
-```bash
-bash tools/build_flash_cycle.sh --dry-run
-```
-
-Useful overrides:
-
-```bash
-bash tools/build_flash_cycle.sh --control-port /dev/cu.usbmodem212101
-bash tools/build_flash_cycle.sh --no-build --local-bin /tmp/openterface-km-firmware.bin
-```
+A Windows-based build flow (via SSH to a remote Windows machine) is also documented as an alternative.
 
 ## Prerequisites
 
-### Remote Windows Machine
+### Toolchain (Linux)
 
-- SSH access: `admin@192.168.100.63`
-- MSYS2 installed at `C:\msys64`
-- MounRiver Studio toolchain (riscv-none-embed-gcc) available in MSYS2 PATH
-- PowerShell `Compress-Archive` / `Expand-Archive` available
+Install the MRS Linux toolchain:
 
-### Local macOS Machine
+```bash
+mkdir -p ~/tools
+tar -xf ~/Downloads/MRS_Toolchain_Linux_X64_V300.tar.xz -C ~/tools
+export PATH="$HOME/tools/MRS-linux-x64/resources/app/resources/linux/components/WCH/Toolchain/RISC-V Embedded GCC/bin:$PATH"
+```
 
-- `wchisp` installed (`~/.cargo/bin/wchisp`)
-- `ssh` and `scp` available
+Verify:
+
+```bash
+riscv-none-embed-gcc --version
+# riscv-none-embed-gcc (xPack GNU RISC-V Embedded GCC, 64-bit) 8.2.0
+```
+
+### Flash Tool
+
+```bash
+cargo install wchisp --git https://github.com/ch32-rs/wchisp
+```
+
+Install udev rules so `wchisp` can access the ISP USB device without root:
+
+```bash
+sudo tee /etc/udev/rules.d/50-wchisp.rules << 'EOF'
+SUBSYSTEM=="usb", ATTR{idVendor}=="1a86", ATTR{idProduct}=="55e0", MODE="0666"
+SUBSYSTEM=="usb", ATTR{idVendor}=="4348", ATTR{idProduct}=="55e0", MODE="0666"
+EOF
+sudo udevadm control --reload-rules && sudo udevadm trigger
+```
+
+### Device Connection
+
 - Target device connected via USB
+- Control board (CH32 that manages BOOT/power pins) connected — appears as `/dev/ttyACM*`
 
-## Build & Flash Steps
+## Local Build & Flash (Recommended)
 
-### 1. Clean old object files (local)
+### 1. Build
 
 ```bash
-rm -f obj/APP/pwm_led.o obj/peripheral_main.o obj/RGB.o
+cd build
+make clean
+make PRODUCT=keymod-plus   # or kvmgo | minikvm | keymod-plus-beta | keymod-mini
+riscv-none-embed-objcopy -O binary openterface-km-firmware.elf openterface-km-firmware.bin
 ```
 
-### 2. Zip project source (local)
+### 2. Enter ISP mode and flash
 
 ```bash
-zip -r /tmp/openterface-km-build.zip \
-  SRC/ Profile/ HAL/ LIB/ APP/ \
-  tools/build_firmware.sh \
-  tools/wchisp_c.c \
-  HAL/Link.ld \
-  -x "*/.DS_Store" -x "__MACOSX/*"
-```
-
-### 3. Transfer to Windows
-
-```bash
-scp /tmp/openterface-km-build.zip admin@192.168.100.63:/tmp/
-```
-
-### 4. Extract and build on Windows
-
-```bash
-ssh admin@192.168.100.63 'powershell -Command "Remove-Item -Recurse -Force C:\tmp\openterface-km-build -ErrorAction SilentlyContinue; Expand-Archive -Path C:\tmp\openterface-km-build.zip -DestinationPath C:\tmp\openterface-km-build -Force"'
-
-ssh admin@192.168.100.63 'C:\msys64\usr\bin\bash.exe -l -c "cd /c/tmp/openterface-km-build && rm -rf obj && bash tools/build_firmware.sh"'
-```
-
-### 5. Fetch built binary (local)
-
-```bash
-scp admin@192.168.100.63:/tmp/openterface-km-build/obj/openterface-km-firmware.bin /tmp/openterface-km-firmware.bin
-```
-
-### 6. Flash locally
-
-#### Enter ISP mode and flash via USB (preferred)
-
-```bash
-PORT="/dev/cu.usbmodem212101"
+PORT="/dev/ttyACM2"   # control board — adjust to match your setup
 
 # Power off target
-echo -n "57AB001A01001D" | xxd -r -p > "$PORT"
+printf '\x57\xAB\x00\x1A\x01\x00\x1D' > "$PORT"
 sleep 0.5
 
 # Set BOOT pin HIGH (enter ISP mode on next boot)
-echo -n "57AB001901011D" | xxd -r -p > "$PORT"
+printf '\x57\xAB\x00\x19\x01\x01\x1D' > "$PORT"
 sleep 0.5
 
 # Power on target (boots into ISP bootloader)
-echo -n "57AB001A01011E" | xxd -r -p > "$PORT"
+printf '\x57\xAB\x00\x1A\x01\x01\x1E' > "$PORT"
 sleep 3
 
-# Flash via USB (device shows up as VID:0x1A86 PID:0x55E0)
-~/.cargo/bin/wchisp flash /tmp/openterface-km-firmware.bin
+# Flash via USB (device shows up as VID:0x1A86 or 0x4348, PID:0x55E0)
+~/.cargo/bin/wchisp flash openterface-km-firmware.bin
 
 # Release BOOT pin AND power cycle to boot firmware
-echo -n "57AB001901001C" | xxd -r -p > "$PORT"   # release BOOT
+printf '\x57\xAB\x00\x19\x01\x00\x1C' > "$PORT"   # release BOOT
 sleep 0.5
-echo -n "57AB001A01001D" | xxd -r -p > "$PORT"   # power off
+printf '\x57\xAB\x00\x1A\x01\x00\x1D' > "$PORT"   # power off
 sleep 1
-echo -n "57AB001A01011E" | xxd -r -p > "$PORT"   # power on (BOOT LOW)
+printf '\x57\xAB\x00\x1A\x01\x01\x1E' > "$PORT"   # power on (BOOT LOW)
 sleep 5
 ```
 
 **CRITICAL**: After flashing, you MUST release the BOOT pin AND power cycle. If the BOOT pin stays HIGH, the device will boot back into ISP mode and the firmware will never run. The wchisp auto-reset is not reliable — always do a manual power cycle with BOOT LOW.
 
-#### Verify firmware is running
+### 3. Verify firmware is running
 
 ```bash
-ioreg -p IOUSB -l 2>/dev/null | grep "Openterface Target"
-# Should show idProduct 65024 (0xFE00 = KeyMod)
+lsusb | grep -i "openterface"
+# Should show: 1a86:fe00 Openterface Target (and 1a86:fe0c Openterface Host)
+```
+
+## Identifying the Control Port
+
+The control board (which manages BOOT/power pins) appears as one of the `/dev/ttyACM*` devices with VID:PID `1a86:fe0c`. **The port number varies across reboots/replugs** — always verify before sending commands.
+
+### Quick identification
+
+Send a power-off command to each port and check if the Target disappears:
+
+```bash
+for port in /dev/ttyACM*; do
+  echo "=== Testing $port ==="
+  printf '\x57\xAB\x00\x1A\x01\x00\x1D' > "$port" 2>/dev/null
+  sleep 1
+  lsusb | grep "1a86:fe00" || echo "Target disappeared — $port is the control board"
+done
+```
+
+### USB topology
+
+The Openterface dev kit exposes **5 USB endpoints**:
+
+| Device | VID:PID | Description |
+|--------|---------|-------------|
+| Control board | 1a86:fe0c | CH32 USB Serial — manages the target's BOOT and power pins |
+| USB Serial #1 | 1a86:fe0c | Additional serial interface |
+| USB Serial #2 | 1a86:fe0c | Additional serial interface |
+| Target (normal mode) | 1a86:fe00 | "Openterface Target" — the CH32V208GBU6 running firmware |
+| Target (host side) | 1a86:fe0c | "Openterface Host" — second CDC-ACM interface from target |
+| Target (ISP mode) | 1a86:55e0 or 4348:55e0 | WCH ISP bootloader — appears only when BOOT pin is held HIGH during power-on |
+
+To identify ports by device number:
+
+```bash
+for dev in /dev/ttyACM*; do
+  devpath=$(udevadm info -q path -n $dev 2>/dev/null)
+  devnum=$(cat /sys$devpath/../../../devnum 2>/dev/null)
+  echo "$dev -> devnum=$devnum"
+done
+lsusb -t   # match devnum to Bus/Port/Dev
+```
+
+## Alternative: Windows Remote Build
+
+For cases where the local toolchain is not available, firmware can be built on a Windows machine:
+
+### Prerequisites
+
+- SSH access: `admin@192.168.100.63`
+- MSYS2 installed at `C:\msys64`
+- MounRiver Studio toolchain (riscv-none-embed-gcc) available in MSYS2 PATH
+
+### Steps
+
+```bash
+# 1. Zip and upload source
+zip -r /tmp/openterface-km-build.zip \
+  SRC/ Profile/ HAL/ LIB/ APP/ \
+  tools/build_firmware.sh tools/wchisp_c.c HAL/Link.ld \
+  -x "*/.DS_Store" -x "__MACOSX/*"
+scp /tmp/openterface-km-build.zip admin@192.168.100.63:/tmp/
+
+# 2. Build on Windows
+ssh admin@192.168.100.63 'powershell -Command "Expand-Archive -Path C:\tmp\openterface-km-build.zip -DestinationPath C:\tmp\openterface-km-build -Force"'
+ssh admin@192.168.100.63 'C:\msys64\usr\bin\bash.exe -l -c "cd /c/tmp/openterface-km-build && bash tools/build_firmware.sh"'
+
+# 3. Fetch binary
+scp admin@192.168.100.63:/tmp/openterface-km-build/obj/openterface-km-firmware.bin /tmp/
+
+# 4. Flash locally (same as step 2 above)
 ```
 
 ## Device Connection
 
 ### USB Topology
 
-The Openterface setup has two USB connections:
+The Openterface dev kit exposes **5 USB endpoints** on the host:
 
-1. **Control board → Mac**: Appears as two WCH USB Serial devices (`/dev/cu.usbmodem212101`, `/dev/cu.usbmodem212201`, VID:0x1A86 PID:0x9E6C) — this is the **control CH32** that manages the target's BOOT and power pins
-2. **Target (CH32V208GBU6) → Mac**: Appears as "KeyMod" (VID:0x1A86 PID:0xFE00) in normal mode, or as WCH ISP bootloader (VID:0x1A86 PID:0x55E0) in ISP mode
+| Device | VID:PID | Description |
+|--------|---------|-------------|
+| Control board | 1a86:fe0c | CH32 USB Serial — manages the target's BOOT and power pins. Appears as `/dev/ttyACM*` |
+| USB Serial #1 | 1a86:fe0c | Additional serial interface |
+| USB Serial #2 | 1a86:fe0c | Additional serial interface |
+| Target (normal mode) | 1a86:fe00 | "Openterface Target" — the CH32V208GBU6 running firmware |
+| Target (host side) | 1a86:fe0c | "Openterface Host" — second CDC-ACM interface from target |
+| Target (ISP mode) | 1a86:55e0 or 4348:55e0 | WCH ISP bootloader — appears only when BOOT pin is held HIGH during power-on |
+
+Multiple devices share VID:PID `1a86:fe0c`. The control board is the one that responds to power control commands. See [Identifying the Control Port](#identifying-the-control-port) above.
 
 ### Flash Control Protocol
 
@@ -213,7 +259,8 @@ With PWM1 + High polarity on an active-low LED:
 - `ENABLE_BLE` defined
 - `version=1` (kvm go mode)
 - Links against `libwchble.a` in `LIB/`
-- Toolchain: `C:/MounRiver/.../riscv-none-embed-gcc`
+- Toolchain (Linux): `~/tools/MRS-linux-x64/resources/app/resources/linux/components/WCH/Toolchain/RISC-V Embedded GCC/bin/riscv-none-embed-gcc`
+- Toolchain (Windows): `C:/MounRiver/.../riscv-none-embed-gcc`
 - Flags: `-march=rv32imacxw -mabi=ilp32 -Os`
 
 ## LED Debug Codes (PC7)
