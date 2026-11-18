@@ -25,6 +25,9 @@
 #include "include/ecm_bridge.h"
 #include "include/ble_eth_protocol.h"
 #include "include/usb_mode_config.h"
+#ifdef ENABLE_USB_HOST
+#include "include/usb_otg_mode.h"
+#endif
 /*******************************************************************************/
 /* Variable Definition */
 
@@ -687,6 +690,35 @@ void USBFS_IRQHandler( void )
     uint8_t  intflag, intst, errflag;
     uint16_t len;
 
+#ifdef ENABLE_USB_HOST
+    /* Handle USB Host mode interrupts */
+    if (g_usb_otg_mode == USB_OTG_MODE_HOST)
+    {
+        intflag = USBFSH->INT_FG;
+
+        if (intflag & USBFS_UIF_DETECT)
+        {
+            USB_Host_DetectDevice();
+            USBFSH->INT_FG = USBFS_UIF_DETECT;
+        }
+
+        if (intflag & USBFS_UIF_TRANSFER)
+        {
+            USB_Host_TransferComplete();
+            USBFSH->INT_FG = USBFS_UIF_TRANSFER;
+        }
+
+        if (intflag & USBFS_UIF_HST_SOF)
+        {
+            USB_Host_SOFHandler();
+            USBFSH->INT_FG = USBFS_UIF_HST_SOF;
+        }
+
+        return;
+    }
+#endif
+
+    /* USB Device mode interrupt handling */
     intflag = USBFSD->INT_FG;
     intst = USBFSD->INT_ST;
 
@@ -1192,6 +1224,10 @@ void USBFS_IRQHandler( void )
                                 }
                                 break;
                         }
+                    }
+                    else
+                    {
+                        errflag = 0xFF;
                     }
                 }
                 else

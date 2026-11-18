@@ -18,6 +18,9 @@
 #include "usbd_desc.h"
 #include "uac_desc.h"
 #include "ch32v20x_usb.h"
+#ifdef ENABLE_USB_HOST
+#include "usb_otg_mode.h"
+#endif
 #ifndef NULL
 #define NULL                    0
 #endif
@@ -182,6 +185,11 @@ extern uint8_t USBFS_Endp_DataUp( uint8_t endp, uint8_t *pbuf, uint16_t len, uin
 extern void USBFS_Send_Resume( void );
 extern uint8_t USBSendData(void);
 extern uint32_t USBFS_CheckEndpointBusyTimeout( void );
+
+#ifdef ENABLE_USB_HOST
+/* USB OTG mode functions (only available when ENABLE_USB_HOST is defined) */
+extern volatile usb_otg_mode_t g_usb_otg_mode;
+#endif
 
 #endif /* __CH32V20x_USBFS_DEVICE_H_ */
 

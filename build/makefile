@@ -42,6 +42,7 @@ ENABLE_BLE ?= 1
 USE_LTO ?= 1
 ENABLE_OSCILLATOR ?= 1
 USB_WORK_MODE ?= hid_acm_ecm_bridge
+ENABLE_USB_HOST ?= 1
 else ifeq ($(PRODUCT),keymod-mini)
 BOARD_VERSION ?= 3
 ENABLE_BLE ?= 1
@@ -337,6 +338,13 @@ OBJS := $(filter-out ./Profile/%.o, $(OBJS))
 OBJS := $(filter-out ./HAL/RTC.o ./HAL/SLEEP.o, $(OBJS))
 endif
 
+# USB Host mode support (only for keymod-plus)
+# Enable with: make ENABLE_USB_HOST=1
+ENABLE_USB_HOST ?= 0
+ifeq ($(ENABLE_USB_HOST),1)
+CFLAGS += -DENABLE_USB_HOST
+endif
+
 # Link Time Optimization (LTO) — reduces code size by ~15-25%
 # Enable with: make USE_LTO=1
 USE_LTO ?= 0
@@ -353,6 +361,7 @@ $(BUILD_CONFIG_STAMP): FORCE
 		printf 'USB_WORK_MODE=%s\n' "$(USB_WORK_MODE)"; \
 		printf 'ENABLE_UAC=%s\n' "$(ENABLE_UAC)"; \
 		printf 'ENABLE_BLE=%s\n' "$(ENABLE_BLE)"; \
+		printf 'ENABLE_USB_HOST=%s\n' "$(ENABLE_USB_HOST)"; \
 			printf 'ENABLE_STYLUS=%s\n' "$(ENABLE_STYLUS)"; \
 		printf 'BLE_NAME=%s\n' "$(BLE_NAME)"; \
 		printf 'ENABLE_OSCILLATOR=%s\n' "$(ENABLE_OSCILLATOR)"; \
