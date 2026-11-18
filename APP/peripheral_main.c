@@ -24,6 +24,7 @@
 #include "include/uac_handler.h"
 #include "include/acm_bridge.h"
 #include "include/ecm_bridge.h"
+#include "include/ncm_bridge.h"
 #include "include/usb_mode_config.h"
 #include "include/default_target_config.h"
 #include "include/pwm_led.h"
@@ -165,6 +166,12 @@ void Main_Circulation(void)
             ECM_Bridge_Poll();
             ecm_polled = 1;
         }
+#if USB_WORK_MODE_COMPILES_BRIDGE_NCM
+        else if (USB_ModeConfig_ActiveModeBridgeNcm()) {
+            NCM_Bridge_Poll();
+            ecm_polled = 1;
+        }
+#endif
 #if USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
         else if (USB_ModeConfig_ActiveModeHasHostCdcEcm() &&
                  USB_ModeConfig_ActiveModeHasHostCdcAcm()) {

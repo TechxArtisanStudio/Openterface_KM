@@ -96,6 +96,7 @@ volatile uint8_t g_ncm_ntb_sequence = 0;
 /* USB endpoint busy flags (external) */
 extern uint8_t ECM_USBD_INT_BUSY;
 extern uint8_t ECM_USBD_BULK_IN_BUSY;
+extern uint8_t USBD_Endp4_Busy;
 
 /*******************************************************************************
  * Runtime Network Parameters
@@ -757,7 +758,41 @@ void NCM_Bridge_HostRxDone(const uint8_t *data, uint16_t len)
 void NCM_Bridge_Poll(void)
 {
     poll_host_notification();
-    /* TODO: TX queue processing */
+
+    /* TX path: if EP4 IN is free and we have queued frames, build and send an NTB */
+    if (!USBD_Endp4_Busy && g_host_tx_queue.count > 0) {
+        /* Build NTB from one frame (single-frame NTBs for Phase 1) */
+        uint8_t ntb_buf[NCM_NTB_MAX_SIZE];
+        const uint8_t *frame_ptrs[1];
+        uint16_t frame_lens[1];
+        uint8_t frame_count = 0;
+
+        /* Peek the head frame */
+        NCM_Frame_t *frame = &g_host_tx_queue.frames[g_host_tx_queue.rd];
+        if (frame->len > 0) {
+            frame_ptrs[0] = frame->data;
+            frame_lens[0] = frame->len;
+            frame_count = 1;
+        }
+
+        if (frame_count > 0) {
+            uint16_t ntb_len = NCM_BuildNtb(ntb_buf, sizeof(ntb_buf),
+                                             frame_ptrs, frame_lens,
+                                             frame_count, g_ncm_ntb_sequence);
+            g_ncm_ntb_sequence++;
+
+            /* Send NTB via EP4 IN */
+            extern uint8_t USBD_ENDPx_DataUp(uint8_t endp, uint8_t *pbuf, uint16_t len);
+            if (USBD_ENDPx_DataUp(ENDP4, ntb_buf, ntb_len) == USB_SUCCESS) {
+                USBD_Endp4_Busy = 1;
+                /* Pop the frame from queue */
+                uint32_t csr = ncm_irq_save();
+                g_host_tx_queue.count--;
+                g_host_tx_queue.rd = (g_host_tx_queue.rd + 1) % NCM_BRIDGE_QUEUE_DEPTH;
+                ncm_irq_restore(csr);
+            }
+        }
+    }
 }
 
 void NCM_Bridge_UpdateIPConfig(void)

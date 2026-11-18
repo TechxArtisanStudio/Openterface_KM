@@ -21,6 +21,7 @@
 #include "../../include/uac_handler.h"
 #include "../../include/acm_bridge.h"
 #include "../../include/ecm_bridge.h"
+#include "../../include/ncm_bridge.h"
 #include "../../include/usb_mode_config.h"
 #include "../../include/usbd_composite_km.h"
 
@@ -28,6 +29,9 @@ uint8_t USBD_Endp1_Busy;
 uint8_t USBD_Endp3_Busy;
 uint8_t USBD_Endp2_Busy;  /* ECM INT busy (also used in ACM+ECM combined mode) */
 uint8_t USBD_Endp6_Busy;  /* ECM bulk IN busy — EP6 is bidirectional in combined mode */
+#if USB_WORK_MODE_COMPILES_BRIDGE_NCM
+uint8_t USBD_Endp4_Busy;  /* NCM bulk IN busy */
+#endif
 uint16_t USB_Rx_Cnt=0;
 
 /* Debug counters for EP5_OUT_Callback */
@@ -146,13 +150,40 @@ void EP3_IN_Callback (void)
 	Uart.USB_Up_IngFlag = 0x00;
 }
 
+#if USB_WORK_MODE_COMPILES_BRIDGE_NCM
+/*********************************************************************
+ * @fn      EP3_OUT_Callback
+ *
+ * @brief  Endpoint 3 OUT — CDC NCM bulk data (host → device).
+ *         Receives NTBs from the host and passes them to NCM_Bridge_HostRxDone.
+ *
+ * @return  none
+ */
+void EP3_OUT_Callback(void)
+{
+    if (USB_ModeConfig_ActiveModeBridgeNcm()) {
+        uint8_t buf[NCM_NTB_MAX_SIZE];
+        uint32_t len;
+        len = GetEPRxCount(ENDP3);
+        if (len > sizeof(buf)) {
+            len = sizeof(buf);
+        }
+        PMAToUserBufferCopy(buf, GetEPRxAddr(ENDP3), len);
+        NCM_Bridge_HostRxDone(buf, (uint16_t)len);
+        SetEPRxCount(ENDP3, NCM_NTB_MAX_SIZE);
+        SetEPRxValid(ENDP3);
+    }
+}
+#endif
+
 
 
 /*********************************************************************
  * @fn      EP4_IN_Callback
  *
- * @brief  Endpoint 4 IN (UAC ISO IN — Host audio → Target PC).
- *         Called when the Target PC consumed one ISO frame.
+ * @brief  Endpoint 4 IN — UAC ISO IN (Host audio → Target PC) or
+ *         CDC NCM bulk IN (device → host NTB completion).
+ *         Called when the host consumed one frame.
  *
  * @return  none
  */
@@ -160,6 +191,13 @@ void EP4_IN_Callback(void)
 {
 #ifdef ENABLE_UAC
     UAC_USBD_EP3_TxDone();   /* loads next H→T frame into EP4 PMA buffer */
+#endif
+#if USB_WORK_MODE_COMPILES_BRIDGE_NCM
+    if (USB_ModeConfig_ActiveModeBridgeNcm()) {
+        USBD_Endp4_Busy = 0;
+        /* Trigger next NTB transmission if pending */
+        NCM_Bridge_Poll();
+    }
 #endif
 }
 

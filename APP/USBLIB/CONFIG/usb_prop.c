@@ -514,6 +514,12 @@ void USBD_Reset(void)
   {
     ECM_Bridge_Init();
   }
+#if USB_WORK_MODE_COMPILES_BRIDGE_NCM
+  else if (USB_ModeConfig_ActiveModeBridgeNcm())
+  {
+    NCM_Bridge_Init();
+  }
+#endif
 #if USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
   else if (USB_ModeConfig_ActiveModeHasHostCdcEcm() &&
            USB_ModeConfig_ActiveModeHasHostCdcAcm())
