@@ -98,6 +98,20 @@
 #define ECM_USBD_EP_BULK_IN      EP3_IN
 #endif
 
+/* CDC NCM bridge endpoint configuration:
+ *   Notification: EP5 IN (interrupt)
+ *   Data: EP3 OUT (host->device), EP4 IN (device->host) */
+#if USB_WORK_MODE_COMPILES_BRIDGE_NCM
+#define NCM_USBD_INT_ENDP        ENDP5
+#define NCM_USBD_BULK_OUT_ENDP   ENDP3
+#define NCM_USBD_BULK_IN_ENDP    ENDP4
+#define NCM_USBD_INT_BUSY        USBD_Endp5_Busy
+#define NCM_USBD_BULK_IN_BUSY    USBD_Endp4_Busy
+#define NCM_USBD_EP_INT_IN       EP5_IN
+#define NCM_USBD_EP_BULK_OUT     EP3_OUT
+#define NCM_USBD_EP_BULK_IN      EP4_IN
+#endif
+
 
 /* ISTR events */
 /* IMR_MSK */
@@ -127,12 +141,20 @@
 #endif
 // #define  EP3_IN_Callback   NOP_Process
 // #define  EP4_IN_Callback   NOP_Process  /* UAC ISO IN handled in uac_handler */
+#if USB_WORK_MODE_COMPILES_BRIDGE_NCM
+/* EP5 IN handled in usb_endp.c for NCM bridge mode */
+#else
 #define  EP5_IN_Callback   NOP_Process
+#endif
 #define  EP7_IN_Callback   NOP_Process
 
 #define  EP1_OUT_Callback   NOP_Process
 // #define  EP2_OUT_Callback   NOP_Process
+#if USB_WORK_MODE_COMPILES_BRIDGE_NCM
+/* EP3 OUT handled in usb_endp.c for NCM bridge mode */
+#else
 #define  EP3_OUT_Callback   NOP_Process
+#endif
 // #define  EP4_OUT_Callback   NOP_Process  /* EP4 ISO OUT handled in usb_endp.c */
 // #define  EP5_OUT_Callback   NOP_Process  /* CDC bulk OUT relocated to EP5 */
 #if USB_WORK_MODE_HAS_HOST_ACM_AND_ECM

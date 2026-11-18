@@ -31,6 +31,7 @@ uint8_t USBD_Endp2_Busy;  /* ECM INT busy (also used in ACM+ECM combined mode) *
 uint8_t USBD_Endp6_Busy;  /* ECM bulk IN busy — EP6 is bidirectional in combined mode */
 #if USB_WORK_MODE_COMPILES_BRIDGE_NCM
 uint8_t USBD_Endp4_Busy;  /* NCM bulk IN busy */
+uint8_t USBD_Endp5_Busy;  /* NCM INT busy */
 #endif
 uint16_t USB_Rx_Cnt=0;
 
@@ -243,6 +244,23 @@ void EP5_OUT_Callback(void)
     }
 }
 
+#if USB_WORK_MODE_COMPILES_BRIDGE_NCM
+/*********************************************************************
+ * @fn      EP5_IN_Callback
+ *
+ * @brief  Endpoint 5 IN — CDC NCM interrupt notification completion.
+ *         Called when the host consumed a link status notification.
+ *
+ * @return  none
+ */
+void EP5_IN_Callback(void)
+{
+    if (USB_ModeConfig_ActiveModeBridgeNcm()) {
+        USBD_Endp5_Busy = 0;
+    }
+}
+#endif
+
 #if USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
 /*********************************************************************
  * @fn      EP6_IN_Callback
@@ -361,6 +379,38 @@ uint8_t USBD_ENDPx_DataUp( uint8_t endp, uint8_t *pbuf, uint16_t len )
         USB_SIL_Write( EP6_IN, pbuf, len );
         USBD_Endp6_Busy = 1;
         SetEPTxStatus( ENDP6, EP_TX_VALID );
+    }
+#endif
+#if USB_WORK_MODE_COMPILES_BRIDGE_NCM
+    else if( endp == ENDP5 )
+    {
+        /* NCM interrupt notification endpoint */
+        if (len > DEF_USBD_MAX_PACK_SIZE)
+        {
+            return USB_ERROR;
+        }
+        if (USBD_Endp5_Busy)
+        {
+            return USB_ERROR;
+        }
+        USB_SIL_Write( EP5_IN, pbuf, len );
+        USBD_Endp5_Busy = 1;
+        SetEPTxStatus( ENDP5, EP_TX_VALID );
+    }
+    else if( endp == ENDP4 )
+    {
+        /* NCM bulk IN endpoint */
+        if (len > NCM_NTB_MAX_SIZE)
+        {
+            return USB_ERROR;
+        }
+        if (USBD_Endp4_Busy)
+        {
+            return USB_ERROR;
+        }
+        USB_SIL_Write( EP4_IN, pbuf, len );
+        USBD_Endp4_Busy = 1;
+        SetEPTxStatus( ENDP4, EP_TX_VALID );
     }
 #endif
 

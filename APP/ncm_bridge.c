@@ -94,9 +94,8 @@ volatile uint8_t g_ncm_garp_sent = 0;
 volatile uint8_t g_ncm_ntb_sequence = 0;
 
 /* USB endpoint busy flags (external) */
-extern uint8_t ECM_USBD_INT_BUSY;
-extern uint8_t ECM_USBD_BULK_IN_BUSY;
 extern uint8_t USBD_Endp4_Busy;
+extern uint8_t USBD_Endp5_Busy;
 
 /*******************************************************************************
  * Runtime Network Parameters
@@ -691,7 +690,7 @@ static void poll_host_notification(void)
     uint8_t packet[16];
     uint8_t len;
 
-    if (g_host_notify_state == 0 || ECM_USBD_INT_BUSY != 0) {
+    if (g_host_notify_state == 0 || NCM_USBD_INT_BUSY != 0) {
         return;
     }
 
@@ -706,8 +705,8 @@ static void poll_host_notification(void)
     }
 
     len = make_notification(g_host_notify_state, NCM_BRIDGE_HOST_COMM_IF, packet);
-    /* TODO: Send via USBD notification endpoint */
-    if (len > 0) {
+    if (len > 0 && USBD_ENDPx_DataUp(NCM_USBD_INT_ENDP, packet, len) == USB_SUCCESS) {
+        NCM_USBD_INT_BUSY = 1;
         g_host_notify_last_send_ms = now;
         if (g_host_notify_state == 1) {
             g_host_notify_state = 2;
@@ -731,10 +730,12 @@ void NCM_Bridge_Init(void)
     g_host_tx_offset = 0;
     g_host_tx_gen = 0;
     g_host_zlp_pending = 0;
-    g_host_notify_state = 0;
+    g_ncm_ntb_sequence = 0;
+
+    /* Start link notification sequence: DOWN -> UP -> SPEED -> BEACON */
+    g_host_notify_state = NCM_NOTIFY_DOWN;
     g_host_notify_last_send_ms = 0;
     g_host_notify_hold_until_ms = 0;
-    g_ncm_ntb_sequence = 0;
 
     /* Load IP config */
     ECM_IPConfig_GetHostIP(ncm_host_ip);
