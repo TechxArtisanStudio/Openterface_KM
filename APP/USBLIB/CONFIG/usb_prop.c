@@ -37,6 +37,31 @@ static uint8_t USBD_CDC_ECM_Stat[4] = { 0, 0, 0, 0 };
 static volatile uint16_t USBD_CDC_ECM_PacketFilter;
 #endif
 
+#include "../../include/ncm_bridge.h"
+
+#if USB_WORK_MODE_COMPILES_HOST_CDC_NCM
+#define USBD_CDC_NCM_REQ_GET_NTB_INPUT_SIZE   0x87u
+#define USBD_CDC_NCM_REQ_SET_NTB_INPUT_SIZE   0x86u
+#define USBD_CDC_NCM_REQ_GET_NTB_FORMAT       0x89u
+#define USBD_CDC_NCM_REQ_SET_NTB_FORMAT       0x88u
+#define USBD_CDC_NCM_REQ_SET_PACKET_FILTER    0x43u
+#define USBD_CDC_NCM_REQ_GET_MAX_DATAGRAM     0x8Au
+#define USBD_CDC_NCM_REQ_SET_MAX_DATAGRAM     0x8Bu
+
+/* GET_NTB_INPUT_SIZE response: dwNtbInMaxSize(4) + dwNtbOutMaxSize(4).
+ * We advertise the same max on both directions.                          */
+#define NCM_NTB_SIZE_LO  (uint8_t)((NCM_NTB_MAX_SIZE) >>  0)
+#define NCM_NTB_SIZE_B1  (uint8_t)((NCM_NTB_MAX_SIZE) >>  8)
+#define NCM_NTB_SIZE_B2  (uint8_t)((NCM_NTB_MAX_SIZE) >> 16)
+#define NCM_NTB_SIZE_HI  (uint8_t)((NCM_NTB_MAX_SIZE) >> 24)
+static uint8_t USBD_CDC_NCM_NtbInSize[8] = {
+    NCM_NTB_SIZE_LO, NCM_NTB_SIZE_B1, NCM_NTB_SIZE_B2, NCM_NTB_SIZE_HI,
+    NCM_NTB_SIZE_LO, NCM_NTB_SIZE_B1, NCM_NTB_SIZE_B2, NCM_NTB_SIZE_HI
+};
+static volatile uint16_t USBD_CDC_NCM_PacketFilter;
+static uint8_t USBD_CDC_NCM_CtrlBuf[8];
+#endif
+
 extern uint8_t USBD_Endp3_Busy;
 extern uint8_t USBD_Endp1_Busy;
 extern uint8_t USBD_Endp2_Busy;
@@ -784,6 +809,49 @@ static uint8_t *USBD_CDC_ECM_SetCtrl(uint16_t Length)
 }
 #endif
 
+#if USB_WORK_MODE_COMPILES_HOST_CDC_NCM
+static uint8_t *USBD_CDC_NCM_GetNtbInputSize(uint16_t Length)
+{
+  if (Length == 0)
+  {
+    pInformation->Ctrl_Info.Usb_wLength = sizeof(USBD_CDC_NCM_NtbInSize);
+    return NULL;
+  }
+  return USBD_CDC_NCM_NtbInSize;
+}
+
+static uint8_t *USBD_CDC_NCM_SetNtbInputSize(uint16_t Length)
+{
+  if (Length == 0)
+  {
+    uint16_t requested = pInformation->USBwLength;
+    if (requested > sizeof(USBD_CDC_NCM_CtrlBuf))
+    {
+      requested = sizeof(USBD_CDC_NCM_CtrlBuf);
+    }
+    pInformation->Ctrl_Info.Usb_wLength = requested;
+    return NULL;
+  }
+  /* Accept but don't actually change our NTB size — fixed at NCM_NTB_MAX_SIZE. */
+  return USBD_CDC_NCM_CtrlBuf;
+}
+
+static uint8_t *USBD_CDC_NCM_GetMaxDatagram(uint16_t Length)
+{
+  static uint8_t max_dg[2];
+  if (Length == 0)
+  {
+    /* wMaxDatagramSize: single datagram per NTB in Phase 1. */
+    uint16_t val = NCM_NTB_MAX_SIZE - NCM_NTB_HEADER_SIZE - 8 - 4;
+    max_dg[0] = (uint8_t)(val >> 0);
+    max_dg[1] = (uint8_t)(val >> 8);
+    pInformation->Ctrl_Info.Usb_wLength = sizeof(max_dg);
+    return NULL;
+  }
+  return max_dg;
+}
+#endif
+
 /*********************************************************************
  * @fn      USBD_Data_Setup
  *
@@ -815,8 +883,28 @@ RESULT USBD_Data_Setup(uint8_t RequestNo)
     {
       CopyRoutine = &USBD_CDC_ECM_SetCtrl;
     }
-    else if (!USB_ModeConfig_ActiveModeHasHostCdcEcm() || USB_ModeConfig_ActiveModeHasHostCdcAcm())
+    else
 #endif
+#if USB_WORK_MODE_COMPILES_HOST_CDC_NCM
+    if (USB_ModeConfig_ActiveModeHasHostCdcNcm() &&
+        Request_No == USBD_CDC_NCM_REQ_GET_NTB_INPUT_SIZE)
+    {
+      CopyRoutine = &USBD_CDC_NCM_GetNtbInputSize;
+    }
+    else if (USB_ModeConfig_ActiveModeHasHostCdcNcm() &&
+             (Request_No == USBD_CDC_NCM_REQ_SET_NTB_INPUT_SIZE ||
+              Request_No == USBD_CDC_NCM_REQ_GET_NTB_FORMAT ||
+              Request_No == USBD_CDC_NCM_REQ_GET_MAX_DATAGRAM))
+    {
+      CopyRoutine = (Request_No == USBD_CDC_NCM_REQ_GET_NTB_FORMAT ||
+                     Request_No == USBD_CDC_NCM_REQ_GET_MAX_DATAGRAM)
+                    ? &USBD_CDC_NCM_GetMaxDatagram
+                    : &USBD_CDC_NCM_SetNtbInputSize;
+    }
+    else
+#endif
+    if (!USB_ModeConfig_ActiveModeHasHostCdcEcm() &&
+        !USB_ModeConfig_ActiveModeHasHostCdcNcm())
     {
     if (Request_No == CDC_GET_LINE_CODING)
     {
@@ -830,6 +918,10 @@ RESULT USBD_Data_Setup(uint8_t RequestNo)
     {
       return USB_UNSUPPORT;
     }
+    }
+    else
+    {
+      return USB_UNSUPPORT;
     }
   }
 #ifdef ENABLE_UAC
@@ -887,7 +979,33 @@ RESULT USBD_NoData_Setup(uint8_t RequestNo)
       USBD_CDC_ECM_PacketFilter = pInformation->USBwValue;
       return USB_SUCCESS;
     }
-    if (USB_ModeConfig_ActiveModeHasHostCdcEcm() && !USB_ModeConfig_ActiveModeHasHostCdcAcm())
+    if (USB_ModeConfig_ActiveModeHasHostCdcEcm() && !USB_ModeConfig_ActiveModeHasHostCdcAcm()
+        && !USB_ModeConfig_ActiveModeHasHostCdcNcm())
+    {
+      return USB_UNSUPPORT;
+    }
+#endif
+#if USB_WORK_MODE_COMPILES_HOST_CDC_NCM
+    if (USB_ModeConfig_ActiveModeHasHostCdcNcm() && Request_No == USBD_CDC_NCM_REQ_SET_PACKET_FILTER)
+    {
+      USBD_CDC_NCM_PacketFilter = pInformation->USBwValue;
+      return USB_SUCCESS;
+    }
+    if (USB_ModeConfig_ActiveModeHasHostCdcNcm() && Request_No == USBD_CDC_NCM_REQ_SET_NTB_FORMAT)
+    {
+      /* We only support 16-bit NTB format (wValue == 0). Reject 32-bit. */
+      if (pInformation->USBwValue == 0)
+      {
+        return USB_SUCCESS;
+      }
+      return USB_UNSUPPORT;
+    }
+    if (USB_ModeConfig_ActiveModeHasHostCdcNcm() && Request_No == USBD_CDC_NCM_REQ_SET_MAX_DATAGRAM)
+    {
+      return USB_SUCCESS;
+    }
+    if (USB_ModeConfig_ActiveModeHasHostCdcNcm() && !USB_ModeConfig_ActiveModeHasHostCdcAcm()
+        && !USB_ModeConfig_ActiveModeHasHostCdcEcm())
     {
       return USB_UNSUPPORT;
     }

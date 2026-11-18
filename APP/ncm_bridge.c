@@ -736,11 +736,9 @@ void NCM_Bridge_Init(void)
     g_ncm_ntb_sequence = 0;
 
     /* Load IP config */
-    ECM_IPConfig_t config;
-    ECM_IPConfig_Get(&config);
-    memcpy(ncm_host_ip, config.host_ip, 4);
-    memcpy(ncm_dev_ip, config.dev_ip, 4);
-    memcpy(ncm_subnet_mask, config.subnet_mask, 4);
+    ECM_IPConfig_GetHostIP(ncm_host_ip);
+    ECM_IPConfig_GetDevIP(ncm_dev_ip);
+    ECM_IPConfig_GetSubnetMask(ncm_subnet_mask);
 
     USB_DEBUG("NCM: Bridge initialized\r\n");
 }
@@ -764,11 +762,9 @@ void NCM_Bridge_Poll(void)
 
 void NCM_Bridge_UpdateIPConfig(void)
 {
-    ECM_IPConfig_t config;
-    ECM_IPConfig_Get(&config);
-    memcpy(ncm_host_ip, config.host_ip, 4);
-    memcpy(ncm_dev_ip, config.dev_ip, 4);
-    memcpy(ncm_subnet_mask, config.subnet_mask, 4);
+    ECM_IPConfig_GetHostIP(ncm_host_ip);
+    ECM_IPConfig_GetDevIP(ncm_dev_ip);
+    ECM_IPConfig_GetSubnetMask(ncm_subnet_mask);
     USB_DEBUG("NCM: IP config updated\r\n");
 }
 
