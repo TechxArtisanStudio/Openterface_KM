@@ -217,6 +217,27 @@ The script will:
 3. Flash firmware from `output/` directory
 4. Reset device after flashing
 
+### Dev Kit Control Board Flash (Linux)
+
+For the Openterface Dev Kit (which includes a control board that manages BOOT/power pins), use the `ctrl_board.py` tool for fully automated flashing:
+
+```bash
+# From project root
+cd /home/bbot/projects/Openterface/Openterface_KM
+
+# Full flash cycle (build + flash + verify)
+python3 tools/ctrl_board.py flash build/openterface-km-firmware-keymod-plus-beta.bin
+
+# Step-by-step
+python3 tools/ctrl_board.py isp on      # Enter ISP mode (BOOT HIGH + power cycle)
+~/.cargo/bin/wchisp flash firmware.bin  # Flash
+python3 tools/ctrl_board.py isp off     # Exit ISP mode (BOOT LOW + power cycle)
+python3 tools/ctrl_board.py verify      # Verify via USB
+python3 tools/verify_firmware.py        # Verify via CMD_GET_INFO
+```
+
+The control board handles all BOOT pin and power sequencing automatically via USB serial commands (115200 baud).
+
 ### Flash Options
 
 ```bash

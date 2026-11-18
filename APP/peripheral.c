@@ -338,6 +338,15 @@ uint8_t Peripheral_IsCh9329CommandByte(uint8_t cmd)
         case CMD_SYSTEM_RESET:         /* 0x31 - Trigger a system reset / reboot.
                                         *        Optionally reset BLE name to factory
                                         *        default "KVM-GO" if payload is 0x00. */
+
+        case CMD_ENTER_ISP_MODE:       /* 0x32 - Prepare for ISP mode entry.
+                                        *        Host uses control board to physically
+                                        *        enter ISP mode (BOOT HIGH + power cycle). */
+
+        case CMD_ISP_DEBUG:            /* 0x33 - ISP bootloader entry investigation.
+                                        *        Phase 1 diagnostics to verify if
+                                        *        CH32V208 supports software-triggered
+                                        *        ROM bootloader entry. */
             return 1;
 
         default:

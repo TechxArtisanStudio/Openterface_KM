@@ -57,59 +57,95 @@ make PRODUCT=keymod-plus   # or kvmgo | minikvm | keymod-plus-beta | keymod-mini
 riscv-none-embed-objcopy -O binary openterface-km-firmware.elf openterface-km-firmware.bin
 ```
 
-### 2. Enter ISP mode and flash
+## Local Build & Flash (Recommended)
+
+### 1. Build
 
 ```bash
-PORT="/dev/ttyACM2"   # control board — adjust to match your setup
-
-# Power off target
-printf '\x57\xAB\x00\x1A\x01\x00\x1D' > "$PORT"
-sleep 0.5
-
-# Set BOOT pin HIGH (enter ISP mode on next boot)
-printf '\x57\xAB\x00\x19\x01\x01\x1D' > "$PORT"
-sleep 0.5
-
-# Power on target (boots into ISP bootloader)
-printf '\x57\xAB\x00\x1A\x01\x01\x1E' > "$PORT"
-sleep 3
-
-# Flash via USB (device shows up as VID:0x1A86 or 0x4348, PID:0x55E0)
-~/.cargo/bin/wchisp flash openterface-km-firmware.bin
-
-# Release BOOT pin AND power cycle to boot firmware
-printf '\x57\xAB\x00\x19\x01\x00\x1C' > "$PORT"   # release BOOT
-sleep 0.5
-printf '\x57\xAB\x00\x1A\x01\x00\x1D' > "$PORT"   # power off
-sleep 1
-printf '\x57\xAB\x00\x1A\x01\x01\x1E' > "$PORT"   # power on (BOOT LOW)
-sleep 5
+cd build
+make clean
+make PRODUCT=keymod-plus   # or kvmgo | minikvm | keymod-plus-beta | keymod-mini
+riscv-none-embed-objcopy -O binary openterface-km-firmware.elf openterface-km-firmware.bin
 ```
 
-**CRITICAL**: After flashing, you MUST release the BOOT pin AND power cycle. If the BOOT pin stays HIGH, the device will boot back into ISP mode and the firmware will never run. The wchisp auto-reset is not reliable — always do a manual power cycle with BOOT LOW.
+### 2. Enter ISP mode and flash (NEW: use ctrl_board.py tool)
 
-### 3. Verify firmware is running
+The `tools/ctrl_board.py` tool provides a complete CLI for the control board, auto-detecting the correct serial port.
 
 ```bash
-lsusb | grep -i "openterface"
-# Should show: 1a86:fe00 Openterface Target (and 1a86:fe0c Openterface Host)
+# From project root
+cd /home/bbot/projects/Openterface/Openterface_KM
+
+# Full flash cycle (build + flash + verify)
+python3 tools/ctrl_board.py flash build/openterface-km-firmware-keymod-plus-beta.bin
 ```
+
+**Or step-by-step:**
+
+```bash
+# 1. Check USB device status
+python3 tools/ctrl_board.py status
+
+# 2. Enter ISP mode (BOOT HIGH + power cycle)
+python3 tools/ctrl_board.py isp on
+
+# 3. Flash firmware
+~/.cargo/bin/wchisp flash build/openterface-km-firmware-keymod-plus-beta.bin
+
+# 4. Exit ISP mode (BOOT LOW + power cycle)
+python3 tools/ctrl_board.py isp off
+
+# 5. Verify firmware is running
+python3 tools/ctrl_board.py verify
+```
+
+**Other useful commands:**
+```bash
+python3 tools/ctrl_board.py power on      # Power on target
+python3 tools/ctrl_board.py power off     # Power off target
+python3 tools/ctrl_board.py boot high     # Set BOOT pin HIGH
+python3 tools/ctrl_board.py boot low      # Set BOOT pin LOW
+python3 tools/ctrl_board.py status        # Show USB devices and serial ports
+```
+
+### 3. Verify firmware is running (NEW: dedicated verification tool)
+
+```bash
+# Via control board (USB device check)
+python3 tools/ctrl_board.py verify
+
+# Via CDC ACM (CMD_GET_INFO - more detailed)
+python3 tools/verify_firmware.py
+```
+
+Both tools confirm the firmware is running correctly. The `verify_firmware.py` tool provides additional detail (board version, USB connection status, LED status).
 
 ## Identifying the Control Port
 
-The control board (which manages BOOT/power pins) appears as one of the `/dev/ttyACM*` devices with VID:PID `1a86:fe0c`. **The port number varies across reboots/replugs** — always verify before sending commands.
+The control board (which manages BOOT/power pins) appears as one of the `/dev/ttyACM*` devices with VID:PID `1a86:fe0c`. **The port number varies across reboots/replugs.**
 
-### Quick identification
-
-Send a power-off command to each port and check if the Target disappears:
+**Good news:** The `tools/ctrl_board.py` tool automatically detects the control board by its `USB_Serial` model name. You don't need to manually identify the port unless debugging.
 
 ```bash
-for port in /dev/ttyACM*; do
-  echo "=== Testing $port ==="
-  printf '\x57\xAB\x00\x1A\x01\x00\x1D' > "$port" 2>/dev/null
-  sleep 1
-  lsusb | grep "1a86:fe00" || echo "Target disappeared — $port is the control board"
+# Tool auto-detects the control board
+python3 tools/ctrl_board.py status
+# Control board: /dev/ttyACM0
+```
+
+### Manual identification (for debugging)
+
+If the tool can't find the control board, identify it manually:
+
+```bash
+# Method 1: Identify by model name (recommended)
+for dev in /dev/ttyACM*; do
+  model=$(udevadm info -q property -n "$dev" 2>/dev/null | grep ID_MODEL= | cut -d= -f2)
+  echo "$dev -> $model"
 done
+# Control board shows as "USB_Serial", NOT "Openterface_Host"
+
+# Method 2: Use the tool with --port override
+python3 tools/ctrl_board.py --port /dev/ttyACM1 status
 ```
 
 ### USB topology
@@ -187,6 +223,12 @@ Multiple devices share VID:PID `1a86:fe0c`. The control board is the one that re
 
 The target CH32V208GBU6's **BOOT pin** and **power pin** are controlled by the control CH32 via USB serial commands. No manual button-pressing is needed.
 
+**Serial Port Settings:**
+- **Baud Rate**: 115200 (NOT 9600)
+- **Data Bits**: 8
+- **Stop Bits**: 1
+- **Parity**: None
+
 #### Command Format
 
 ```
@@ -199,6 +241,49 @@ The target CH32V208GBU6's **BOOT pin** and **power pin** are controlled by the c
 | Flash (BOOT) pin | Pull LOW | `57 AB 00 19 01 00 1C` | 0x1C |
 | Power pin | Pull HIGH | `57 AB 00 1A 01 01 1E` | 0x1E |
 | Power pin | Pull LOW | `57 AB 00 1A 01 00 1D` | 0x1D |
+
+#### Response Format
+
+The control board responds to valid commands:
+
+```
+57 AB 00 <cmd+0x80> <len> <data> <checksum>
+```
+
+Example: sending `57AB001A01001D` (power off) returns `57ab009a01009d`.
+
+### CDC ACM CH9329 Commands (Target Firmware)
+
+The target firmware also accepts CH9329 commands over CDC ACM (`/dev/ttyACM1` — Openterface Host) for firmware-level operations.
+
+| Command | Code | Description |
+|---------|------|-------------|
+| CMD_GET_INFO | 0x01 | Query device info (version, USB state, LEDs) |
+| CMD_ENTER_ISP_MODE | 0x32 | Prepare for ISP entry (host uses control board) |
+| CMD_ISP_DEBUG | 0x33 | Phase 1 ISP diagnostics (sub-cmds 0x00-0x04) |
+
+**Frame format:** `57 AB <addr> <cmd> <len> <data> <checksum>`
+
+**Example: CMD_GET_INFO (verify firmware running)**
+```bash
+python3 tools/verify_firmware.py
+# ✓ Firmware is running
+#   Board version: 3
+#   USB connected: Yes
+#   LED status: 0x00
+#   Flags: 0x06
+```
+
+**Example: CMD_ENTER_ISP_MODE (prepare for ISP)**
+```bash
+# Frame: 57 AB 00 32 00 34
+python3 -c "
+import serial
+with serial.Serial('/dev/ttyACM1', 115200, timeout=1) as ser:
+    ser.write(bytes.fromhex('57AB00320034'))
+"
+# Response: 57ab00b20100b5 (STATUS_SUCCESS)
+```
 
 ## Known Working Firmware
 
@@ -262,6 +347,106 @@ With PWM1 + High polarity on an active-low LED:
 - Toolchain (Linux): `~/tools/MRS-linux-x64/resources/app/resources/linux/components/WCH/Toolchain/RISC-V Embedded GCC/bin/riscv-none-embed-gcc`
 - Toolchain (Windows): `C:/MounRiver/.../riscv-none-embed-gcc`
 - Flags: `-march=rv32imacxw -mabi=ilp32 -Os`
+
+## Verified Flash Parameters (Tested 2026-11-18)
+
+The following parameters were verified on actual hardware:
+
+### Control Board Serial Port
+
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| **Baud Rate** | **115200** | NOT 9600 — 9600 produces no response |
+| **Port** | `/dev/ttyACM0` | Shows as "USB Serial" (VID:PID 1a86:fe0c) |
+| **Model** | `USB_Serial` | Use `udevadm info -n /dev/ttyACM0` to identify |
+
+**Identification:**
+```bash
+# Control board shows as "USB_Serial", NOT "Openterface_Host"
+for dev in /dev/ttyACM*; do
+  udevadm info -q property -n "$dev" | grep ID_MODEL
+done
+# Output:
+# ID_MODEL=USB_Serial          <-- CONTROL BOARD (use this)
+# ID_MODEL=Openterface_Host    <-- Target CDC-ACM (NOT this)
+```
+
+### Verified Flash Sequence (NEW: use tools)
+
+**Recommended: Use `ctrl_board.py` tool (auto-detects port, handles timing)**
+
+```bash
+# Full flash cycle (one command)
+python3 tools/ctrl_board.py flash build/openterface-km-firmware-keymod-plus-beta.bin
+
+# Or step-by-step
+python3 tools/ctrl_board.py isp on                    # Enter ISP mode
+~/.cargo/bin/wchisp flash firmware.bin                # Flash
+python3 tools/ctrl_board.py isp off                   # Exit ISP mode
+python3 tools/ctrl_board.py verify                    # Verify via USB
+python3 tools/verify_firmware.py                      # Verify via CMD_GET_INFO
+```
+
+**Manual method (for reference/debugging):**
+
+```bash
+PORT="/dev/ttyACM0"   # Control board (USB_Serial)
+BAUD=115200
+
+# Helper function to send command at 115200
+send_cmd() {
+  python3 -c "
+import serial, sys
+with serial.Serial('$PORT', $BAUD, timeout=1) as ser:
+    ser.write(bytes.fromhex('$1'))
+"
+}
+
+# 1. Power OFF target
+send_cmd 57AB001A01001D
+sleep 1
+
+# 2. BOOT pin HIGH (enter ISP on next boot)
+send_cmd 57AB001901011D
+sleep 1
+
+# 3. Power ON target (boots into ISP bootloader)
+send_cmd 57AB001A01011E
+sleep 3
+
+# 4. Verify ISP mode (should show 4348:55e0 or 1a86:55e0)
+lsusb | grep 55e0
+
+# 5. Flash firmware
+~/.cargo/bin/wchisp flash openterface-km-firmware-keymod-plus-beta.bin
+
+# 6. BOOT pin LOW
+send_cmd 57AB001901001C
+sleep 1
+
+# 7. Wait for auto-reset to APP
+sleep 5
+
+# 8. Verify (should show 1a86:fe00 Openterface Target)
+lsusb | grep "1a86:fe00"
+```
+
+### Timing Notes
+
+- **Sleep after power OFF**: 1s (allows clean shutdown)
+- **Sleep after BOOT HIGH**: 1s (allows pin to stabilize before power-on)
+- **Sleep after power ON**: 3s (allows USB enumeration in ISP mode)
+- **Sleep after BOOT LOW**: 1s (allows pin release before reset)
+- **Sleep after flash**: 5s (allows wchisp reset + firmware boot)
+
+### Critical Differences from Original Doc
+
+| Original Doc | Actual Verified |
+|--------------|-----------------|
+| Baud 9600 | **Baud 115200** |
+| PORT=/dev/ttyACM2 | **PORT=/dev/ttyACM0** (varies, must identify) |
+| sleep 0.5 | **sleep 1-3s** (longer delays needed) |
+| printf to port | **Python serial** (reliable binary write) |
 
 ## LED Debug Codes (PC7)
 

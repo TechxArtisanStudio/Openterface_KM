@@ -17,6 +17,7 @@
 #include "include/ecm_ip_config.h"
 #include "include/ecm_bridge.h"
 #include "include/acm_bridge.h"
+#include "include/flash_isp_debug.h"
 
 #if USB_WORK_MODE_COMPILES_BRIDGE_ACM || USB_WORK_MODE_COMPILES_BRIDGE_ECM || USB_WORK_MODE_HAS_HOST_ACM_AND_ECM || USB_WORK_MODE_HAS_HOST_CDC_ACM
 /* External function from usb_endp.c - validates CH9329 command frames */
@@ -420,6 +421,70 @@ void CH9329_DispatchCommand(uint8_t addr, uint8_t cmd_code, uint8_t* pdata, uint
 #endif
             }
             break;
+
+        // Prepare for ISP mode entry (Phase 2 - uses control board)
+        case CMD_ENTER_ISP_MODE:
+        {
+            uint8_t status = STATUS_SUCCESS;
+
+            printf("\r\n=== CMD_ENTER_ISP_MODE received ===\r\n");
+            printf("Preparing for ISP mode entry...\r\n");
+            printf("Host should now use control board to enter ISP mode:\r\n");
+            printf("  python3 tools/ctrl_board.py isp on\r\n");
+
+            // Send success response
+            CH9329_SendResponse(addr, cmd_code, &status, 1, 1);
+        }
+        break;
+
+        // ISP bootloader entry investigation (Phase 1 diagnostics)
+        case CMD_ISP_DEBUG:
+        {
+            uint8_t status = STATUS_SUCCESS;
+            uint8_t sub_cmd = (data_len > 0) ? pdata[0] : 0x00;
+
+            printf("\r\n=== CMD_ISP_DEBUG received (sub_cmd=0x%02X) ===\r\n", sub_cmd);
+
+            switch (sub_cmd) {
+                case 0x00:  // Run Phase 1 diagnostics (safe, no reset)
+                    printf("Running Phase 1 diagnostics...\r\n");
+                    FLASH_RunPhase1Diagnostics();
+                    break;
+
+                case 0x01:  // Enter bootloader (DANGEROUS - will reset if successful)
+                    printf("WARNING: Attempting to enter bootloader...\r\n");
+                    CH9329_SendResponse(addr, cmd_code, &status, 1, 1);
+                    Delay_Ms(100);  // Wait for response to be sent
+                    FLASH_EnterBootloader();
+                    // Should not reach here if successful
+                    status = STATUS_ERR_FRAME;  // If we get here, it failed
+                    break;
+
+                case 0x02:  // Dump FLASH registers only
+                    FLASH_DumpRegisters();
+                    break;
+
+                case 0x03:  // Test MODE bit only
+                    FLASH_TestModeBit();
+                    break;
+
+                case 0x04:  // Scan for BOOT_MODEKEYR
+                    FLASH_ScanForBootModeRegister();
+                    break;
+
+                default:
+                    printf("Unknown ISP_DEBUG sub_cmd: 0x%02X\r\n", sub_cmd);
+                    status = STATUS_ERR_PARAM;
+                    break;
+            }
+
+            // Send response (except for 0x01 which already sent it)
+            if (sub_cmd != 0x01) {
+                CH9329_SendResponse(addr, cmd_code, &status, 1, 1);
+            }
+        }
+        break;
+
         //cmd=08,Get parameter configuration(Only used for matching with ch9329)
         case CMD_GET_PARA_CFG:
         {

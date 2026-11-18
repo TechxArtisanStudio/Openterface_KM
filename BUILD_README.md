@@ -209,3 +209,33 @@ make all USB_WORK_MODE=hid_ecm_bridge
 | `RISC_COMPILER_PATH` | RISC-V compiler path |
 | `WCHISP_BIN` | wchisp executable path |
 | `WCHISPTOOL_CMD` | WCHISPTool_CMD executable path |
+
+## Linux Dev Kit: Control Board Tool
+
+For Linux users with the Openterface Dev Kit (which includes a control board that manages BOOT/power pins), the `tools/ctrl_board.py` tool provides fully automated flashing:
+
+```bash
+# From project root
+cd /path/to/Openterface_KM
+
+# Full flash cycle (enters ISP, flashes, exits ISP, verifies)
+python3 tools/ctrl_board.py flash build/openterface-km-firmware-keymod-plus-beta.bin
+
+# Or step-by-step
+python3 tools/ctrl_board.py isp on      # Enter ISP mode (BOOT HIGH + power cycle)
+~/.cargo/bin/wchisp flash firmware.bin  # Flash
+python3 tools/ctrl_board.py isp off     # Exit ISP mode (BOOT LOW + power cycle)
+python3 tools/ctrl_board.py verify      # Verify via USB device check
+python3 tools/verify_firmware.py        # Verify via CMD_GET_INFO (detailed)
+
+# Other commands
+python3 tools/ctrl_board.py power on    # Power on target
+python3 tools/ctrl_board.py power off   # Power off target
+python3 tools/ctrl_board.py boot high   # Set BOOT pin HIGH
+python3 tools/ctrl_board.py boot low    # Set BOOT pin LOW
+python3 tools/ctrl_board.py status      # Show USB devices and serial ports
+```
+
+The control board tool auto-detects the correct serial port (`/dev/ttyACM*`) and handles all timing automatically.
+
+For more details, see [docs/build-flash-cycle.md](docs/build-flash-cycle.md) and [docs/software-isp-entry-design.md](docs/software-isp-entry-design.md).

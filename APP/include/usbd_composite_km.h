@@ -52,9 +52,12 @@
 #define CMD_BLE_ADV_PARAM          0x19  // BLE advertising parameters: channel map, continuous TX test
 #define CMD_BLE_SET_NAME           0x23  // Set BLE device name (persisted to Flash) or reset to default
 #define CMD_SYSTEM_RESET           0x31  // Trigger system reset/reboot; payload 0x00 resets BLE name
+#define CMD_ENTER_ISP_MODE         0x32  // Prepare for ISP mode entry (host uses control board to enter ISP)
 #define CMD_USB_WORK_MODE          0x30  // Query/change USB personality (HID+ACM, HID+UAC+ACM, bridges)
 #define CMD_SET_ECM_IP_CONFIG      0x26  // Set ECM network config (IP, subnet, target IPs) - persisted to Flash
 #define CMD_GET_ECM_IP_CONFIG      0x27  // Get ECM network config (from RAM cache, no Flash access)
+#define CMD_ISP_DEBUG              0x33  // ISP bootloader entry investigation (Phase 1 diagnostics)
+                                         // Payload: 0x00=run diagnostics, 0x01=enter bootloader (DANGEROUS)
 // ACK Status Codes
 #define STATUS_SUCCESS             0x00  // Operation completed successfully
 #define STATUS_ERR_TIMEOUT         0xE1  // Operation timed out (no response within expected window)

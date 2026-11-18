@@ -18,6 +18,7 @@ C_SRCS += \
 ../APP/DS18B20.c \
 ../APP/ecm_bridge.c \
 ../APP/ecm_ip_config.c \
+../APP/flash_isp_debug.c \
 ../APP/iwdg_auto.c \
 ../APP/keyboard_handler.c \
 ../APP/km_ring.c \
@@ -47,6 +48,7 @@ C_DEPS += \
 ./APP/DS18B20.d \
 ./APP/ecm_bridge.d \
 ./APP/ecm_ip_config.d \
+./APP/flash_isp_debug.d \
 ./APP/iwdg_auto.d \
 ./APP/keyboard_handler.d \
 ./APP/km_ring.d \
@@ -76,6 +78,7 @@ OBJS += \
 ./APP/DS18B20.o \
 ./APP/ecm_bridge.o \
 ./APP/ecm_ip_config.o \
+./APP/flash_isp_debug.o \
 ./APP/iwdg_auto.o \
 ./APP/keyboard_handler.o \
 ./APP/km_ring.o \

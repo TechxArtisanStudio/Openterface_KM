@@ -18,7 +18,7 @@ WINDOWS_BUILD_DIR='C:\tmp\openterface-km-build'
 WINDOWS_ZIP='C:\tmp\openterface-km-build.zip'
 MSYS_BASH='C:\msys64\usr\bin\bash.exe'
 
-CONTROL_PORT="/dev/cu.usbmodem212101"
+CONTROL_PORT="/dev/ttyACM0"   # Linux: control board (USB_Serial at 115200 baud)
 WCHISP_BIN="${HOME}/.cargo/bin/wchisp"
 
 # Firmware build variables (exported and forwarded through SSH)
@@ -107,10 +107,14 @@ require_cmd() {
 send_control_frame() {
     local hex="$1"
     if [[ "$DRY_RUN" -eq 1 ]]; then
-        printf '+ echo -n %q | xxd -r -p > %q\n' "$hex" "$CONTROL_PORT"
+        printf '+ python3 -c "import serial; s=serial.Serial(\"%s\", 115200, timeout=1); s.write(bytes.fromhex(\"%s\"))"\n' "$CONTROL_PORT" "$hex"
         return 0
     fi
-    echo -n "$hex" | xxd -r -p > "$CONTROL_PORT"
+    python3 -c "
+import serial
+with serial.Serial('$CONTROL_PORT', 115200, timeout=1) as ser:
+    ser.write(bytes.fromhex('$hex'))
+"
 }
 
 parse_args() {

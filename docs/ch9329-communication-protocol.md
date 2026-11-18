@@ -87,6 +87,8 @@ The response payload is usually a 1-byte status for write-like commands, or a st
 | `0x27` | Get ECM IP config | none | 21-byte config block | Openterface extension for reading ECM network configuration |
 | `0x30` | USB work mode | optional control payload | 12-byte status block | Openterface extension for runtime USB personality selection |
 | `0x31` | System reset | none | 1-byte status | Openterface extension for system reboot |
+| `0x32` | Enter ISP mode | none | 1-byte status | Openterface extension for ISP mode preparation |
+| `0x33` | ISP debug | 1-byte sub-command | 1-byte status | Phase 1 ISP bootloader entry investigation |
 
 ## Command Details
 
@@ -652,6 +654,102 @@ Response: 57 AB <addr> B1 01 00 <sum>
 - After other configuration changes that require full stack reinitialization
 - As a recovery mechanism when the device is in an inconsistent state
 
+### `0x32` Enter ISP Mode
+
+This is an Openterface extension for preparing the device for ISP (In-System Programming) mode entry. The command itself does not enter ISP mode directly (CH32V208 does not support software-triggered ROM bootloader entry); instead, it signals that the host should use the control board to physically enter ISP mode.
+
+**Payload format:**
+
+- No payload required
+
+**Response:**
+
+- Single byte status (`0x00` = success)
+- Response command byte uses `cmd | 0x80` for success
+
+**Example:**
+
+```text
+Request : 57 AB <addr> 32 00 <sum>
+Response: 57 AB <addr> B2 01 00 <sum>
+```
+
+**Usage workflow:**
+
+1. Host sends `0x32` to target device (optional preparation step)
+2. Host uses control board to enter ISP mode:
+   - Control board sets BOOT pin HIGH
+   - Control board power cycles target
+   - Target boots into ISP bootloader (USB VID:PID `1A86:55E0` or `4348:55E0`)
+3. Host flashes firmware using `wchisp`
+4. Host uses control board to exit ISP mode:
+   - Control board sets BOOT pin LOW
+   - Control board power cycles target
+   - Target boots normally with new firmware
+
+**Control board commands (via serial at 115200 baud):**
+
+- Enter ISP: `57 AB 00 19 01 01 1D` (BOOT HIGH) + `57 AB 00 1A 01 01 1E` (Power ON)
+- Exit ISP: `57 AB 00 19 01 00 1C` (BOOT LOW) + `57 AB 00 1A 01 00 1D` (Power OFF) + `57 AB 00 1A 01 01 1E` (Power ON)
+
+**Tools:**
+
+```bash
+# Linux: Use ctrl_board.py tool (auto-detects control board port)
+python3 tools/ctrl_board.py flash firmware.bin
+
+# Or step-by-step
+python3 tools/ctrl_board.py isp on      # Enter ISP mode
+python3 tools/ctrl_board.py isp off     # Exit ISP mode
+```
+
+**Important notes:**
+
+1. **Not a direct ISP entry**: The command does not trigger ISP mode directly. CH32V208 does not support the undocumented CH32V003 bootloader entry mechanism.
+
+2. **Requires control board**: This command is part of an automated workflow that uses the dev kit's control board to physically control the BOOT pin during power cycle.
+
+3. **Optional step**: The command is optional — the host can directly use the control board without sending this command first.
+
+4. **Verification**: After flashing, use `0x01` Get Info or `tools/verify_firmware.py` to confirm the new firmware is running.
+
+### `0x33` ISP Debug
+
+This is an Openterface extension for Phase 1 ISP bootloader entry investigation. It provides diagnostic functions to verify hardware capabilities and test bootloader entry mechanisms.
+
+**Payload format:**
+
+- Single byte sub-command:
+  - `0x00`: Run Phase 1 diagnostics (safe, no reset)
+  - `0x01`: Attempt to enter bootloader (DANGEROUS — will reset if successful)
+  - `0x02`: Dump FLASH registers only
+  - `0x03`: Test STATR MODE bit only
+  - `0x04`: Scan for BOOT_MODEKEYR register
+
+**Response:**
+
+- Single byte status (`0x00` = success, `0xE6` = frame error if bootloader entry fails)
+- Response command byte uses `cmd | 0x80` for success, `cmd | 0xC0` for error
+
+**Example:**
+
+Run diagnostics:
+
+```text
+Request : 57 AB <addr> 33 01 00 <sum>
+Response: 57 AB <addr> B3 01 00 <sum>
+```
+
+**Important notes:**
+
+1. **Diagnostic only**: These commands are for investigating CH32V208 bootloader capabilities. They do not provide a production ISP entry mechanism.
+
+2. **Sub-command 0x01 is dangerous**: Attempting to enter bootloader may cause the device to reset. If the mechanism doesn't work (as discovered on CH32V208), the device reboots normally.
+
+3. **Debug output**: Diagnostic functions output detailed information via printf to the debug UART, not back through USB. The response only confirms the command executed.
+
+4. **CH32V208 limitation**: Phase 1 investigation confirmed that CH32V208 does NOT support the CH32V003-style bootloader entry (STATR bit 14 MODE mechanism). The device will reboot normally instead of entering ISP mode.
+
 ## Practical Interpretation
 
 For host software, the safest mental model is:
@@ -666,7 +764,7 @@ This means the protocol is not a raw HID tunnel. It is a small command protocol 
 ## Limitations And Compatibility Notes
 
 - The implementation is compatibility-oriented, not a bit-for-bit clone of every possible CH9329 feature.
-- `0x17`, `0x18`, `0x23`, `0x26`, `0x27`, `0x30`, and `0x31` are project-specific extensions.
+- `0x17`, `0x18`, `0x23`, `0x26`, `0x27`, `0x30`, `0x31`, `0x32`, and `0x33` are project-specific extensions.
 - Outbound response payloads are capped at 58 bytes by the response packet buffer.
 - The current keyboard path assumes explicit key-release reports from the sender.
 - BLE-related commands (`0x22`, `0x23`) require `ENABLE_BLE` compile-time option. If BLE is disabled, these commands return `0xE3` (unsupported command).
