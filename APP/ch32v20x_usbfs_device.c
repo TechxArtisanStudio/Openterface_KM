@@ -423,6 +423,14 @@ void USBFS_Device_Endp_Init( void )
     }
     else
 #endif
+#if USB_WORK_MODE_COMPILES_BRIDGE_NCM
+    if (USB_ModeConfig_ActiveModeBridgeNcm()) {
+        /* NCM bridge: EP6 IN (notification), EP5 OUT (data RX), EP7 IN (data TX) */
+        USBFSD->UEP5_6_MOD = USBFS_UEP5_RX_EN | USBFS_UEP6_TX_EN;
+        USBFSD_UEP_MOD( 3 ) = USBFS_UEP7_TX_EN;
+    }
+    else
+#endif
     if (USB_ModeConfig_ActiveModeHasTargetCdcAcm() || USB_ModeConfig_ActiveModeHasTargetCdcEcm()) {
         /* Target ACM/ECM only (no Host ACM+ECM): EP6 for Target data, EP7 for Target ECM IN */
         USBFSD->UEP5_6_MOD = USBFS_UEP5_TX_EN | USBFS_UEP6_RX_EN;
@@ -452,6 +460,15 @@ void USBFS_Device_Endp_Init( void )
         /* Combined ACM+ECM: EP5 notification + EP7 Target ECM data.
          * Host ACM/ECM buffers belong to the USBLIB controller. */
         USBFSD->UEP5_DMA = (uint32_t)EP5_DatabufHD;
+        USBFSD->UEP7_DMA = (uint32_t)EP7_DatabufHD;
+    }
+    else
+#endif
+#if USB_WORK_MODE_COMPILES_BRIDGE_NCM
+    if (USB_ModeConfig_ActiveModeBridgeNcm()) {
+        /* NCM bridge: EP6 IN (notification), EP5 OUT (data RX), EP7 IN (data TX) */
+        USBFSD->UEP5_DMA = (uint32_t)EP5_DatabufHD;
+        USBFSD->UEP6_DMA = (uint32_t)EP6_DatabufHD;
         USBFSD->UEP7_DMA = (uint32_t)EP7_DatabufHD;
     }
     else
@@ -492,6 +509,19 @@ void USBFS_Device_Endp_Init( void )
         USBFSD->UEP7_TX_CTRL = USBFS_UEP_T_RES_NAK;
         USBFSD->UEP7_RX_CTRL = USBFS_UEP_R_RES_ACK;
 #endif
+    }
+    else
+#endif
+#if USB_WORK_MODE_COMPILES_BRIDGE_NCM
+    if (USB_ModeConfig_ActiveModeBridgeNcm()) {
+        /* NCM bridge: EP6 IN (notification), EP5 OUT (data RX), EP7 IN (data TX) */
+        USBFSD->UEP5_TX_CTRL = USBFS_UEP_T_RES_NAK;  /* Not used */
+        USBFSD->UEP5_RX_CTRL = USBFS_UEP_R_RES_NAK;  /* Will be ACKed on SET_INTERFACE */
+        USBFSD->UEP6_TX_LEN  = 0;
+        USBFSD->UEP6_TX_CTRL = USBFS_UEP_T_RES_NAK;  /* Notification endpoint */
+        USBFSD->UEP7_TX_LEN  = 0;
+        USBFSD->UEP7_TX_CTRL = USBFS_UEP_T_RES_NAK;  /* Data IN endpoint */
+        USBFS_Endp_Busy[DEF_UEP7] = 0;
     }
     else
 #endif

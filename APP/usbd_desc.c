@@ -910,8 +910,8 @@ static const uint8_t USBFS_RuntimeEcmBlock[USBFS_RUNTIME_ECM_BLOCK_SIZE] = {
 };
 
 /* NCM runtime block: Host CDC-NCM for Windows native support
- * IF4: CDC NCM Communication (EP5 IN notification)
- * IF5: CDC NCM Data (EP3 OUT, EP4 IN)
+ * IF4: CDC NCM Communication (EP6 IN notification)
+ * IF5: CDC NCM Data (EP5 OUT, EP7 IN)
  */
 #define USBFS_RUNTIME_NCM_BLOCK_SIZE  87u
 static const uint8_t USBFS_RuntimeNcmBlock[USBFS_RUNTIME_NCM_BLOCK_SIZE] = {
@@ -927,21 +927,21 @@ static const uint8_t USBFS_RuntimeNcmBlock[USBFS_RUNTIME_NCM_BLOCK_SIZE] = {
     0xEA, 0x05,                                             // wMaxSegmentSize: 1514
     0x00, 0x00,                                             // wNumberMCFilters: none
     0x00,                                                   // bNumberPowerFilters
-    /* NCM Functional Descriptor: 6 bytes */
-    0x06, 0x24, 0x0D,                                       // NCM Functional
+    /* NCM Functional Descriptor: 8 bytes */
+    0x08, 0x24, 0x0D,                                       // NCM Functional
     0x00,                                                   // bmCapabilities
     0x00, 0x05,                                             // wNtbInMaxSize: 1280
     0x00, 0x10,                                             // wNdpInMaxSize: 16
-    /* Endpoint Descriptor: CDC NCM notification EP5 IN */
-    0x07, 0x05, 0x85, 0x03, 0x10, 0x00, 0x10,
+    /* Endpoint Descriptor: CDC NCM notification EP6 IN */
+    0x07, 0x05, 0x86, 0x03, 0x10, 0x00, 0x10,
     /* Interface Descriptor: CDC NCM Data (IF5 alt 0, idle) */
     0x09, 0x04, 0x05, 0x00, 0x00, 0x0A, 0x00, 0x00, 0x00,
     /* Interface Descriptor: CDC NCM Data (IF5 alt 1, active) */
     0x09, 0x04, 0x05, 0x01, 0x02, 0x0A, 0x00, 0x00, 0x00,
-    /* Endpoint Descriptor: CDC NCM data OUT EP3 */
-    0x07, 0x05, 0x03, 0x02, 0x40, 0x00, 0x00,
-    /* Endpoint Descriptor: CDC NCM data IN EP4 */
-    0x07, 0x05, 0x84, 0x02, 0x40, 0x00, 0x00,
+    /* Endpoint Descriptor: CDC NCM data OUT EP5 */
+    0x07, 0x05, 0x05, 0x02, 0x40, 0x00, 0x00,
+    /* Endpoint Descriptor: CDC NCM data IN EP7 */
+    0x07, 0x05, 0x87, 0x02, 0x40, 0x00, 0x00,
 };
 
 typedef char USBFS_RuntimeNcmBlock_SizeCheck[(sizeof(USBFS_RuntimeNcmBlock) == USBFS_RUNTIME_NCM_BLOCK_SIZE) ? 1 : -1];
