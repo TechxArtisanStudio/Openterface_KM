@@ -9,8 +9,8 @@
 extern "C" {
 #endif
 
-/* Only compile when bridge ECM is active */
-#if USB_WORK_MODE_COMPILES_BRIDGE_ECM
+/* Only compile when bridge ECM or NCM is active */
+#if USB_WORK_MODE_COMPILES_BRIDGE_ECM || USB_WORK_MODE_COMPILES_BRIDGE_NCM
 
 #define ECM_IP_CONFIG_MAGIC        0x45434D49u  /* "ECMI" */
 #define ECM_IP_CONFIG_VERSION      1u
@@ -107,7 +107,7 @@ uint8_t ECM_IPConfig_Reset(void);
 #define ECM_IPConfig_SetTargetSide(th, td)   (0x00)
 #define ECM_IPConfig_Reset()                 (0x00)
 
-#endif /* USB_WORK_MODE_COMPILES_BRIDGE_ECM */
+#endif /* USB_WORK_MODE_COMPILES_BRIDGE_ECM || USB_WORK_MODE_COMPILES_BRIDGE_NCM */
 
 #ifdef __cplusplus
 }

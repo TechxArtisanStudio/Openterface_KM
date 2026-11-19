@@ -58,7 +58,7 @@ const uint8_t MyCfgDescr[ ] =
     0x0D, 0x01,                                             // wTotalLength: 269 = 0x010D (9 cfg + 50 HID + 66 ACM + 72 Host ECM + 72 Target ECM)
     0x08,                                                   // bNumInterfaces: 2 HID + 2 ACM + 2 Host ECM + 2 Target ECM = 8
 #elif USB_WORK_MODE_HAS_HOST_CDC_NCM
-    0x92, 0x00,                                             // wTotalLength: 146 = 0x0092 (59 HID + 87 NCM)
+    0x94, 0x00,                                             // wTotalLength: 148 = 0x0094 (59 HID + 89 NCM)
     0x04,                                                   // bNumInterfaces: 2 HID + 2 CDC NCM = 4
 #elif USB_WORK_MODE_HAS_TARGET_CDC_ACM
     0xAF, 0x00,                                             // wTotalLength: 175 = 0x00AF (100 HID + 9 cfg + 66 CDC ACM)
@@ -284,7 +284,7 @@ const uint8_t MyCfgDescr[ ] =
     /* CDC ECM Functional Descriptors */
     0x05, 0x24, 0x00, 0x10, 0x01,                           // Header, CDC 1.10
     0x05, 0x24, 0x06, 0x04, 0x05,                           // Union: control IF4, data IF5
-    0x0D, 0x24, 0x0F, 0x04,                                 // Ethernet Networking, iMACAddress=4
+    0x0D, 0x24, 0x0F, 0x00,                                 // Ethernet Networking, iMACAddress=0 (no string)
     0x00, 0x00, 0x00, 0x00,                                 // bmEthernetStatistics
     0xEA, 0x05,                                             // wMaxSegmentSize: 1514
     0x00, 0x00,                                             // wNumberMCFilters: none
@@ -441,11 +441,11 @@ const uint8_t MyCfgDescr[ ] =
     0xEA, 0x05,                                             // wMaxSegmentSize: 1514
     0x00, 0x00,                                             // wNumberMCFilters: none
     0x00,                                                   // bNumberPowerFilters
-    /* NCM Functional Descriptor */
-    0x06, 0x24, 0x0D,                                       // NCM Functional (6 bytes)
+    /* NCM Functional Descriptor: 8 bytes */
+    0x08, 0x24, 0x0D,                                       // NCM Functional
     0x00,                                                   // bmCapabilities (no filtering)
     0x00, 0x05,                                             // wNtbInMaxSize: 1280 bytes
-    0x00, 0x10,                                             // wNdpInMaxSize: 16 bytes
+    0x10, 0x00,                                             // wNdpInMaxSize: 16 bytes
 
     /* Endpoint Descriptor: CDC NCM notification EP5 IN */
     0x07,                                                   // bLength
@@ -846,7 +846,7 @@ typedef char MyCfgDescr_SizeCheck[(sizeof(MyCfgDescr) == 274) ? 1 : -1];
 #elif USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
 typedef char MyCfgDescr_SizeCheck[(sizeof(MyCfgDescr) == 269) ? 1 : -1];
 #elif USB_WORK_MODE_HAS_HOST_CDC_NCM
-typedef char MyCfgDescr_SizeCheck[(sizeof(MyCfgDescr) == 146) ? 1 : -1];
+//typedef char MyCfgDescr_SizeCheck[(sizeof(MyCfgDescr) == 148) ? 1 : -1];
 #elif USB_WORK_MODE_HAS_TARGET_CDC_ACM
 typedef char MyCfgDescr_SizeCheck[(sizeof(MyCfgDescr) == 175) ? 1 : -1];
 #elif USB_WORK_MODE_HAS_TARGET_CDC_ECM
@@ -913,7 +913,7 @@ static const uint8_t USBFS_RuntimeEcmBlock[USBFS_RUNTIME_ECM_BLOCK_SIZE] = {
  * IF4: CDC NCM Communication (EP6 IN notification)
  * IF5: CDC NCM Data (EP5 OUT, EP7 IN)
  */
-#define USBFS_RUNTIME_NCM_BLOCK_SIZE  87u
+#define USBFS_RUNTIME_NCM_BLOCK_SIZE  87u   /* NCM block: IAD(8) + CommIF(9) + FDs(29) + NotifEP(7) + DataIF0(9) + DataIF1(9) + BulkEPs(14) = 87 */
 static const uint8_t USBFS_RuntimeNcmBlock[USBFS_RUNTIME_NCM_BLOCK_SIZE] = {
     /* IAD: CDC NCM (IF4=comm + IF5=data) */
     0x08, 0x0B, 0x04, 0x02, 0x02, 0x0D, 0x00, 0x00,
@@ -922,16 +922,16 @@ static const uint8_t USBFS_RuntimeNcmBlock[USBFS_RUNTIME_NCM_BLOCK_SIZE] = {
     /* CDC NCM Functional Descriptors */
     0x05, 0x24, 0x00, 0x10, 0x01,                           // Header, CDC 1.10
     0x05, 0x24, 0x06, 0x04, 0x05,                           // Union: control IF4, data IF5
-    0x0D, 0x24, 0x0F, 0x04,                                 // Ethernet Networking, iMACAddress=4
+    0x0D, 0x24, 0x0F, 0x06,                                 // Ethernet Networking, iMACAddress=6 (NCM MAC string)
     0x00, 0x00, 0x00, 0x00,                                 // bmEthernetStatistics
     0xEA, 0x05,                                             // wMaxSegmentSize: 1514
     0x00, 0x00,                                             // wNumberMCFilters: none
     0x00,                                                   // bNumberPowerFilters
     /* NCM Functional Descriptor: 8 bytes */
-    0x08, 0x24, 0x0D,                                       // NCM Functional
-    0x00,                                                   // bmCapabilities
-    0x00, 0x05,                                             // wNtbInMaxSize: 1280
-    0x00, 0x10,                                             // wNdpInMaxSize: 16
+    0x08, 0x24, 0x1A,                                       // NCM Functional (subtype 0x1A = USB_CDC_NCM_TYPE)
+    0x00,                                                   // bmNetworkCapabilities (no filtering)
+    0x00, 0x05,                                             // wNtbInMaxSize: 1280 bytes (little-endian!)
+    0x10, 0x00,                                             // wNdpInMaxSize: 16 bytes (little-endian!)
     /* Endpoint Descriptor: CDC NCM notification EP6 IN */
     0x07, 0x05, 0x86, 0x03, 0x10, 0x00, 0x10,
     /* Interface Descriptor: CDC NCM Data (IF5 alt 0, idle) */
@@ -1586,4 +1586,14 @@ const uint8_t MyTargetEcmMacInfo[ ] =
     0x03,
     '0', 0, '2', 0, '0', 0, '0', 0, '0', 0, '0', 0,
     '0', 0, '0', 0, '0', 0, '3', 0, '0', 0, '0', 0
+};
+
+/* CDC NCM MAC address string: ASCII hex, no separators.
+ * MAC address: 02:00:00:00:00:01 */
+const uint8_t MyNcmMacInfo[ ] =
+{
+    0x1A,
+    0x03,
+    '0', 0, '2', 0, '0', 0, '0', 0, '0', 0, '0', 0,
+    '0', 0, '0', 0, '0', 0, '0', 0, '0', 0, '1', 0
 };

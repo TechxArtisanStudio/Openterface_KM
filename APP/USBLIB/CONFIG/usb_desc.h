@@ -59,6 +59,7 @@
 #define USBD_SIZE_STRING_MICROPHONE  28
 #define USBD_SIZE_STRING_ECM_MAC     26
 #define USBD_SIZE_STRING_TARGET_ECM_MAC 26
+#define USBD_SIZE_STRING_NCM_MAC     26
 
 extern const uint8_t USBD_DeviceDescriptor[USBD_SIZE_DEVICE_DESC];
 extern const uint8_t USBD_ConfigDescriptor[USBD_SIZE_CONFIG_DESC];
@@ -71,6 +72,7 @@ extern const uint8_t USBD_StringSpeaker[USBD_SIZE_STRING_SPEAKER];
 extern const uint8_t USBD_StringMicrophone[USBD_SIZE_STRING_MICROPHONE];
 extern const uint8_t USBD_StringEcmMac[USBD_SIZE_STRING_ECM_MAC];
 extern const uint8_t USBD_StringTargetEcmMac[USBD_SIZE_STRING_TARGET_ECM_MAC];
+extern const uint8_t USBD_StringNcmMac[USBD_SIZE_STRING_NCM_MAC];
 const uint8_t *USBD_GetActiveConfigDescriptorData(uint16_t *len);
 uint8_t USBD_GetActiveConfigAttributes(void);
 

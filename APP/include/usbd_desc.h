@@ -118,6 +118,7 @@ extern const uint8_t MySerNumInfo[ ];
 extern const uint8_t MyEcmMacInfo[ ];
 extern const uint8_t MyHostEcmMacInfo[ ];
 extern const uint8_t MyTargetEcmMacInfo[ ];
+extern const uint8_t MyNcmMacInfo[ ];
 const uint8_t *USBFS_GetActiveConfigDescriptorData(uint16_t *len);
 uint8_t USBFS_GetActiveConfigAttributes(void);
 

@@ -52,9 +52,12 @@ volatile uint8_t  USBFS_HidProtocol[ 4 ];
 
 #define USBFS_MODE_HID_IF              0x03u
 #define USBFS_MODE_HID_REPORT_ID       0x30u
+#define USBFS_MODE_HID_DEBUG_REPORT_ID 0x31u
 #define USBFS_HID_REPORT_TYPE_FEATURE  0x03u
 #define USBFS_MODE_HID_REPORT_LEN      DEF_USBD_UEP0_SIZE
 static uint8_t USBFS_ModeHidLastStatus = STATUS_SUCCESS;
+static uint8_t USBFS_ModeHidDebugBuf[64];
+static volatile uint8_t USBFS_ModeHidDebugReady = 0;
 
 #define USBFS_MODE_HID_DIAG_VERSION_OFFSET          33u
 #define USBFS_MODE_HID_DIAG_FLAGS_OFFSET            34u
@@ -111,6 +114,13 @@ static void USBFS_ModeHid_FillReport(uint8_t *report)
     report[30] = USBFSD->UEP5_TX_CTRL;
     report[31] = (uint8_t)g_usbfs_ep7_in_count;
     report[32] = (uint8_t)(g_usbfs_ep7_in_count >> 8);
+#if USB_WORK_MODE_COMPILES_BRIDGE_NCM
+    report[33] = (uint8_t)g_target_ncm_notify_tx_count;
+    report[34] = (uint8_t)(g_target_ncm_notify_tx_count >> 8);
+    report[35] = g_target_ncm_notify_state;
+    report[36] = USBFS_Endp_Busy[DEF_UEP6];
+    report[37] = USBFSD->UEP6_TX_CTRL;
+#endif
 #endif
 
     /* Append-only diagnostics (do not change existing offsets above). */
@@ -166,6 +176,32 @@ static void USBFS_ModeHid_HandleSetReport(uint8_t *report, uint16_t report_len)
         case 0x03:
             USB_ModeConfig_RequestReboot();
             break;
+        case 0x10:  /* DEBUG_MEM_READ: Set address and read memory */
+            /* report[2..5] = address (32-bit, little-endian) */
+            /* report[6] = length (max 48 bytes to fit in report) */
+            if (report_len >= 7) {
+                uint32_t addr = (uint32_t)report[2] | ((uint32_t)report[3] << 8) |
+                                ((uint32_t)report[4] << 16) | ((uint32_t)report[5] << 24);
+                uint8_t read_len = report[6];
+                if (read_len > 48) read_len = 48;
+                /* Store debug data in buffer for GET_REPORT to return */
+                memset(USBFS_ModeHidDebugBuf, 0, sizeof(USBFS_ModeHidDebugBuf));
+                USBFS_ModeHidDebugBuf[0] = USBFS_MODE_HID_DEBUG_REPORT_ID;
+                USBFS_ModeHidDebugBuf[1] = (uint8_t)addr;
+                USBFS_ModeHidDebugBuf[2] = (uint8_t)(addr >> 8);
+                USBFS_ModeHidDebugBuf[3] = (uint8_t)(addr >> 16);
+                USBFS_ModeHidDebugBuf[4] = (uint8_t)(addr >> 24);
+                USBFS_ModeHidDebugBuf[5] = read_len;
+                /* Copy memory contents */
+                volatile uint8_t *src = (volatile uint8_t *)addr;
+                for (uint8_t i = 0; i < read_len; i++) {
+                    USBFS_ModeHidDebugBuf[6 + i] = src[i];
+                }
+                USBFS_ModeHidDebugReady = 1;
+            } else {
+                USBFS_ModeHidLastStatus = STATUS_ERR_PARAM;
+            }
+            break;
         default:
             USBFS_ModeHidLastStatus = STATUS_ERR_PARAM;
             break;
@@ -191,6 +227,36 @@ static volatile uint16_t USBFS_CDC_ControlLineState;
 static uint8_t USBFS_CDC_ECM_CtrlBuf[64];
 static uint8_t USBFS_CDC_ECM_Stat[4] = { 0, 0, 0, 0 };
 static volatile uint16_t USBFS_CDC_ECM_PacketFilter;
+#endif
+
+#if USB_WORK_MODE_COMPILES_BRIDGE_NCM
+#define USBFS_CDC_NCM_IF_COMM             4u
+#define USBFS_CDC_NCM_REQ_GET_NTB_PARAMS  0x80u
+#define USBFS_CDC_NCM_REQ_GET_NET_ADDR    0x81u
+#define USBFS_CDC_NCM_REQ_SET_NET_ADDR    0x82u
+#define USBFS_CDC_NCM_REQ_GET_NTB_FMT     0x83u
+#define USBFS_CDC_NCM_REQ_SET_NTB_FMT     0x84u
+#define USBFS_CDC_NCM_REQ_GET_NTB_IN_SZ   0x85u
+#define USBFS_CDC_NCM_REQ_SET_NTB_IN_SZ   0x86u
+#define USBFS_CDC_NCM_REQ_GET_MAX_DGRAM   0x87u
+#define USBFS_CDC_NCM_REQ_SET_MAX_DGRAM   0x88u
+#define USBFS_CDC_NCM_REQ_GET_CRC_MODE    0x89u
+#define USBFS_CDC_NCM_REQ_SET_CRC_MODE    0x8Au
+/* NTB Parameters structure (28 bytes per CDC NCM 1.0 spec Table 6.3) */
+static uint8_t USBFS_CDC_NCM_NtbParams[28] = {
+    0x1C, 0x00,  /* wLength: 28 bytes */
+    0x01, 0x00,  /* bmNtbFormatsSupported: 16-bit NTB only */
+    0x00, 0x05, 0x00, 0x00,  /* dwNtbInMaxSize: 1280 bytes (little-endian) */
+    0x04, 0x00,  /* wNdpInDivisor: 4 */
+    0x00, 0x00,  /* wNdpInPayloadRemainder: 0 */
+    0x10, 0x00,  /* wNdpInMaxSize: 16 bytes */
+    0x00, 0x05, 0x00, 0x00,  /* dwNtbOutMaxSize: 1280 bytes (little-endian) */
+    0x04, 0x00,  /* wNdpOutDivisor: 4 */
+    0x00, 0x00,  /* wNdpOutPayloadRemainder: 0 */
+    0x10, 0x00,  /* wNdpOutMaxSize: 16 bytes */
+};
+/* MAC address for NCM interface (locally administered) */
+static const uint8_t USBFS_CDC_NCM_MacAddr[6] = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
 #endif
 
 /* Endpoint Buffer */
@@ -233,6 +299,13 @@ volatile uint16_t g_usbfs_ep6_rx_len = 0;    /* last RX length */
 volatile uint32_t g_usbfs_ep6_rx_count = 0;  /* total EP6 OUT interrupts (any TOG state) */
 volatile uint16_t g_usbfs_ep7_in_count = 0;   /* total EP7 IN completions */
 volatile uint16_t g_usbfs_ep5_in_count = 0;   /* total EP5 IN (ECM notification) completions */
+volatile uint32_t g_usbfs_set_interface_if5_count = 0;  /* total SET_INTERFACE for IF5 */
+
+/* NCM bridge diagnostic variables (from ncm_bridge.c) */
+#if USB_WORK_MODE_COMPILES_BRIDGE_NCM
+extern volatile uint16_t g_target_ncm_notify_tx_count;
+extern volatile uint8_t g_target_ncm_notify_state;
+#endif
 
 /******************************************************************************/
 /* Interrupt Service Routine Declaration*/
@@ -393,7 +466,7 @@ void USBFS_Device_Endp_Init( void )
     USBFSD->UEP2_3_MOD = USBFS_UEP2_TX_EN | USBFS_UEP3_TX_EN;
 #endif
 
-#if defined(ENABLE_UAC) || USB_WORK_MODE_COMPILES_TARGET_CDC_ACM || USB_WORK_MODE_COMPILES_TARGET_CDC_ECM || USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
+#if defined(ENABLE_UAC) || USB_WORK_MODE_COMPILES_TARGET_CDC_ACM || USB_WORK_MODE_COMPILES_TARGET_CDC_ECM || USB_WORK_MODE_HAS_HOST_ACM_AND_ECM || USB_WORK_MODE_COMPILES_BRIDGE_NCM || USB_WORK_MODE_COMPILES_BRIDGE_NCM
     /* EP5: ISO IN  (Target→Host audio) or ACM interrupt IN (Host→Target).
      * EP6: ISO OUT (Host→Target audio) or ACM data OUT (Host→Target).
      * EP7: ACM data IN (Host→Target).
@@ -447,7 +520,7 @@ void USBFS_Device_Endp_Init( void )
     USBFSD->UEP2_DMA = (uint32_t)USBFS_EP2_Buf;
     USBFSD->UEP3_DMA = (uint32_t)USBFS_EP3_Buf;  /* HID AbsMouse IN */
     USBFSD->UEP4_DMA = (uint32_t)USBFS_EP4_Buf;
-#if defined(ENABLE_UAC) || USB_WORK_MODE_COMPILES_TARGET_CDC_ACM || USB_WORK_MODE_COMPILES_TARGET_CDC_ECM || USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
+#if defined(ENABLE_UAC) || USB_WORK_MODE_COMPILES_TARGET_CDC_ACM || USB_WORK_MODE_COMPILES_TARGET_CDC_ECM || USB_WORK_MODE_HAS_HOST_ACM_AND_ECM || USB_WORK_MODE_COMPILES_BRIDGE_NCM
 #ifdef ENABLE_UAC
     if (USB_ModeConfig_ActiveModeHasTargetUac() && !USB_ModeConfig_ActiveModeHasTargetCdcEcm()) {
         USBFSD->UEP5_DMA = (uint32_t)USBFS_EP5_Buf;
@@ -487,7 +560,7 @@ void USBFS_Device_Endp_Init( void )
     USBFSD->UEP2_TX_CTRL = USBFS_UEP_T_RES_NAK;
     USBFSD->UEP3_TX_CTRL = USBFS_UEP_T_RES_NAK;  /* HID AbsMouse IN */
     USBFSD->UEP4_TX_CTRL = USBFS_UEP_T_RES_NAK;
-#if defined(ENABLE_UAC) || USB_WORK_MODE_COMPILES_TARGET_CDC_ACM || USB_WORK_MODE_COMPILES_TARGET_CDC_ECM || USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
+#if defined(ENABLE_UAC) || USB_WORK_MODE_COMPILES_TARGET_CDC_ACM || USB_WORK_MODE_COMPILES_TARGET_CDC_ECM || USB_WORK_MODE_HAS_HOST_ACM_AND_ECM || USB_WORK_MODE_COMPILES_BRIDGE_NCM
     /* EP5 ISO IN: NAK until alt-setting 1 activated; TX_LEN=0 initially */
 #ifdef ENABLE_UAC
     if (USB_ModeConfig_ActiveModeHasTargetUac() && !USB_ModeConfig_ActiveModeHasTargetCdcEcm()) {
@@ -560,6 +633,23 @@ void USBFS_Device_Init( FunctionalState sta )
 
         /* Initialize USB device configuration */
         USBFS_Device_Endp_Init( );
+
+#if USB_WORK_MODE_COMPILES_BRIDGE_NCM
+        /* Force NCM endpoint configuration - USBFS_Device_Endp_Init may not set it correctly */
+        if (USB_ModeConfig_ActiveModeBridgeNcm()) {
+            USBFSD->UEP5_6_MOD = USBFS_UEP5_RX_EN | USBFS_UEP6_TX_EN;
+            USBFSD_UEP_MOD( 3 ) = USBFS_UEP7_TX_EN;
+            USBFSD->UEP5_DMA = (uint32_t)EP5_DatabufHD;
+            USBFSD->UEP6_DMA = (uint32_t)EP6_DatabufHD;
+            USBFSD->UEP7_DMA = (uint32_t)EP7_DatabufHD;
+            USBFSD->UEP6_TX_LEN = 0;
+            USBFSD->UEP6_TX_CTRL = USBFS_UEP_T_RES_NAK;
+            USBFSD->UEP5_RX_CTRL = USBFS_UEP_R_RES_ACK;
+            USBFSD->UEP7_TX_LEN = 0;
+            USBFSD->UEP7_TX_CTRL = USBFS_UEP_T_RES_NAK;
+        }
+#endif
+
         USBFSD->INT_EN = USBFS_UIE_SUSPEND | USBFS_UIE_BUS_RST | USBFS_UIE_TRANSFER;
 
         /* Wait for power stability before enabling D+ pull-up */
@@ -1015,11 +1105,21 @@ void USBFS_IRQHandler( void )
 
                             case HID_GET_REPORT:
                                 if( ( (uint8_t)( USBFS_SetupReqIndex & 0xFF ) == USBFS_MODE_HID_IF ) &&
-                                    ( (uint8_t)( USBFS_SetupReqValue >> 8 ) == USBFS_HID_REPORT_TYPE_FEATURE ) &&
-                                    ( (uint8_t)( USBFS_SetupReqValue & 0xFF ) == USBFS_MODE_HID_REPORT_ID ) )
+                                    ( (uint8_t)( USBFS_SetupReqValue >> 8 ) == USBFS_HID_REPORT_TYPE_FEATURE ) )
                                 {
-                                    USBFS_ModeHid_FillReport( USBFS_EP0_Buf );
-                                    USBFS_SetupReqLen = USBFS_MODE_HID_REPORT_LEN;
+                                    uint8_t req_report_id = (uint8_t)( USBFS_SetupReqValue & 0xFF );
+                                    if( req_report_id == USBFS_MODE_HID_REPORT_ID ) {
+                                        USBFS_ModeHid_FillReport( USBFS_EP0_Buf );
+                                        USBFS_SetupReqLen = USBFS_MODE_HID_REPORT_LEN;
+                                    }
+                                    else if( req_report_id == USBFS_MODE_HID_DEBUG_REPORT_ID && USBFS_ModeHidDebugReady ) {
+                                        memcpy( USBFS_EP0_Buf, USBFS_ModeHidDebugBuf, USBFS_MODE_HID_REPORT_LEN );
+                                        USBFS_SetupReqLen = USBFS_MODE_HID_REPORT_LEN;
+                                        USBFS_ModeHidDebugReady = 0;  /* Clear flag after reading */
+                                    }
+                                    else {
+                                        errflag = 0xFF;
+                                    }
                                 }
                                 else
                                 {
@@ -1227,6 +1327,80 @@ void USBFS_IRQHandler( void )
                                 break;
 #endif
 
+#if USB_WORK_MODE_COMPILES_BRIDGE_NCM
+                            case USBFS_CDC_NCM_REQ_GET_NTB_PARAMS:
+                                if( USB_ModeConfig_ActiveModeBridgeNcm() &&
+                                    ( ( USBFS_SetupReqType & USB_REQ_RECIP_MASK ) == USB_REQ_RECIP_INTERF ) &&
+                                    ( (uint8_t)( USBFS_SetupReqIndex & 0xFF ) == USBFS_CDC_NCM_IF_COMM ) )
+                                {
+                                    memcpy( USBFS_EP0_Buf, USBFS_CDC_NCM_NtbParams, sizeof( USBFS_CDC_NCM_NtbParams ) );
+                                    if( USBFS_SetupReqLen > sizeof( USBFS_CDC_NCM_NtbParams ) )
+                                    {
+                                        USBFS_SetupReqLen = sizeof( USBFS_CDC_NCM_NtbParams );
+                                    }
+                                    len = USBFS_SetupReqLen;
+                                }
+                                else
+                                {
+                                    errflag = 0xFF;
+                                }
+                                break;
+
+                            case USBFS_CDC_NCM_REQ_GET_NET_ADDR:
+                                if( USB_ModeConfig_ActiveModeBridgeNcm() &&
+                                    ( ( USBFS_SetupReqType & USB_REQ_RECIP_MASK ) == USB_REQ_RECIP_INTERF ) &&
+                                    ( (uint8_t)( USBFS_SetupReqIndex & 0xFF ) == USBFS_CDC_NCM_IF_COMM ) )
+                                {
+                                    memcpy( USBFS_EP0_Buf, USBFS_CDC_NCM_MacAddr, sizeof( USBFS_CDC_NCM_MacAddr ) );
+                                    if( USBFS_SetupReqLen > sizeof( USBFS_CDC_NCM_MacAddr ) )
+                                    {
+                                        USBFS_SetupReqLen = sizeof( USBFS_CDC_NCM_MacAddr );
+                                    }
+                                    len = USBFS_SetupReqLen;
+                                }
+                                else
+                                {
+                                    errflag = 0xFF;
+                                }
+                                break;
+
+                            case USBFS_CDC_NCM_REQ_GET_NTB_FMT:
+                            case USBFS_CDC_NCM_REQ_GET_NTB_IN_SZ:
+                            case USBFS_CDC_NCM_REQ_GET_MAX_DGRAM:
+                            case USBFS_CDC_NCM_REQ_GET_CRC_MODE:
+                                if( USB_ModeConfig_ActiveModeBridgeNcm() &&
+                                    ( ( USBFS_SetupReqType & USB_REQ_RECIP_MASK ) == USB_REQ_RECIP_INTERF ) &&
+                                    ( (uint8_t)( USBFS_SetupReqIndex & 0xFF ) == USBFS_CDC_NCM_IF_COMM ) )
+                                {
+                                    /* Return zeros for now (stub implementation) */
+                                    memset( USBFS_EP0_Buf, 0, USBFS_SetupReqLen );
+                                    len = USBFS_SetupReqLen;
+                                }
+                                else
+                                {
+                                    errflag = 0xFF;
+                                }
+                                break;
+
+                            case USBFS_CDC_NCM_REQ_SET_NET_ADDR:
+                            case USBFS_CDC_NCM_REQ_SET_NTB_FMT:
+                            case USBFS_CDC_NCM_REQ_SET_NTB_IN_SZ:
+                            case USBFS_CDC_NCM_REQ_SET_MAX_DGRAM:
+                            case USBFS_CDC_NCM_REQ_SET_CRC_MODE:
+                                if( USB_ModeConfig_ActiveModeBridgeNcm() &&
+                                    ( ( USBFS_SetupReqType & USB_REQ_RECIP_MASK ) == USB_REQ_RECIP_INTERF ) &&
+                                    ( (uint8_t)( USBFS_SetupReqIndex & 0xFF ) == USBFS_CDC_NCM_IF_COMM ) )
+                                {
+                                    /* Accept but ignore SET requests for now */
+                                    USBFS_SetupReqLen = 0;
+                                }
+                                else
+                                {
+                                    errflag = 0xFF;
+                                }
+                                break;
+#endif
+
                             default:
 #ifdef ENABLE_UAC
                                                                 /* UAC 1.0 endpoint sampling-frequency control. */
@@ -1258,6 +1432,45 @@ void USBFS_IRQHandler( void )
                                 }
                                 break;
                         }
+                    }
+                }
+                else if( ( USBFS_SetupReqType & USB_REQ_TYP_MASK ) == USB_REQ_TYP_VENDOR )
+                {
+                    /* Vendor Request */
+                    switch( USBFS_SetupReqCode )
+                    {
+                        case 0x50:  /* DEBUG_MEM_READ */
+                            /* bmRequestType: 0xC1 (vendor, device-to-host, device) */
+                            /* bRequest: 0x50 (DEBUG_MEM_READ) */
+                            /* wValue: address high (upper 16 bits) */
+                            /* wIndex: address low (lower 16 bits) */
+                            /* wLength: number of bytes to read */
+                            {
+                                uint32_t addr = ((uint32_t)USBFS_SetupReqValue << 16) | USBFS_SetupReqIndex;
+                                uint16_t read_len = USBFS_SetupReqLen;
+                                volatile uint8_t *src = (volatile uint8_t *)addr;
+                                if( read_len > 64 ) read_len = 64;  /* Limit to EP0 buffer size */
+                                /* Copy byte by byte to ensure completion */
+                                for( uint16_t i = 0; i < read_len; i++ ) {
+                                    USBFS_EP0_Buf[i] = src[i];
+                                }
+                                len = read_len;
+                            }
+                            break;
+
+                        case 0x51:  /* DEBUG_TEST - return fixed pattern */
+                            {
+                                USBFS_EP0_Buf[0] = 0xDE;
+                                USBFS_EP0_Buf[1] = 0xAD;
+                                USBFS_EP0_Buf[2] = 0xBE;
+                                USBFS_EP0_Buf[3] = 0xEF;
+                                len = 4;
+                            }
+                            break;
+
+                        default:
+                            errflag = 0xFF;
+                            break;
                     }
                 }
                 else
@@ -1384,6 +1597,21 @@ void USBFS_IRQHandler( void )
                                             {
                                                 pUSBFS_Descr = MyTargetEcmMacInfo;
                                                 len = DEF_USBD_ECM_MAC_DESC_LEN;
+                                            }
+                                            else
+                                            {
+                                                errflag = 0xFF;
+                                            }
+                                            break;
+#endif
+
+#if USB_WORK_MODE_COMPILES_BRIDGE_NCM
+                                        case 0x06:
+                                            /* NCM MAC address string */
+                                            if( USB_ModeConfig_ActiveModeBridgeNcm() )
+                                            {
+                                                pUSBFS_Descr = MyNcmMacInfo;
+                                                len = 0x1A;  /* 26 bytes */
                                             }
                                             else
                                             {
@@ -1711,6 +1939,7 @@ void USBFS_IRQHandler( void )
                              * alt=1 enables EP5 (bulk OUT) and EP7 (bulk IN).
                              * NCM data interface is IF5 in mode 8 (HID+NCM bridge). */
                             if (USB_ModeConfig_ActiveModeBridgeNcm() && USBFS_SetupReqIndex == 5) {
+                                g_usbfs_set_interface_if5_count++;
                                 uint8_t alt = (uint8_t)(USBFS_SetupReqValue & 0xFF);
                                 if (alt == 1) {
                                     /* Enable Target NCM endpoints.
@@ -1883,6 +2112,20 @@ void USBFS_IRQHandler( void )
         USBFSD->DEV_ADDR = 0;
         USBFS_Device_Endp_Init( );
 
+#if USB_WORK_MODE_COMPILES_BRIDGE_NCM
+        /* Ensure NCM endpoint configuration is correct after reset */
+        if (USB_ModeConfig_ActiveModeBridgeNcm()) {
+            USBFSD->UEP5_6_MOD = USBFS_UEP5_RX_EN | USBFS_UEP6_TX_EN;
+            USBFSD_UEP_MOD( 3 ) = USBFS_UEP7_TX_EN;
+            USBFSD->UEP5_DMA = (uint32_t)EP5_DatabufHD;
+            USBFSD->UEP6_DMA = (uint32_t)EP6_DatabufHD;
+            USBFSD->UEP7_DMA = (uint32_t)EP7_DatabufHD;
+            USBFSD->UEP6_TX_LEN = 0;
+            USBFSD->UEP6_TX_CTRL = USBFS_UEP_T_RES_NAK;
+            USBFSD->UEP5_RX_CTRL = USBFS_UEP_R_RES_ACK;
+        }
+#endif
+
         /* Restore critical control registers (consistent with USBFS_Device_Init) */
         USBFSD->INT_EN    = USBFS_UIE_SUSPEND | USBFS_UIE_BUS_RST | USBFS_UIE_TRANSFER;
         USBFSD->BASE_CTRL = USBFS_UC_DEV_PU_EN | USBFS_UC_INT_BUSY | USBFS_UC_DMA_EN;
@@ -1893,6 +2136,9 @@ void USBFS_IRQHandler( void )
         }
         else if (USB_ModeConfig_ActiveModeBridgeEcm()) {
             ECM_Bridge_InitTarget();
+        }
+        else if (USB_ModeConfig_ActiveModeBridgeNcm()) {
+            NCM_Bridge_InitTarget();
         }
         USBFSD->INT_FG = USBFS_UIF_BUS_RST;
     }

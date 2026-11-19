@@ -32,7 +32,7 @@ extern volatile uint32_t systick_ms;
 
 /* Debug output macro */
 #ifndef USB_DEBUG
-#define USB_DEBUG(...)
+#define USB_DEBUG(...)  printf(__VA_ARGS__)
 #endif
 
 /*******************************************************************************
@@ -104,8 +104,15 @@ static uint8_t ncm_host_ip[4];
 static uint8_t ncm_dev_ip[4];
 static uint8_t ncm_subnet_mask[4];
 
+/* Target-side network parameters */
+static uint8_t ncm_target_host_ip[4];
+static uint8_t ncm_target_dev_ip[4];
+
 /* Firmware-side peer identity on the CDC NCM link */
 static const uint8_t NCM_DEV_MAC[6] = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x32 };
+
+/* Target-side MAC (different from host-side to avoid self-MAC filtering) */
+static const uint8_t NCM_TARGET_DEV_MAC[6] = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x33 };
 
 /*******************************************************************************
  * Frame Queue Structures
@@ -625,6 +632,322 @@ static uint8_t handle_icmp_packet(const uint8_t *frame, uint16_t frame_len)
 }
 
 /*******************************************************************************
+ * DHCP Handler (Host-facing)
+ ******************************************************************************/
+static uint8_t handle_dhcp_packet(const uint8_t *frame, uint16_t frame_len)
+{
+    uint16_t eth_offset;
+    uint16_t eth_type;
+    const uint8_t *ip;
+    const uint8_t *udp;
+    uint16_t ip_total_len;
+    uint16_t ip_header_len;
+    uint16_t udp_len;
+    uint8_t dhcp_msg_type;
+    uint8_t requested_ip[4];
+    uint8_t has_requested_ip = 0;
+    static uint8_t reply[576];
+    uint16_t off;
+    uint16_t dhcp_off;
+    uint16_t udp_payload_len;
+    uint32_t sum;
+    uint16_t chk;
+
+    if (frame == NULL || frame_len < NCM_ETH_HEADER_LEN) {
+        return 0;
+    }
+
+    /* Parse Ethernet header */
+    eth_offset = NCM_ETH_HEADER_LEN;
+    eth_type = get_be16(&frame[12]);
+    while ((eth_type == NCM_ETH_TYPE_VLAN || eth_type == NCM_ETH_TYPE_QINQ) &&
+           frame_len >= (uint16_t)(eth_offset + 4u)) {
+        eth_type = get_be16(&frame[eth_offset + 2u]);
+        eth_offset = (uint16_t)(eth_offset + 4u);
+    }
+
+    if (eth_type != NCM_ETH_TYPE_IPV4 ||
+        frame_len < (uint16_t)(eth_offset + NCM_IPV4_MIN_HEADER_LEN)) {
+        return 0;
+    }
+
+    /* Parse IPv4 header */
+    ip = &frame[eth_offset];
+    if ((ip[0] >> 4) != 4u) {
+        return 0;
+    }
+
+    ip_header_len = (uint16_t)((ip[0] & 0x0Fu) * 4u);
+    if (ip_header_len < NCM_IPV4_MIN_HEADER_LEN) {
+        return 0;
+    }
+    if (frame_len < (uint16_t)(eth_offset + ip_header_len)) {
+        return 0;
+    }
+
+    ip_total_len = get_be16(&ip[2]);
+    if (ip_total_len < (uint16_t)(ip_header_len + 8u) ||
+        frame_len < (uint16_t)(eth_offset + ip_total_len)) {
+        return 0;
+    }
+
+    /* Check if UDP */
+    if (ip[9] != NCM_IPV4_PROTO_UDP) {
+        return 0;
+    }
+
+    /* Parse UDP header */
+    udp = &ip[ip_header_len];
+    udp_len = get_be16(&udp[4]);
+    if (udp_len < 8u || udp_len > (uint16_t)(ip_total_len - ip_header_len)) {
+        return 0;
+    }
+
+    /* Check if destination port is 67 (DHCP server) */
+    if (get_be16(&udp[2]) != NCM_DHCP_SERVER_PORT) {
+        return 0;
+    }
+
+    /* Parse DHCP message */
+    const uint8_t *dhcp = &udp[8];
+
+    if (udp_len < 8u + 240u) {
+        return 0;
+    }
+
+    /* Check magic cookie */
+    uint32_t cookie = ((uint32_t)dhcp[236] << 24) | ((uint32_t)dhcp[237] << 16) |
+                      ((uint32_t)dhcp[238] << 8) | dhcp[239];
+    if (cookie != NCM_DHCP_MAGIC_COOKIE) {
+        return 0;
+    }
+
+    /* Parse DHCP options to find message type and requested IP */
+    uint16_t opt_off = 240;
+    dhcp_msg_type = 0;
+    while (opt_off < udp_len - 8u) {
+        uint8_t opt_code = dhcp[opt_off];
+        if (opt_code == NCM_DHCP_OPT_END) {
+            break;
+        }
+        if (opt_off + 1 >= udp_len - 8u) {
+            break;
+        }
+        uint8_t opt_len = dhcp[opt_off + 1];
+        if (opt_off + 2 + opt_len > udp_len - 8u) {
+            break;
+        }
+
+        if (opt_code == NCM_DHCP_OPT_MSG_TYPE && opt_len == 1) {
+            dhcp_msg_type = dhcp[opt_off + 2];
+        } else if (opt_code == NCM_DHCP_OPT_REQUESTED_IP && opt_len == 4) {
+            memcpy(requested_ip, &dhcp[opt_off + 2], 4);
+            has_requested_ip = 1;
+        }
+
+        opt_off = (uint16_t)(opt_off + 2 + opt_len);
+    }
+
+    if (dhcp_msg_type != NCM_DHCP_DISCOVER && dhcp_msg_type != NCM_DHCP_REQUEST) {
+        return 0;
+    }
+
+    USB_DEBUG("NCM: DHCP type=%d\r\n", dhcp_msg_type);
+
+    /* Build DHCP response (ACK) */
+    memset(reply, 0, sizeof(reply));
+    off = 0;
+
+    /* Determine if broadcast reply */
+    uint8_t ciaddr[4];
+    uint8_t broadcast_reply;
+    memcpy(ciaddr, &dhcp[12], 4);
+    broadcast_reply = (dhcp_msg_type == NCM_DHCP_DISCOVER) ||
+                      ((get_be16(&dhcp[10]) & 0x8000u) != 0);
+
+    /* Ethernet header */
+    if (broadcast_reply) {
+        memset(&reply[off], 0xFF, 6);  /* dst = broadcast */
+    } else {
+        memcpy(&reply[off], &frame[6], 6);  /* dst = original src */
+    }
+    off += 6;
+    memcpy(&reply[off], NCM_DEV_MAC, 6); /* src = firmware device MAC */
+    off += 6;
+    reply[off++] = 0x08;
+    reply[off++] = 0x00;  /* EtherType = IPv4 */
+
+    /* IPv4 header (20 bytes) */
+    uint16_t ip_start = off;
+    memset(&reply[off], 0, 20);
+    reply[off + 0] = 0x45;  /* version=4, IHL=5 */
+    reply[off + 1] = 0x00;  /* DSCP */
+    reply[off + 4] = 0x00;  /* identification */
+    reply[off + 5] = 0x01;
+    reply[off + 6] = 0x40;  /* DF */
+    reply[off + 7] = 0x00;  /* fragment offset */
+    reply[off + 8] = 64;    /* TTL */
+    reply[off + 9] = NCM_IPV4_PROTO_UDP;  /* protocol = UDP */
+    /* src IP = firmware device IP */
+    memcpy(&reply[off + 12], ncm_dev_ip, 4);
+    /* dst IP */
+    if (broadcast_reply) {
+        memset(&reply[off + 16], 0xFF, 4);  /* broadcast */
+    } else if ((ciaddr[0] | ciaddr[1] | ciaddr[2] | ciaddr[3]) != 0) {
+        memcpy(&reply[off + 16], ciaddr, 4);
+    } else {
+        memcpy(&reply[off + 16], ncm_host_ip, 4);
+    }
+    off += 20;
+
+    /* UDP header (8 bytes) */
+    uint16_t udp_start = off;
+    put_be16(&reply[off + 0], NCM_DHCP_SERVER_PORT);  /* src port */
+    put_be16(&reply[off + 2], NCM_DHCP_CLIENT_PORT);  /* dst port */
+    /* UDP length and checksum filled later */
+    off += 8;
+
+    /* DHCP packet */
+    dhcp_off = off;
+    reply[off++] = 0x02;  /* op = BOOTREPLY */
+    reply[off++] = 0x01;  /* htype = Ethernet */
+    reply[off++] = 0x06;  /* hlen = 6 */
+    reply[off++] = 0x00;  /* hops */
+    /* xid (copy from request) */
+    memcpy(&reply[off], &dhcp[4], 4);
+    off += 4;
+    /* secs (2 bytes) */
+    memset(&reply[off], 0, 2);
+    off += 2;
+    /* flags (2 bytes) - copy from request */
+    memcpy(&reply[off], &dhcp[10], 2);
+    off += 2;
+    /* ciaddr (4 bytes) */
+    memset(&reply[off], 0, 4);
+    off += 4;
+    /* yiaddr (4 bytes) - IP offered to client */
+    memcpy(&reply[off], ncm_host_ip, 4);
+    off += 4;
+    /* siaddr (4 bytes) - server IP */
+    memcpy(&reply[off], ncm_dev_ip, 4);
+    off += 4;
+    /* giaddr (4 bytes) */
+    memset(&reply[off], 0, 4);
+    off += 4;
+    /* chaddr (copy from request) */
+    memcpy(&reply[off], &dhcp[28], 16);
+    off += 16;
+    /* sname (64 bytes) */
+    memset(&reply[off], 0, 64);
+    off += 64;
+    /* file (128 bytes) */
+    memset(&reply[off], 0, 128);
+    off += 128;
+    /* magic cookie */
+    reply[off++] = 0x63;
+    reply[off++] = 0x82;
+    reply[off++] = 0x53;
+    reply[off++] = 0x63;
+
+    /* DHCP options */
+    /* Message type: OFFER for DISCOVER, ACK for REQUEST */
+    {
+        uint8_t reply_type = (dhcp_msg_type == NCM_DHCP_DISCOVER)
+            ? NCM_DHCP_OFFER : NCM_DHCP_ACK;
+        reply[off++] = NCM_DHCP_OPT_MSG_TYPE;
+        reply[off++] = 0x01;
+        reply[off++] = reply_type;
+    }
+
+    /* Server identifier */
+    reply[off++] = NCM_DHCP_OPT_SERVER_ID;
+    reply[off++] = 0x04;
+    memcpy(&reply[off], ncm_dev_ip, 4);
+    off += 4;
+
+    /* Lease time: 1 hour */
+    reply[off++] = NCM_DHCP_OPT_LEASE_TIME;
+    reply[off++] = 0x04;
+    reply[off++] = 0x00;
+    reply[off++] = 0x00;
+    reply[off++] = 0x0E;
+    reply[off++] = 0x10;  /* 3600 seconds */
+
+    /* Subnet mask */
+    reply[off++] = NCM_DHCP_OPT_SUBNET;
+    reply[off++] = 0x04;
+    memcpy(&reply[off], ncm_subnet_mask, 4);
+    off += 4;
+
+    /* DNS server - use public DNS */
+    reply[off++] = NCM_DHCP_OPT_DNS;
+    reply[off++] = 0x04;
+    uint8_t public_dns[4] = { 8, 8, 8, 8 };
+    memcpy(&reply[off], public_dns, 4);
+    off += 4;
+
+    /* End option */
+    reply[off++] = NCM_DHCP_OPT_END;
+
+    /* Pad DHCP message to minimum 300 bytes */
+    while ((off - dhcp_off) < 300) {
+        reply[off++] = 0x00;
+    }
+
+    /* Fill UDP length */
+    udp_payload_len = (uint16_t)(off - udp_start);
+    put_be16(&reply[udp_start + 4], udp_payload_len);
+
+    /* Calculate UDP checksum */
+    sum = 0;
+    /* Pseudo-header */
+    sum += (uint16_t)(reply[ip_start + 12] << 8) | reply[ip_start + 13];
+    sum += (uint16_t)(reply[ip_start + 14] << 8) | reply[ip_start + 15];
+    sum += (uint16_t)(reply[ip_start + 16] << 8) | reply[ip_start + 17];
+    sum += (uint16_t)(reply[ip_start + 18] << 8) | reply[ip_start + 19];
+    sum += NCM_IPV4_PROTO_UDP;
+    sum += udp_payload_len;
+    /* UDP header + data */
+    for (uint16_t i = 0; i < udp_payload_len; i += 2) {
+        uint16_t idx = udp_start + i;
+        if (idx >= sizeof(reply)) break;
+        if (i + 1 < udp_payload_len && idx + 1 < sizeof(reply)) {
+            sum += (uint16_t)(reply[idx] << 8) | reply[idx + 1];
+        } else {
+            sum += (uint16_t)reply[idx] << 8;
+        }
+    }
+    while (sum >> 16) {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    chk = (~sum) & 0xFFFF;
+    if (chk == 0) chk = 0xFFFF;
+    put_be16(&reply[udp_start + 6], chk);
+
+    /* Fill IPv4 total length */
+    uint16_t ip_total = (uint16_t)(off - ip_start);
+    reply[ip_start + 2] = (ip_total >> 8) & 0xFF;
+    reply[ip_start + 3] = ip_total & 0xFF;
+
+    /* Calculate IPv4 checksum */
+    sum = 0;
+    for (int i = 0; i < 20; i += 2) {
+        sum += (uint16_t)(reply[ip_start + i] << 8) | reply[ip_start + i + 1];
+    }
+    while (sum >> 16) {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    chk = (~sum) & 0xFFFF;
+    reply[ip_start + 10] = (chk >> 8) & 0xFF;
+    reply[ip_start + 11] = chk & 0xFF;
+
+    USB_DEBUG("NCM: DHCP ACK queued, len=%d\r\n", off);
+    queue_clear(&g_host_tx_queue);
+    queue_push(&g_host_tx_queue, reply, off);
+    return 1;
+}
+
+/*******************************************************************************
  * Host Frame Handler (RX from Windows host)
  ******************************************************************************/
 static uint8_t handle_host_frame(const uint8_t *data, uint16_t len)
@@ -648,7 +971,11 @@ static uint8_t handle_host_frame(const uint8_t *data, uint16_t len)
         if (handle_icmp_packet(data, len)) {
             return 1;
         }
-        /* TODO: Handle DHCP, TCP, UDP */
+        /* Check for DHCP */
+        if (handle_dhcp_packet(data, len)) {
+            return 1;
+        }
+        /* TODO: Handle TCP, UDP */
     }
 
     /* Frame not handled - could forward to target or BLE */
@@ -762,8 +1089,12 @@ void NCM_Bridge_HostRxDone(const uint8_t *data, uint16_t len)
     NCM_ParseNtb(data, len, handle_host_frame);
 }
 
+/* Debug counter for NCM_Bridge_Poll calls */
+volatile uint32_t g_ncm_bridge_poll_count = 0;
+
 void NCM_Bridge_Poll(void)
 {
+    g_ncm_bridge_poll_count++;
     poll_host_notification();
     NCM_Bridge_Target_NotificationPoll();
 
@@ -841,6 +1172,8 @@ void NCM_Bridge_UpdateIPConfig(void)
     ECM_IPConfig_GetHostIP(ncm_host_ip);
     ECM_IPConfig_GetDevIP(ncm_dev_ip);
     ECM_IPConfig_GetSubnetMask(ncm_subnet_mask);
+    ECM_IPConfig_GetTargetHostIP(ncm_target_host_ip);
+    ECM_IPConfig_GetTargetDevIP(ncm_target_dev_ip);
     USB_DEBUG("NCM: IP config updated\r\n");
 }
 
@@ -850,6 +1183,13 @@ volatile uint32_t g_target_ncm_notify_hold_until_ms = 0;
 volatile uint16_t g_target_ncm_notify_tx_count = 0;
 volatile uint8_t g_target_ncm_data_if_active = 0;
 volatile uint16_t g_ncm_target_tx_count = 0;
+
+/* Debug counters for notification poll */
+volatile uint32_t g_ncm_notify_poll_count = 0;
+volatile uint32_t g_ncm_notify_state0_count = 0;
+volatile uint32_t g_ncm_notify_hold_count = 0;
+volatile uint32_t g_ncm_notify_busy_count = 0;
+volatile uint32_t g_ncm_notify_noready_count = 0;
 
 static uint8_t g_target_ncm_notify_last_send_ms = 0;
 
@@ -900,35 +1240,51 @@ void NCM_Bridge_Target_NotificationPoll(void)
     uint8_t packet[16];
     uint8_t len;
     uint32_t now = systick_ms;
+    uint8_t result;
+
+    g_ncm_notify_poll_count++;
 
     if (g_target_ncm_notify_state == 0) {
+        g_ncm_notify_state0_count++;
         return;
     }
 
     if ((int32_t)(now - g_target_ncm_notify_hold_until_ms) < 0) {
+        g_ncm_notify_hold_count++;
         return;
     }
 
     /* USBFS EP6 IN busy check */
     if (USBFS_Endp_Busy[DEF_UEP6] != 0) {
+        g_ncm_notify_busy_count++;
+        USB_DEBUG("NCM: EP6 busy=%d, skipping notification\r\n", USBFS_Endp_Busy[DEF_UEP6]);
         return;
     }
 
     len = make_target_notification(g_target_ncm_notify_state, NCM_BRIDGE_TARGET_COMM_IF, packet);
-    if (len > 0 && USBFS_Endp_DataUp(DEF_UEP6, packet, len, DEF_UEP_CPY_LOAD) == READY) {
-        g_target_ncm_notify_last_send_ms = now;
-        g_target_ncm_notify_tx_count++;
-        if (g_target_ncm_notify_state == NCM_NOTIFY_DOWN) {
-            g_target_ncm_notify_state = NCM_NOTIFY_UP;
-            g_target_ncm_notify_hold_until_ms = now + NCM_LINK_UP_DELAY_MS;
-        } else if (g_target_ncm_notify_state == NCM_NOTIFY_UP) {
-            g_target_ncm_notify_state = NCM_NOTIFY_SPEED;
-            g_target_ncm_notify_hold_until_ms = now + NCM_LINK_SPEED_DELAY_MS;
-        } else if (g_target_ncm_notify_state == NCM_NOTIFY_SPEED) {
-            g_target_ncm_notify_state = NCM_NOTIFY_BEACON;
-            g_target_ncm_notify_hold_until_ms = now + NCM_LINK_UP_BEACON_MS;
-        } else if (g_target_ncm_notify_state == NCM_NOTIFY_BEACON) {
-            g_target_ncm_notify_state = 0;  /* Done */
+    USB_DEBUG("NCM: Sending notification state=%d len=%d\r\n", g_target_ncm_notify_state, len);
+    if (len > 0) {
+        result = USBFS_Endp_DataUp(DEF_UEP6, packet, len, DEF_UEP_CPY_LOAD);
+        USB_DEBUG("NCM: Endp_DataUp result=%d (READY=%d)\r\n", result, READY);
+        if (result == READY) {
+            USB_DEBUG("NCM: Notification sent, state=%d\r\n", g_target_ncm_notify_state);
+            g_target_ncm_notify_last_send_ms = now;
+            g_target_ncm_notify_tx_count++;
+            if (g_target_ncm_notify_state == NCM_NOTIFY_DOWN) {
+                g_target_ncm_notify_state = NCM_NOTIFY_UP;
+                g_target_ncm_notify_hold_until_ms = now + NCM_LINK_UP_DELAY_MS;
+            } else if (g_target_ncm_notify_state == NCM_NOTIFY_UP) {
+                g_target_ncm_notify_state = NCM_NOTIFY_SPEED;
+                g_target_ncm_notify_hold_until_ms = now + NCM_LINK_SPEED_DELAY_MS;
+            } else if (g_target_ncm_notify_state == NCM_NOTIFY_SPEED) {
+                g_target_ncm_notify_state = NCM_NOTIFY_BEACON;
+                g_target_ncm_notify_hold_until_ms = now + NCM_LINK_UP_BEACON_MS;
+            } else if (g_target_ncm_notify_state == NCM_NOTIFY_BEACON) {
+                g_target_ncm_notify_state = 0;  /* Done */
+            }
+        } else {
+            g_ncm_notify_noready_count++;
+            USB_DEBUG("NCM: Failed to send notification, result=%d\r\n", result);
         }
     }
 }
@@ -942,13 +1298,416 @@ void NCM_Bridge_Target_RearmLinkNotify(void)
     g_target_ncm_notify_hold_until_ms = systick_ms + 100;
 }
 
+/*******************************************************************************
+ * Target-side ARP Handler
+ ******************************************************************************/
+static uint8_t handle_target_arp_frame(const uint8_t *frame, uint16_t frame_len)
+{
+    uint16_t eth_type;
+    uint16_t arp_op;
+
+    if (frame_len < 28) {
+        return 0;
+    }
+
+    eth_type = (uint16_t)(frame[12] << 8) | frame[13];
+    if (eth_type != 0x0806) {
+        return 0;
+    }
+
+    arp_op = (uint16_t)(frame[20] << 8) | frame[21];
+
+    /* Handle ARP requests for our target device IP */
+    if (arp_op == 1) {  /* ARP request */
+        uint8_t is_dev_ip = (frame[38] == ncm_target_dev_ip[0] && frame[39] == ncm_target_dev_ip[1] &&
+                             frame[40] == ncm_target_dev_ip[2] && frame[41] == ncm_target_dev_ip[3]);
+
+        if (!is_dev_ip) {
+            return 0;
+        }
+
+        USB_DEBUG("NCM: Target ARP req matched, queuing reply\r\n");
+
+        /* Build ARP reply */
+        uint8_t reply[42];
+        memcpy(&reply[0], &frame[6], 6);   /* dst MAC = requestor MAC */
+        memcpy(&reply[6], NCM_TARGET_DEV_MAC, 6); /* src MAC = our target MAC */
+        reply[12] = 0x08; reply[13] = 0x06; /* EtherType = ARP */
+        reply[14] = 0x00; reply[15] = 0x01; /* hardware type = Ethernet */
+        reply[16] = 0x08; reply[17] = 0x00; /* protocol type = IPv4 */
+        reply[18] = 6;  reply[19] = 4;     /* MAC len=6, IP len=4 */
+        reply[20] = 0x00; reply[21] = 0x02; /* op = ARP reply */
+        memcpy(&reply[22], NCM_TARGET_DEV_MAC, 6);  /* sender MAC */
+        memcpy(&reply[28], ncm_target_dev_ip, 4);   /* sender IP */
+        memcpy(&reply[32], &frame[22], 6);   /* target MAC (from request) */
+        memcpy(&reply[38], &frame[28], 4);   /* target IP = requestor IP */
+
+        queue_push(&g_target_tx_queue, reply, sizeof(reply));
+        return 1;
+    }
+
+    /* Handle ARP replies - pass to BLE-Eth for connection resolution */
+    if (arp_op == 2) {  /* ARP reply */
+        uint8_t sender_ip[4], sender_mac[6];
+        memcpy(sender_mac, &frame[22], 6);
+        memcpy(sender_ip, &frame[28], 4);
+        if (BLE_Eth_HandleArpReply(sender_ip, sender_mac)) {
+            USB_DEBUG("NCM: Target ARP reply processed\r\n");
+            if (g_ble_tx_event_cb) {
+                g_ble_tx_event_cb();
+            }
+        }
+    }
+
+    return 0;
+}
+
+/*******************************************************************************
+ * Target-side DHCP Handler
+ ******************************************************************************/
+static uint8_t handle_target_dhcp_packet(const uint8_t *frame, uint16_t frame_len)
+{
+    uint16_t eth_offset;
+    uint16_t eth_type;
+    const uint8_t *ip;
+    const uint8_t *udp;
+    uint16_t ip_total_len;
+    uint16_t ip_header_len;
+    uint16_t udp_len;
+    uint8_t dhcp_msg_type;
+    static uint8_t reply[576];
+    uint16_t off;
+    uint16_t dhcp_off;
+    uint16_t udp_payload_len;
+    uint32_t sum;
+    uint16_t chk;
+
+    if (frame == NULL || frame_len < NCM_ETH_HEADER_LEN) {
+        return 0;
+    }
+
+    /* Parse Ethernet header */
+    eth_offset = NCM_ETH_HEADER_LEN;
+    eth_type = get_be16(&frame[12]);
+    while ((eth_type == NCM_ETH_TYPE_VLAN || eth_type == NCM_ETH_TYPE_QINQ) &&
+           frame_len >= (uint16_t)(eth_offset + 4u)) {
+        eth_type = get_be16(&frame[eth_offset + 2u]);
+        eth_offset = (uint16_t)(eth_offset + 4u);
+    }
+
+    if (eth_type != NCM_ETH_TYPE_IPV4 ||
+        frame_len < (uint16_t)(eth_offset + NCM_IPV4_MIN_HEADER_LEN)) {
+        return 0;
+    }
+
+    /* Parse IPv4 header */
+    ip = &frame[eth_offset];
+    if ((ip[0] >> 4) != 4u) {
+        return 0;
+    }
+
+    ip_header_len = (uint16_t)((ip[0] & 0x0Fu) * 4u);
+    if (ip_header_len < NCM_IPV4_MIN_HEADER_LEN) {
+        return 0;
+    }
+    if (frame_len < (uint16_t)(eth_offset + ip_header_len)) {
+        return 0;
+    }
+
+    ip_total_len = get_be16(&ip[2]);
+    if (ip_total_len < (uint16_t)(ip_header_len + 8u) ||
+        frame_len < (uint16_t)(eth_offset + ip_total_len)) {
+        return 0;
+    }
+
+    /* Check if UDP */
+    if (ip[9] != NCM_IPV4_PROTO_UDP) {
+        return 0;
+    }
+
+    /* Parse UDP header */
+    udp = &ip[ip_header_len];
+    udp_len = get_be16(&udp[4]);
+    if (udp_len < 8u || udp_len > (uint16_t)(ip_total_len - ip_header_len)) {
+        return 0;
+    }
+
+    /* Check if destination port is 67 (DHCP server) */
+    if (get_be16(&udp[2]) != NCM_DHCP_SERVER_PORT) {
+        return 0;
+    }
+
+    /* Parse DHCP message */
+    const uint8_t *dhcp = &udp[8];
+
+    if (udp_len < 8u + 240u) {
+        return 0;
+    }
+
+    /* Check magic cookie */
+    uint32_t cookie = ((uint32_t)dhcp[236] << 24) | ((uint32_t)dhcp[237] << 16) |
+                      ((uint32_t)dhcp[238] << 8) | dhcp[239];
+    if (cookie != NCM_DHCP_MAGIC_COOKIE) {
+        return 0;
+    }
+
+    /* Parse DHCP options to find message type */
+    uint16_t opt_off = 240;
+    dhcp_msg_type = 0;
+    while (opt_off < udp_len - 8u) {
+        uint8_t opt_code = dhcp[opt_off];
+        if (opt_code == NCM_DHCP_OPT_END) {
+            break;
+        }
+        if (opt_off + 1 >= udp_len - 8u) {
+            break;
+        }
+        uint8_t opt_len = dhcp[opt_off + 1];
+        if (opt_off + 2 + opt_len > udp_len - 8u) {
+            break;
+        }
+
+        if (opt_code == NCM_DHCP_OPT_MSG_TYPE && opt_len == 1) {
+            dhcp_msg_type = dhcp[opt_off + 2];
+        }
+
+        opt_off = (uint16_t)(opt_off + 2 + opt_len);
+    }
+
+    if (dhcp_msg_type != NCM_DHCP_DISCOVER && dhcp_msg_type != NCM_DHCP_REQUEST) {
+        return 0;
+    }
+
+    USB_DEBUG("NCM: Target DHCP type=%d\r\n", dhcp_msg_type);
+
+    /* Build DHCP response (ACK) */
+    memset(reply, 0, sizeof(reply));
+    off = 0;
+
+    /* Determine if broadcast reply */
+    uint8_t ciaddr[4];
+    uint8_t broadcast_reply;
+    memcpy(ciaddr, &dhcp[12], 4);
+    broadcast_reply = (dhcp_msg_type == NCM_DHCP_DISCOVER) ||
+                      ((get_be16(&dhcp[10]) & 0x8000u) != 0);
+
+    /* Ethernet header */
+    if (broadcast_reply) {
+        memset(&reply[off], 0xFF, 6);  /* dst = broadcast */
+    } else {
+        memcpy(&reply[off], &frame[6], 6);  /* dst = original src */
+    }
+    off += 6;
+    memcpy(&reply[off], NCM_TARGET_DEV_MAC, 6); /* src = firmware target MAC */
+    off += 6;
+    reply[off++] = 0x08;
+    reply[off++] = 0x00;  /* EtherType = IPv4 */
+
+    /* IPv4 header (20 bytes) */
+    uint16_t ip_start = off;
+    memset(&reply[off], 0, 20);
+    reply[off + 0] = 0x45;  /* version=4, IHL=5 */
+    reply[off + 1] = 0x00;  /* DSCP */
+    reply[off + 4] = 0x00;  /* identification */
+    reply[off + 5] = 0x01;
+    reply[off + 6] = 0x40;  /* DF */
+    reply[off + 7] = 0x00;  /* fragment offset */
+    reply[off + 8] = 64;    /* TTL */
+    reply[off + 9] = NCM_IPV4_PROTO_UDP;  /* protocol = UDP */
+    /* src IP = firmware target device IP */
+    memcpy(&reply[off + 12], ncm_target_dev_ip, 4);
+    /* dst IP */
+    if (broadcast_reply) {
+        memset(&reply[off + 16], 0xFF, 4);  /* broadcast */
+    } else if ((ciaddr[0] | ciaddr[1] | ciaddr[2] | ciaddr[3]) != 0) {
+        memcpy(&reply[off + 16], ciaddr, 4);
+    } else {
+        memcpy(&reply[off + 16], ncm_target_host_ip, 4);
+    }
+    off += 20;
+
+    /* UDP header (8 bytes) */
+    uint16_t udp_start = off;
+    put_be16(&reply[off + 0], NCM_DHCP_SERVER_PORT);  /* src port */
+    put_be16(&reply[off + 2], NCM_DHCP_CLIENT_PORT);  /* dst port */
+    off += 8;
+
+    /* DHCP packet */
+    dhcp_off = off;
+    reply[off++] = 0x02;  /* op = BOOTREPLY */
+    reply[off++] = 0x01;  /* htype = Ethernet */
+    reply[off++] = 0x06;  /* hlen = 6 */
+    reply[off++] = 0x00;  /* hops */
+    /* xid (copy from request) */
+    memcpy(&reply[off], &dhcp[4], 4);
+    off += 4;
+    /* secs (2 bytes) */
+    memset(&reply[off], 0, 2);
+    off += 2;
+    /* flags (2 bytes) - copy from request */
+    memcpy(&reply[off], &dhcp[10], 2);
+    off += 2;
+    /* ciaddr (4 bytes) */
+    memset(&reply[off], 0, 4);
+    off += 4;
+    /* yiaddr (4 bytes) - IP offered to client (target host IP) */
+    memcpy(&reply[off], ncm_target_host_ip, 4);
+    off += 4;
+    /* siaddr (4 bytes) - server IP */
+    memcpy(&reply[off], ncm_target_dev_ip, 4);
+    off += 4;
+    /* giaddr (4 bytes) */
+    memset(&reply[off], 0, 4);
+    off += 4;
+    /* chaddr (copy from request) */
+    memcpy(&reply[off], &dhcp[28], 16);
+    off += 16;
+    /* sname (64 bytes) */
+    memset(&reply[off], 0, 64);
+    off += 64;
+    /* file (128 bytes) */
+    memset(&reply[off], 0, 128);
+    off += 128;
+    /* magic cookie */
+    reply[off++] = 0x63;
+    reply[off++] = 0x82;
+    reply[off++] = 0x53;
+    reply[off++] = 0x63;
+
+    /* DHCP options */
+    /* Message type: OFFER for DISCOVER, ACK for REQUEST */
+    {
+        uint8_t reply_type = (dhcp_msg_type == NCM_DHCP_DISCOVER)
+            ? NCM_DHCP_OFFER : NCM_DHCP_ACK;
+        reply[off++] = NCM_DHCP_OPT_MSG_TYPE;
+        reply[off++] = 0x01;
+        reply[off++] = reply_type;
+    }
+
+    /* Server identifier */
+    reply[off++] = NCM_DHCP_OPT_SERVER_ID;
+    reply[off++] = 0x04;
+    memcpy(&reply[off], ncm_target_dev_ip, 4);
+    off += 4;
+
+    /* Lease time: 1 hour */
+    reply[off++] = NCM_DHCP_OPT_LEASE_TIME;
+    reply[off++] = 0x04;
+    reply[off++] = 0x00;
+    reply[off++] = 0x00;
+    reply[off++] = 0x0E;
+    reply[off++] = 0x10;  /* 3600 seconds */
+
+    /* Subnet mask */
+    reply[off++] = NCM_DHCP_OPT_SUBNET;
+    reply[off++] = 0x04;
+    memcpy(&reply[off], ncm_subnet_mask, 4);
+    off += 4;
+
+    /* DNS server - use public DNS */
+    reply[off++] = NCM_DHCP_OPT_DNS;
+    reply[off++] = 0x04;
+    uint8_t public_dns[4] = { 8, 8, 8, 8 };
+    memcpy(&reply[off], public_dns, 4);
+    off += 4;
+
+    /* End option */
+    reply[off++] = NCM_DHCP_OPT_END;
+
+    /* Pad DHCP message to minimum 300 bytes */
+    while ((off - dhcp_off) < 300) {
+        reply[off++] = 0x00;
+    }
+
+    /* Fill UDP length */
+    udp_payload_len = (uint16_t)(off - udp_start);
+    put_be16(&reply[udp_start + 4], udp_payload_len);
+
+    /* Calculate UDP checksum */
+    sum = 0;
+    sum += (uint16_t)(reply[ip_start + 12] << 8) | reply[ip_start + 13];
+    sum += (uint16_t)(reply[ip_start + 14] << 8) | reply[ip_start + 15];
+    sum += (uint16_t)(reply[ip_start + 16] << 8) | reply[ip_start + 17];
+    sum += (uint16_t)(reply[ip_start + 18] << 8) | reply[ip_start + 19];
+    sum += NCM_IPV4_PROTO_UDP;
+    sum += udp_payload_len;
+    for (uint16_t i = 0; i < udp_payload_len; i += 2) {
+        uint16_t idx = udp_start + i;
+        if (idx >= sizeof(reply)) break;
+        if (i + 1 < udp_payload_len && idx + 1 < sizeof(reply)) {
+            sum += (uint16_t)(reply[idx] << 8) | reply[idx + 1];
+        } else {
+            sum += (uint16_t)reply[idx] << 8;
+        }
+    }
+    while (sum >> 16) {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    chk = (~sum) & 0xFFFF;
+    if (chk == 0) chk = 0xFFFF;
+    put_be16(&reply[udp_start + 6], chk);
+
+    /* Fill IPv4 total length */
+    uint16_t ip_total = (uint16_t)(off - ip_start);
+    reply[ip_start + 2] = (ip_total >> 8) & 0xFF;
+    reply[ip_start + 3] = ip_total & 0xFF;
+
+    /* Calculate IPv4 checksum */
+    sum = 0;
+    for (int i = 0; i < 20; i += 2) {
+        sum += (uint16_t)(reply[ip_start + i] << 8) | reply[ip_start + i + 1];
+    }
+    while (sum >> 16) {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    chk = (~sum) & 0xFFFF;
+    reply[ip_start + 10] = (chk >> 8) & 0xFF;
+    reply[ip_start + 11] = chk & 0xFF;
+
+    USB_DEBUG("NCM: Target DHCP ACK queued, len=%d\r\n", off);
+    queue_clear(&g_target_tx_queue);
+    queue_push(&g_target_tx_queue, reply, off);
+    return 1;
+}
+
+/*******************************************************************************
+ * Target-side Frame Handler (RX from Target PC)
+ ******************************************************************************/
+static uint8_t handle_target_frame(const uint8_t *data, uint16_t len)
+{
+    uint16_t eth_type;
+
+    if (len < NCM_ETH_HEADER_LEN) {
+        return 0;
+    }
+
+    eth_type = (uint16_t)(data[12] << 8) | data[13];
+
+    /* Handle ARP */
+    if (eth_type == 0x0806) {
+        return handle_target_arp_frame(data, len);
+    }
+
+    /* Handle IPv4 */
+    if (eth_type == NCM_ETH_TYPE_IPV4) {
+        /* Check for DHCP */
+        if (handle_target_dhcp_packet(data, len)) {
+            return 1;
+        }
+        /* TODO: Handle ICMP, TCP, UDP */
+    }
+
+    /* Frame not handled */
+    return 0;
+}
+
 /**
  * Handle data received from target via EP5 OUT (NTB data).
  */
 void NCM_Bridge_TargetRxDone(const uint8_t *data, uint16_t len)
 {
     g_target_ncm_data_if_active = 1;
-    NCM_ParseNtb(data, len, handle_host_frame);
+    NCM_ParseNtb(data, len, handle_target_frame);
 }
 
 /**
@@ -956,13 +1715,23 @@ void NCM_Bridge_TargetRxDone(const uint8_t *data, uint16_t len)
  */
 void NCM_Bridge_InitTarget(void)
 {
+    USB_DEBUG("NCM: InitTarget called\r\n");
     memset(&g_target_tx_queue, 0, sizeof(g_target_tx_queue));
     memset(&g_target_rx_frame, 0, sizeof(g_target_rx_frame));
-    g_target_ncm_notify_state = 0;
+
+    /* Start link notification sequence: DOWN -> UP -> SPEED -> BEACON */
+    g_target_ncm_notify_state = NCM_NOTIFY_DOWN;
     g_target_ncm_notify_hold_until_ms = 0;
     g_target_ncm_notify_tx_count = 0;
     g_target_ncm_data_if_active = 0;
     g_ncm_target_tx_count = 0;
+
+    /* Load target-side IP config */
+    ECM_IPConfig_GetTargetHostIP(ncm_target_host_ip);
+    ECM_IPConfig_GetTargetDevIP(ncm_target_dev_ip);
+    USB_DEBUG("NCM: Target IP=%d.%d.%d.%d\r\n",
+              ncm_target_dev_ip[0], ncm_target_dev_ip[1],
+              ncm_target_dev_ip[2], ncm_target_dev_ip[3]);
 }
 
 uint8_t NCM_Bridge_SendRawFrame(const uint8_t *data, uint16_t len)

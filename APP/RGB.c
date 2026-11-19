@@ -160,7 +160,11 @@ void RGB_Init(void)
     TIM_Cmd(TIM3, ENABLE);
 
     /* --- Step 3: TIM2 systick --- */
+    /* TIM2 is now initialized early in main() via Systick_Init() */
+    /* Only call RGB_TIM_Init() for KVM-Go (version 1) which has RGB LEDs */
+#if version == 1
     RGB_TIM_Init();
+#endif
 
     /* --- Step 4: PA14 as input pull-up (SD LED enable, active-low) --- */
     RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA, ENABLE);

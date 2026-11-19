@@ -1019,4 +1019,12 @@ const uint8_t USBD_StringTargetEcmMac[USBD_SIZE_STRING_TARGET_ECM_MAC] = {
     '0', 0, '0', 0, '0', 0, '0', 0, '0', 0, '3', 0
 };
 
+/* NCM MAC string descriptor */
+const uint8_t USBD_StringNcmMac[USBD_SIZE_STRING_NCM_MAC] = {
+    USBD_SIZE_STRING_NCM_MAC,
+    USB_STRING_DESCRIPTOR_TYPE,
+    '0', 0, '2', 0, '0', 0, '0', 0, '0', 0, '0', 0,
+    '0', 0, '0', 0, '0', 0, '0', 0, '0', 0, '1', 0
+};
+
 

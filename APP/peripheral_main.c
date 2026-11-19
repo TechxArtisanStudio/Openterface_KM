@@ -32,6 +32,33 @@
 #include "include/ecm_ip_config.h"
 
 /*********************************************************************
+ * @fn      Systick_Init
+ *
+ * @brief   Initialize TIM2 as 1ms systick timer (works for all hardware variants)
+ */
+static void Systick_Init(void)
+{
+    RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM2, ENABLE);
+
+    TIM_TimeBaseInitTypeDef TIM_TimeBaseStructure = {0};
+    TIM_TimeBaseStructure.TIM_Period = 999;          /* 1000 ticks per period */
+    TIM_TimeBaseStructure.TIM_Prescaler = 35;        /* 36 MHz / 36 = 1 MHz */
+    TIM_TimeBaseStructure.TIM_ClockDivision = 0;
+    TIM_TimeBaseStructure.TIM_CounterMode = TIM_CounterMode_Up;
+    TIM_TimeBaseInit(TIM2, &TIM_TimeBaseStructure);
+
+    TIM_ITConfig(TIM2, TIM_IT_Update, ENABLE);
+    TIM_Cmd(TIM2, ENABLE);
+
+    NVIC_InitTypeDef NVIC_InitStructure = {0};
+    NVIC_InitStructure.NVIC_IRQChannel = TIM2_IRQn;
+    NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 1;
+    NVIC_InitStructure.NVIC_IRQChannelSubPriority = 0;
+    NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
+    NVIC_Init(&NVIC_InitStructure);
+}
+
+/*********************************************************************
  * GLOBAL TYPEDEFS
  */
 #ifdef ENABLE_BLE
@@ -258,6 +285,7 @@ int main(void) {
     NVIC_PriorityGroupConfig(NVIC_PriorityGroup_1);
     SystemCoreClockUpdate();
     Delay_Init();
+    Systick_Init();  /* Initialize 1ms timer early - needed by all modules */
     USB_ModeConfig_Init();
     ECM_IPConfig_Init();  // Initialize ECM IP configuration (before dependent modules)
     DefaultTargetConfig_Init();  // Uses ECM target IP as its fallback
@@ -266,7 +294,8 @@ int main(void) {
     Set_USBConfig();
     USB_Init();
     USB_Interrupts_Config();
-#ifdef ENABLE_BLE
+/* Skip BLE init for NCM bridge mode to avoid version mismatch hang */
+#if defined(ENABLE_BLE) && USB_WORK_MODE != 8
     WCHBLE_Init();
 #endif
     if (version == 1)
@@ -290,7 +319,8 @@ int main(void) {
     Keyboard_Init();
     Mouse_Init();
     //ble_init(Must be placed after USB initialization)
-#ifdef ENABLE_BLE
+/* Skip BLE init for NCM bridge mode to avoid version mismatch hang */
+#if defined(ENABLE_BLE) && USB_WORK_MODE != 8
     HAL_Init();
     GAPRole_PeripheralInit();
     Peripheral_Init();
