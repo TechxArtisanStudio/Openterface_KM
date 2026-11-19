@@ -23,6 +23,7 @@ C_SRCS += \
 ../APP/keyboard_handler.c \
 ../APP/km_ring.c \
 ../APP/mouse_handler.c \
+../APP/ncm_bridge.c \
 ../APP/peripheral.c \
 ../APP/peripheral_main.c \
 ../APP/pwm_led.c \
@@ -53,6 +54,7 @@ C_DEPS += \
 ./APP/keyboard_handler.d \
 ./APP/km_ring.d \
 ./APP/mouse_handler.d \
+./APP/ncm_bridge.d \
 ./APP/peripheral.d \
 ./APP/peripheral_main.d \
 ./APP/pwm_led.d \
@@ -83,6 +85,7 @@ OBJS += \
 ./APP/keyboard_handler.o \
 ./APP/km_ring.o \
 ./APP/mouse_handler.o \
+./APP/ncm_bridge.o \
 ./APP/peripheral.o \
 ./APP/peripheral_main.o \
 ./APP/pwm_led.o \

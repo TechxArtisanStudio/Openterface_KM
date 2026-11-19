@@ -97,6 +97,7 @@ endif
 #   hid_uac_ecm         = ECM + UAC; no shipping product uses it
 #   hid_acm_ecm         = CDC ACM + CDC ECM                                   (minikvm)
 #   hid_acm_ecm_bridge  = CDC ACM + CDC ECM + target-side ECM bridge         (kvmgo, keymod-plus)
+#   hid_ncm_bridge      = CDC NCM toward host, target-side NCM bridge         (keymod-plus)
 USB_WORK_MODE ?= $(if $(filter 0,$(ENABLE_UAC)),hid_acm,hid_uac_acm)
 
 ifeq ($(USB_WORK_MODE),hid_acm)
@@ -116,6 +117,9 @@ USB_WORK_MODE_ID := 6
 USB_WORK_MODE_ENABLE_UAC := 0
 else ifeq ($(USB_WORK_MODE),hid_acm_ecm_bridge)
 USB_WORK_MODE_ID := 7
+USB_WORK_MODE_ENABLE_UAC := 0
+else ifeq ($(USB_WORK_MODE),hid_ncm_bridge)
+USB_WORK_MODE_ID := 8
 USB_WORK_MODE_ENABLE_UAC := 0
 else
 $(error Unsupported USB_WORK_MODE '$(USB_WORK_MODE)')
