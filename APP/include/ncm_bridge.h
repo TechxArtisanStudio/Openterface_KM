@@ -29,6 +29,7 @@ void NCM_Bridge_Poll(void);
 void NCM_Bridge_SetBleTxCallback(void (*cb)(void));
 uint8_t NCM_Bridge_SendRawFrame(const uint8_t *data, uint16_t len);
 void NCM_Bridge_Target_RearmLinkNotify(void);
+void NCM_Bridge_Target_NotificationPoll(void);  /* USBFS-side link notification poll */
 
 /* NTB builder/parser functions (exposed for testing) */
 uint16_t NCM_BuildNtb(uint8_t *ntb_buf, uint16_t max_size,
@@ -46,6 +47,7 @@ uint8_t NCM_ParseNtb(const uint8_t *ntb_buf, uint16_t ntb_len,
 #define NCM_Bridge_SetBleTxCallback(cb)    ((void)0)
 #define NCM_Bridge_SendRawFrame(data, len) ((uint8_t)0)
 #define NCM_Bridge_Target_RearmLinkNotify() ((void)0)
+#define NCM_Bridge_Target_NotificationPoll() ((void)0)
 #endif
 
 /* --- Diagnostic variables (always defined) ------------------------------- */
@@ -53,6 +55,14 @@ extern volatile uint8_t g_host_ncm_data_if_active;
 extern volatile uint16_t g_ncm_tx_count;
 extern volatile uint8_t g_ncm_garp_sent;
 extern volatile uint8_t g_ncm_ntb_sequence;
+
+/* Target-side NCM link notification state machine */
+extern volatile uint8_t  g_target_ncm_notify_state;
+extern volatile uint16_t g_target_ncm_notify_tx_count;
+extern volatile uint8_t  g_target_ncm_data_if_active;
+
+/* Target-side NCM TX counters */
+extern volatile uint16_t g_ncm_target_tx_count;
 
 #ifdef __cplusplus
 }

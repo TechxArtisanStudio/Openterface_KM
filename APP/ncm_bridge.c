@@ -165,6 +165,8 @@ typedef struct {
 #define NCM_NOTIFY_BEACON   4u
 
 #define NCM_LINK_DOWN_HOLD_MS   800u
+#define NCM_LINK_UP_DELAY_MS    100u   /* Delay between DOWN and UP notifications */
+#define NCM_LINK_SPEED_DELAY_MS 50u    /* Delay between UP and SPEED notifications */
 #define NCM_LINK_UP_BEACON_MS   1000u
 
 /*******************************************************************************
@@ -178,6 +180,10 @@ static uint8_t g_host_zlp_pending;
 static uint8_t g_host_notify_state;
 static uint32_t g_host_notify_last_send_ms;
 static uint32_t g_host_notify_hold_until_ms;
+
+/* Target-side NCM state (forward declarations for use in NCM_Bridge_Poll) */
+static NCM_FrameQueue_t g_target_tx_queue;
+static NCM_RxFrame_t g_target_rx_frame;
 
 /* Callback for BLE TX events */
 static void (*g_ble_tx_event_cb)(void);
@@ -759,8 +765,9 @@ void NCM_Bridge_HostRxDone(const uint8_t *data, uint16_t len)
 void NCM_Bridge_Poll(void)
 {
     poll_host_notification();
+    NCM_Bridge_Target_NotificationPoll();
 
-    /* TX path: if EP4 IN is free and we have queued frames, build and send an NTB */
+    /* Host-facing TX path (USBD controller) */
     if (!USBD_Endp4_Busy && g_host_tx_queue.count > 0) {
         /* Build NTB from one frame (single-frame NTBs for Phase 1) */
         uint8_t ntb_buf[NCM_NTB_MAX_SIZE];
@@ -794,6 +801,39 @@ void NCM_Bridge_Poll(void)
             }
         }
     }
+
+    /* Target-facing TX path (USBFS controller) */
+    if (USBFS_Endp_Busy[DEF_UEP7] == 0 && g_target_tx_queue.count > 0) {
+        /* Build NTB from one frame */
+        uint8_t ntb_buf[NCM_NTB_MAX_SIZE];
+        const uint8_t *frame_ptrs[1];
+        uint16_t frame_lens[1];
+        uint8_t frame_count = 0;
+
+        NCM_Frame_t *frame = &g_target_tx_queue.frames[g_target_tx_queue.rd];
+        if (frame->len > 0) {
+            frame_ptrs[0] = frame->data;
+            frame_lens[0] = frame->len;
+            frame_count = 1;
+        }
+
+        if (frame_count > 0) {
+            uint16_t ntb_len = NCM_BuildNtb(ntb_buf, sizeof(ntb_buf),
+                                             frame_ptrs, frame_lens,
+                                             frame_count, g_ncm_ntb_sequence);
+            g_ncm_ntb_sequence++;
+
+            /* Send NTB via EP7 IN */
+            if (USBFS_Endp_DataUp(DEF_UEP7, ntb_buf, ntb_len, DEF_UEP_CPY_LOAD) == READY) {
+                g_ncm_target_tx_count++;
+                /* Pop the frame from queue */
+                uint32_t csr = ncm_irq_save();
+                g_target_tx_queue.count--;
+                g_target_tx_queue.rd = (g_target_tx_queue.rd + 1) % NCM_BRIDGE_QUEUE_DEPTH;
+                ncm_irq_restore(csr);
+            }
+        }
+    }
 }
 
 void NCM_Bridge_UpdateIPConfig(void)
@@ -804,14 +844,146 @@ void NCM_Bridge_UpdateIPConfig(void)
     USB_DEBUG("NCM: IP config updated\r\n");
 }
 
-/* Stub implementations for unused functions */
-void NCM_Bridge_InitTarget(void) { }
-void NCM_Bridge_TargetRxDone(const uint8_t *data, uint16_t len) { (void)data; (void)len; }
-void NCM_Bridge_Target_RearmLinkNotify(void) { }
+/* Target-side NCM state variables */
+volatile uint8_t g_target_ncm_notify_state = 0;
+volatile uint32_t g_target_ncm_notify_hold_until_ms = 0;
+volatile uint16_t g_target_ncm_notify_tx_count = 0;
+volatile uint8_t g_target_ncm_data_if_active = 0;
+volatile uint16_t g_ncm_target_tx_count = 0;
+
+static uint8_t g_target_ncm_notify_last_send_ms = 0;
+
+/* Target-side interface number for NCM communication (IF4 in our descriptor) */
+#define NCM_BRIDGE_TARGET_COMM_IF    4u
+
+/**
+ * Build NCM notification packet (same format as host-side).
+ */
+static uint8_t make_target_notification(uint8_t state, uint8_t interface, uint8_t *packet)
+{
+    packet[0] = 0xA1;
+
+    if (state == NCM_NOTIFY_DOWN) {
+        packet[1] = 0x00;
+        put_u16(&packet[2], 0);
+        put_u16(&packet[4], interface);
+        put_u16(&packet[6], 0);
+        return 8;
+    }
+
+    if (state == NCM_NOTIFY_UP || state == NCM_NOTIFY_BEACON) {
+        packet[1] = 0x00;
+        put_u16(&packet[2], 1);
+        put_u16(&packet[4], interface);
+        put_u16(&packet[6], 0);
+        return 8;
+    }
+
+    if (state == NCM_NOTIFY_SPEED) {
+        packet[1] = 0x2A;
+        put_u16(&packet[2], 0);
+        put_u16(&packet[4], interface);
+        put_u16(&packet[6], 8);
+        put_u32(&packet[8], NCM_BRIDGE_LINK_SPEED_BPS);
+        put_u32(&packet[12], NCM_BRIDGE_LINK_SPEED_BPS);
+        return 16;
+    }
+
+    return 0;
+}
+
+/**
+ * Poll target-side notification endpoint (EP6 IN) - sends NCM link notifications.
+ */
+void NCM_Bridge_Target_NotificationPoll(void)
+{
+    uint8_t packet[16];
+    uint8_t len;
+    uint32_t now = systick_ms;
+
+    if (g_target_ncm_notify_state == 0) {
+        return;
+    }
+
+    if ((int32_t)(now - g_target_ncm_notify_hold_until_ms) < 0) {
+        return;
+    }
+
+    /* USBFS EP6 IN busy check */
+    if (USBFS_Endp_Busy[DEF_UEP6] != 0) {
+        return;
+    }
+
+    len = make_target_notification(g_target_ncm_notify_state, NCM_BRIDGE_TARGET_COMM_IF, packet);
+    if (len > 0 && USBFS_Endp_DataUp(DEF_UEP6, packet, len, DEF_UEP_CPY_LOAD) == READY) {
+        g_target_ncm_notify_last_send_ms = now;
+        g_target_ncm_notify_tx_count++;
+        if (g_target_ncm_notify_state == NCM_NOTIFY_DOWN) {
+            g_target_ncm_notify_state = NCM_NOTIFY_UP;
+            g_target_ncm_notify_hold_until_ms = now + NCM_LINK_UP_DELAY_MS;
+        } else if (g_target_ncm_notify_state == NCM_NOTIFY_UP) {
+            g_target_ncm_notify_state = NCM_NOTIFY_SPEED;
+            g_target_ncm_notify_hold_until_ms = now + NCM_LINK_SPEED_DELAY_MS;
+        } else if (g_target_ncm_notify_state == NCM_NOTIFY_SPEED) {
+            g_target_ncm_notify_state = NCM_NOTIFY_BEACON;
+            g_target_ncm_notify_hold_until_ms = now + NCM_LINK_UP_BEACON_MS;
+        } else if (g_target_ncm_notify_state == NCM_NOTIFY_BEACON) {
+            g_target_ncm_notify_state = 0;  /* Done */
+        }
+    }
+}
+
+/**
+ * Re-arm target-side link notification (called on SET_INTERFACE(alt=1)).
+ */
+void NCM_Bridge_Target_RearmLinkNotify(void)
+{
+    g_target_ncm_notify_state = NCM_NOTIFY_UP;
+    g_target_ncm_notify_hold_until_ms = systick_ms + 100;
+}
+
+/**
+ * Handle data received from target via EP5 OUT (NTB data).
+ */
+void NCM_Bridge_TargetRxDone(const uint8_t *data, uint16_t len)
+{
+    g_target_ncm_data_if_active = 1;
+    NCM_ParseNtb(data, len, handle_host_frame);
+}
+
+/**
+ * Initialize target-side NCM state.
+ */
+void NCM_Bridge_InitTarget(void)
+{
+    memset(&g_target_tx_queue, 0, sizeof(g_target_tx_queue));
+    memset(&g_target_rx_frame, 0, sizeof(g_target_rx_frame));
+    g_target_ncm_notify_state = 0;
+    g_target_ncm_notify_hold_until_ms = 0;
+    g_target_ncm_notify_tx_count = 0;
+    g_target_ncm_data_if_active = 0;
+    g_ncm_target_tx_count = 0;
+}
+
 uint8_t NCM_Bridge_SendRawFrame(const uint8_t *data, uint16_t len)
 {
-    (void)data; (void)len;
-    return 0;
+    if (USBFS_Endp_Busy[DEF_UEP7] != 0 || g_target_tx_queue.count >= NCM_BRIDGE_QUEUE_DEPTH) {
+        return 0;
+    }
+
+    NCM_Frame_t *frame = &g_target_tx_queue.frames[g_target_tx_queue.wr];
+    if (len > sizeof(frame->data)) {
+        len = sizeof(frame->data);
+    }
+    memcpy(frame->data, data, len);
+    frame->len = len;
+
+    uint32_t csr = ncm_irq_save();
+    g_target_tx_queue.count++;
+    g_target_tx_queue.wr = (g_target_tx_queue.wr + 1) % NCM_BRIDGE_QUEUE_DEPTH;
+    ncm_irq_restore(csr);
+
+    return 1;
 }
 
 #endif /* USB_WORK_MODE_COMPILES_BRIDGE_NCM */

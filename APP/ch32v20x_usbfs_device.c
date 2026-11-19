@@ -23,6 +23,7 @@
 #include "include/uac_handler.h"
 #include "include/acm_bridge.h"
 #include "include/ecm_bridge.h"
+#include "include/ncm_bridge.h"
 #include "include/ble_eth_protocol.h"
 #include "include/usb_mode_config.h"
 /*******************************************************************************/
@@ -776,12 +777,33 @@ void USBFS_IRQHandler( void )
                         }
                         break;
 
-#if USB_WORK_MODE_COMPILES_TARGET_CDC_ACM || USB_WORK_MODE_COMPILES_TARGET_CDC_ECM
+#if (USB_WORK_MODE_COMPILES_TARGET_CDC_ACM || USB_WORK_MODE_COMPILES_TARGET_CDC_ECM) && !USB_WORK_MODE_COMPILES_BRIDGE_NCM
                     case USBFS_UIS_TOKEN_IN | DEF_UEP7:
                         g_usbfs_ep7_in_count++;
                         USBFSD->UEP7_TX_CTRL = ( USBFSD->UEP7_TX_CTRL & ~USBFS_UEP_T_RES_MASK ) | USBFS_UEP_T_RES_NAK;
                         USBFSD->UEP7_TX_CTRL ^= USBFS_UEP_T_TOG;
                         USBFS_Endp_Busy[ DEF_UEP7 ] = 0;
+                        break;
+#endif
+
+#if USB_WORK_MODE_COMPILES_BRIDGE_NCM
+                    case USBFS_UIS_TOKEN_IN | DEF_UEP6:
+                        /* NCM bridge mode: EP6 interrupt IN (link notification) */
+                        if (USB_ModeConfig_ActiveModeBridgeNcm()) {
+                            USBFSD->UEP6_TX_CTRL = ( USBFSD->UEP6_TX_CTRL & ~USBFS_UEP_T_RES_MASK ) | USBFS_UEP_T_RES_NAK;
+                            USBFSD->UEP6_TX_CTRL ^= USBFS_UEP_T_TOG;
+                            USBFS_Endp_Busy[ DEF_UEP6 ] = 0;
+                        }
+                        break;
+
+                    case USBFS_UIS_TOKEN_IN | DEF_UEP7:
+                        /* NCM bridge mode: EP7 bulk IN (NTB data to host) */
+                        if (USB_ModeConfig_ActiveModeBridgeNcm()) {
+                            g_usbfs_ep7_in_count++;
+                            USBFSD->UEP7_TX_CTRL = ( USBFSD->UEP7_TX_CTRL & ~USBFS_UEP_T_RES_MASK ) | USBFS_UEP_T_RES_NAK;
+                            USBFSD->UEP7_TX_CTRL ^= USBFS_UEP_T_TOG;
+                            USBFS_Endp_Busy[ DEF_UEP7 ] = 0;
+                        }
                         break;
 #endif
 #endif
@@ -870,6 +892,20 @@ void USBFS_IRQHandler( void )
                         break;
 
 #if defined(ENABLE_UAC) || USB_WORK_MODE_COMPILES_TARGET_CDC_ACM || USB_WORK_MODE_COMPILES_TARGET_CDC_ECM
+
+#if USB_WORK_MODE_COMPILES_BRIDGE_NCM
+                    case USBFS_UIS_TOKEN_OUT | DEF_UEP5:
+                        /* NCM bridge mode: EP5 bulk OUT (NTB data from host) */
+                        if (USB_ModeConfig_ActiveModeBridgeNcm()) {
+                            if (intst & USBFS_UIS_TOG_OK) {
+                                NCM_Bridge_TargetRxDone(EP5_DatabufHD, USBFSD->RX_LEN);
+                                USBFSD->UEP5_RX_CTRL ^= USBFS_UEP_R_TOG;
+                            }
+                            USBFSD->UEP5_RX_CTRL = (USBFSD->UEP5_RX_CTRL & ~USBFS_UEP_R_RES_MASK) | USBFS_UEP_R_RES_ACK;
+                        }
+                        break;
+#endif
+
                     case USBFS_UIS_TOKEN_OUT | DEF_UEP6:
 #ifdef ENABLE_UAC
                         if (USB_ModeConfig_ActiveModeHasTargetUac()) {
@@ -1639,6 +1675,40 @@ void USBFS_IRQHandler( void )
                                 }
                             }
 #endif /* USB_WORK_MODE_COMPILES_TARGET_CDC_ECM */
+
+#if USB_WORK_MODE_COMPILES_BRIDGE_NCM
+                            /* CDC-NCM data interface: alt=0 disables endpoints,
+                             * alt=1 enables EP5 (bulk OUT) and EP7 (bulk IN).
+                             * NCM data interface is IF5 in mode 8 (HID+NCM bridge). */
+                            if (USB_ModeConfig_ActiveModeBridgeNcm() && USBFS_SetupReqIndex == 5) {
+                                uint8_t alt = (uint8_t)(USBFS_SetupReqValue & 0xFF);
+                                if (alt == 1) {
+                                    /* Enable Target NCM endpoints.
+                                     * EP5 OUT: bulk RX from host
+                                     * EP7 IN: bulk TX to host
+                                     * Do NOT set UEP_R_TOG/UEP_T_TOG — bulk endpoints start at
+                                     * DATA0; setting TOG would make the hardware expect DATA1
+                                     * and reject the host's first DATA0 packet. */
+                                    USBFSD->UEP5_RX_CTRL = USBFS_UEP_R_RES_ACK;
+                                    USBFSD->UEP7_TX_CTRL = USBFS_UEP_T_RES_NAK;
+                                    USBFSD->UEP7_TX_LEN  = 0;
+                                    USBFS_Endp_Busy[DEF_UEP7] = 0;
+                                    /* Re-arm link notification so host sees link-up */
+                                    NCM_Bridge_Target_RearmLinkNotify();
+                                    g_target_ncm_data_if_active = 1;
+                                }
+                                else {
+                                    /* Keep RX active even on alt=0 — host may deactivate
+                                       then immediately reactivate, and we need to receive
+                                       during this window. */
+                                    USBFSD->UEP5_RX_CTRL = USBFS_UEP_R_RES_ACK;
+                                    USBFSD->UEP7_TX_CTRL = USBFS_UEP_T_RES_NAK;
+                                    USBFSD->UEP7_TX_LEN  = 0;
+                                    USBFS_Endp_Busy[DEF_UEP7] = 0;
+                                    g_target_ncm_data_if_active = 1;
+                                }
+                            }
+#endif /* USB_WORK_MODE_COMPILES_BRIDGE_NCM */
                             break;
 
                         /* host get status of specified device/interface/end-points */
