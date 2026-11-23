@@ -35,6 +35,13 @@ extern volatile uint32_t systick_ms;
 #define USB_DEBUG(...)  printf(__VA_ARGS__)
 #endif
 
+/* Forward declarations for target-facing notification state */
+volatile uint8_t g_target_ncm_notify_state = 1;  /* NCM_NOTIFY_DOWN */
+volatile uint32_t g_target_ncm_notify_hold_until_ms = 0;
+volatile uint16_t g_target_ncm_notify_tx_count = 0;
+volatile uint32_t g_ncm_bus_reset_count = 0;
+volatile uint32_t g_ncm_init_target_count = 0;
+
 /*******************************************************************************
  * NCM Protocol Constants
  ******************************************************************************/
@@ -190,7 +197,26 @@ static uint32_t g_host_notify_hold_until_ms;
 
 /* Target-side NCM state (forward declarations for use in NCM_Bridge_Poll) */
 static NCM_FrameQueue_t g_target_tx_queue;
-static NCM_RxFrame_t g_target_rx_frame;
+
+/* USBFS TX: NTB is built here and copied into the EP7 buffer by
+ * USBFS_Endp_DataUp(); the controller may transfer after NCM_Bridge_Poll
+ * returns, so a stack buffer would be unsafe. */
+static uint8_t  s_target_ntb_tx[NCM_NTB_MAX_SIZE];
+static uint16_t s_target_ntb_seq;
+static uint8_t  s_target_zlp_pending;
+
+/* USBFS loads exactly one MPS per DataUp() into the endpoint buffer; a
+ * longer TX_LEN is emitted as a single oversized packet, which the host
+ * reports as babble (EOVERFLOW) and quickly disables the port.  A queued
+ * NTB is therefore handed to EP7 one 64-byte packet at a time. */
+static uint16_t s_target_ntb_tx_len;   /* current NTB length, 0 = idle */
+static uint16_t s_target_ntb_tx_off;   /* bytes already given to USBFS */
+
+/* USBFS RX: EP5 OUT delivers one 64-byte packet per interrupt, so an NTB
+ * arriving as several packets must be reassembled before parsing. */
+static uint8_t  s_target_rx_buf[NCM_NTB_MAX_SIZE];
+static uint16_t s_target_rx_len;
+static uint16_t s_target_rx_need;
 
 /* Callback for BLE TX events */
 static void (*g_ble_tx_event_cb)(void);
@@ -250,6 +276,7 @@ uint16_t NCM_BuildNtb(uint8_t *ntb_buf, uint16_t max_size,
     uint16_t data_offset;
     uint16_t padded_frame_len;
     uint16_t frame_len;
+    uint16_t src_len;
     const uint8_t *frame;
 
     if (!ntb_buf || !frames || !frame_lens || frame_count == 0) {
@@ -264,8 +291,15 @@ uint16_t NCM_BuildNtb(uint8_t *ntb_buf, uint16_t max_size,
         return 0;
     }
 
+    /* Ethernet frames shorter than 60 bytes must be zero-padded on the wire;
+     * the datagram length advertised in the NDP includes that padding. */
+    if (frame_len < 60u) {
+        frame_len = 60u;
+    }
+
     /* Calculate padded frame length (4-byte alignment required by NCM) */
     padded_frame_len = (frame_len + 3) & ~3;
+    src_len = frame_lens[0];
 
     /* Calculate total NTB length */
     ntb_len = NCM_NTB_HEADER_SIZE + NCM_NDP_HEADER_SIZE +
@@ -280,14 +314,21 @@ uint16_t NCM_BuildNtb(uint8_t *ntb_buf, uint16_t max_size,
     ndp_offset = NCM_NTB_HEADER_SIZE;
     data_offset = ndp_offset + NCM_NDP_HEADER_SIZE + ((frame_count + 1) * NCM_NDP_ENTRY_SIZE);
 
-    /* Fill NTB Header */
-    put_u16(&ntb_buf[0], ntb_len);      /* wBlockLength */
-    put_u16(&ntb_buf[2], sequence);     /* wSequence */
-    put_u16(&ntb_buf[4], ndp_offset);   /* wNdpIndex */
-    put_u16(&ntb_buf[6], 0);            /* wNdpIndexAlt = 0 */
-    ntb_buf[8] = 0; ntb_buf[9] = 0;     /* Reserved */
-    ntb_buf[10] = 0; ntb_buf[11] = 0;
-    ntb_buf[12] = 0; ntb_buf[13] = 0;
+    /* Fill NTB Header according to CDC NCM spec (NTB-16 format):
+     * - bytes 0-3: dwSignature ('NCMH' = 0x484D434E)
+     * - bytes 4-5: wHeaderLength (12)
+     * - bytes 6-7: wSequence
+     * - bytes 8-9: wBlockLength
+     * - bytes 10-11: wNdpIndex
+     */
+    ntb_buf[0] = 'N';   /* dwSignature = 'NCMH' */
+    ntb_buf[1] = 'C';
+    ntb_buf[2] = 'M';
+    ntb_buf[3] = 'H';
+    put_u16(&ntb_buf[4], 12);           /* wHeaderLength = 12 */
+    put_u16(&ntb_buf[6], sequence);     /* wSequence */
+    put_u16(&ntb_buf[8], ntb_len);      /* wBlockLength */
+    put_u16(&ntb_buf[10], ndp_offset);  /* wNdpIndex */
 
     /* Fill NDP (Network Datagram Pointer) */
     ntb_buf[ndp_offset + 0] = 'N';      /* dwSignature = 'NCM0' */
@@ -306,11 +347,11 @@ uint16_t NCM_BuildNtb(uint8_t *ntb_buf, uint16_t max_size,
     put_u16(&ntb_buf[ndp_offset + 14], 0);  /* wDatagramLength[1] = 0 */
 
     /* Copy frame data */
-    memcpy(&ntb_buf[data_offset], frame, frame_len);
+    memcpy(&ntb_buf[data_offset], frame, src_len);
 
-    /* Zero-pad to 4-byte boundary */
-    if (padded_frame_len > frame_len) {
-        memset(&ntb_buf[data_offset + frame_len], 0, padded_frame_len - frame_len);
+    /* Zero-pad the frame to 60 bytes if needed, then to 4-byte alignment */
+    if (padded_frame_len > src_len) {
+        memset(&ntb_buf[data_offset + src_len], 0, padded_frame_len - src_len);
     }
 
     return ntb_len;
@@ -335,26 +376,39 @@ uint8_t NCM_ParseNtb(const uint8_t *ntb_buf, uint16_t ntb_len,
     uint8_t frame_count = 0;
     uint16_t entry_offset;
 
-    if (!ntb_buf || ntb_len < NCM_NTB_HEADER_SIZE) {
+    if (!ntb_buf || ntb_len < 12) {
         return 0;
     }
 
-    /* Parse NTB header */
-    block_len = ntb_buf[0] | ((uint16_t)ntb_buf[1] << 8);
-    ndp_index = ntb_buf[4] | ((uint16_t)ntb_buf[5] << 8);
+    /* Parse NTB header according to CDC NCM spec (section 3.2.1):
+     * - bytes 0-3: dwSignature ('NCMH' = 0x484D434E)
+     * - bytes 4-5: wHeaderLength (typically 12)
+     * - bytes 6-7: wSequence
+     * - bytes 8-9: wBlockLength
+     * - bytes 10-11: wNdpIndex
+     */
+    /* Verify signature 'NCMH' */
+    if (ntb_buf[0] != 0x4E || ntb_buf[1] != 0x43 ||
+        ntb_buf[2] != 0x4D || ntb_buf[3] != 0x48) {
+        USB_DEBUG("NCM: Invalid NTB signature\r\n");
+        return 0;
+    }
+
+    block_len = ntb_buf[8] | ((uint16_t)ntb_buf[9] << 8);
+    ndp_index = ntb_buf[10] | ((uint16_t)ntb_buf[11] << 8);
 
     if (block_len > ntb_len) {
         USB_DEBUG("NCM: NTB block_len %d > ntb_len %d\r\n", block_len, ntb_len);
         return 0;
     }
-    if (ndp_index >= ntb_len || ndp_index < NCM_NTB_HEADER_SIZE) {
+    if (ndp_index >= ntb_len || ndp_index < 12) {
         USB_DEBUG("NCM: NDP index %d out of range\r\n", ndp_index);
         return 0;
     }
 
     /* Verify NDP signature 'NCM0' */
-    if (ntb_buf[ndp_index] != 'N' || ntb_buf[ndp_index + 1] != 'C' ||
-        ntb_buf[ndp_index + 2] != 'M' || ntb_buf[ndp_index + 3] != '0') {
+    if (ntb_buf[ndp_index] != 0x4E || ntb_buf[ndp_index + 1] != 0x43 ||
+        ntb_buf[ndp_index + 2] != 0x4D || ntb_buf[ndp_index + 3] != 0x30) {
         USB_DEBUG("NCM: Invalid NDP signature\r\n");
         return 0;
     }
@@ -1070,6 +1124,10 @@ void NCM_Bridge_Init(void)
     g_host_notify_last_send_ms = 0;
     g_host_notify_hold_until_ms = 0;
 
+    /* Start target-facing link notification sequence */
+    g_target_ncm_notify_state = NCM_NOTIFY_DOWN;
+    g_target_ncm_notify_hold_until_ms = 0;
+
     /* Load IP config */
     ECM_IPConfig_GetHostIP(ncm_host_ip);
     ECM_IPConfig_GetDevIP(ncm_dev_ip);
@@ -1089,19 +1147,17 @@ void NCM_Bridge_HostRxDone(const uint8_t *data, uint16_t len)
     NCM_ParseNtb(data, len, handle_host_frame);
 }
 
-/* Debug counter for NCM_Bridge_Poll calls */
-volatile uint32_t g_ncm_bridge_poll_count = 0;
+/* Static NTB buffer for the host-facing (USBD) NCM path as well. */
+static uint8_t s_host_ntb_tx[NCM_NTB_MAX_SIZE];
 
 void NCM_Bridge_Poll(void)
 {
-    g_ncm_bridge_poll_count++;
     poll_host_notification();
     NCM_Bridge_Target_NotificationPoll();
 
     /* Host-facing TX path (USBD controller) */
     if (!USBD_Endp4_Busy && g_host_tx_queue.count > 0) {
         /* Build NTB from one frame (single-frame NTBs for Phase 1) */
-        uint8_t ntb_buf[NCM_NTB_MAX_SIZE];
         const uint8_t *frame_ptrs[1];
         uint16_t frame_lens[1];
         uint8_t frame_count = 0;
@@ -1115,14 +1171,14 @@ void NCM_Bridge_Poll(void)
         }
 
         if (frame_count > 0) {
-            uint16_t ntb_len = NCM_BuildNtb(ntb_buf, sizeof(ntb_buf),
+            uint16_t ntb_len = NCM_BuildNtb(s_host_ntb_tx, sizeof(s_host_ntb_tx),
                                              frame_ptrs, frame_lens,
                                              frame_count, g_ncm_ntb_sequence);
             g_ncm_ntb_sequence++;
 
             /* Send NTB via EP4 IN */
             extern uint8_t USBD_ENDPx_DataUp(uint8_t endp, uint8_t *pbuf, uint16_t len);
-            if (USBD_ENDPx_DataUp(ENDP4, ntb_buf, ntb_len) == USB_SUCCESS) {
+            if (ntb_len > 0 && USBD_ENDPx_DataUp(ENDP4, s_host_ntb_tx, ntb_len) == USB_SUCCESS) {
                 USBD_Endp4_Busy = 1;
                 /* Pop the frame from queue */
                 uint32_t csr = ncm_irq_save();
@@ -1134,34 +1190,61 @@ void NCM_Bridge_Poll(void)
     }
 
     /* Target-facing TX path (USBFS controller) */
-    if (USBFS_Endp_Busy[DEF_UEP7] == 0 && g_target_tx_queue.count > 0) {
-        /* Build NTB from one frame */
-        uint8_t ntb_buf[NCM_NTB_MAX_SIZE];
-        const uint8_t *frame_ptrs[1];
-        uint16_t frame_lens[1];
-        uint8_t frame_count = 0;
+    if (!g_target_ncm_data_if_active || USBFS_Endp_Busy[DEF_UEP7] != 0) {
+        return;
+    }
 
+    /* A bulk IN transfer whose length is an exact multiple of the endpoint
+     * packet size must be terminated with a ZLP, otherwise the host keeps
+     * waiting for more data and the NTB never reaches the driver. */
+    if (s_target_zlp_pending) {
+        if (USBFS_Endp_DataUp(DEF_UEP7, s_target_ntb_tx, 0, DEF_UEP_CPY_LOAD) == READY) {
+            s_target_zlp_pending = 0;
+        }
+        return;
+    }
+
+    if (s_target_ntb_tx_len == 0 && g_target_tx_queue.count > 0) {
         NCM_Frame_t *frame = &g_target_tx_queue.frames[g_target_tx_queue.rd];
         if (frame->len > 0) {
-            frame_ptrs[0] = frame->data;
-            frame_lens[0] = frame->len;
-            frame_count = 1;
-        }
-
-        if (frame_count > 0) {
-            uint16_t ntb_len = NCM_BuildNtb(ntb_buf, sizeof(ntb_buf),
-                                             frame_ptrs, frame_lens,
-                                             frame_count, g_ncm_ntb_sequence);
-            g_ncm_ntb_sequence++;
-
-            /* Send NTB via EP7 IN */
-            if (USBFS_Endp_DataUp(DEF_UEP7, ntb_buf, ntb_len, DEF_UEP_CPY_LOAD) == READY) {
-                g_ncm_target_tx_count++;
-                /* Pop the frame from queue */
+            const uint8_t *frame_ptrs[1] = { frame->data };
+            uint16_t frame_lens[1] = { frame->len };
+            uint16_t ntb_len = NCM_BuildNtb(s_target_ntb_tx, sizeof(s_target_ntb_tx),
+                                            frame_ptrs, frame_lens,
+                                            1, s_target_ntb_seq++);
+            if (ntb_len > 0) {
+                s_target_ntb_tx_len = ntb_len;
+                s_target_ntb_tx_off = 0;
                 uint32_t csr = ncm_irq_save();
                 g_target_tx_queue.count--;
                 g_target_tx_queue.rd = (g_target_tx_queue.rd + 1) % NCM_BRIDGE_QUEUE_DEPTH;
                 ncm_irq_restore(csr);
+            }
+        }
+    }
+
+    if (s_target_ntb_tx_len == 0) {
+        return;
+    }
+
+    {
+        uint16_t remaining = (uint16_t)(s_target_ntb_tx_len - s_target_ntb_tx_off);
+        uint16_t chunk = (remaining > NCM_BRIDGE_USBFS_PACKET_SIZE)
+                             ? NCM_BRIDGE_USBFS_PACKET_SIZE
+                             : remaining;
+
+        /* Copy load is required: USBFS DMA reads asynchronously and the
+         * EP7 TX half of the endpoint buffer is the only safe location. */
+        if (USBFS_Endp_DataUp(DEF_UEP7, &s_target_ntb_tx[s_target_ntb_tx_off],
+                              chunk, DEF_UEP_CPY_LOAD) == READY) {
+            s_target_ntb_tx_off = (uint16_t)(s_target_ntb_tx_off + chunk);
+            if (s_target_ntb_tx_off >= s_target_ntb_tx_len) {
+                if ((s_target_ntb_tx_len % NCM_BRIDGE_USBFS_PACKET_SIZE) == 0) {
+                    s_target_zlp_pending = 1;
+                }
+                s_target_ntb_tx_len = 0;
+                s_target_ntb_tx_off = 0;
+                g_ncm_target_tx_count++;
             }
         }
     }
@@ -1178,20 +1261,10 @@ void NCM_Bridge_UpdateIPConfig(void)
 }
 
 /* Target-side NCM state variables */
-volatile uint8_t g_target_ncm_notify_state = 0;
-volatile uint32_t g_target_ncm_notify_hold_until_ms = 0;
-volatile uint16_t g_target_ncm_notify_tx_count = 0;
 volatile uint8_t g_target_ncm_data_if_active = 0;
 volatile uint16_t g_ncm_target_tx_count = 0;
 
-/* Debug counters for notification poll */
-volatile uint32_t g_ncm_notify_poll_count = 0;
-volatile uint32_t g_ncm_notify_state0_count = 0;
-volatile uint32_t g_ncm_notify_hold_count = 0;
-volatile uint32_t g_ncm_notify_busy_count = 0;
-volatile uint32_t g_ncm_notify_noready_count = 0;
-
-static uint8_t g_target_ncm_notify_last_send_ms = 0;
+static uint32_t g_target_ncm_notify_last_send_ms = 0;
 
 /* Target-side interface number for NCM communication (IF4 in our descriptor) */
 #define NCM_BRIDGE_TARGET_COMM_IF    4u
@@ -1240,51 +1313,41 @@ void NCM_Bridge_Target_NotificationPoll(void)
     uint8_t packet[16];
     uint8_t len;
     uint32_t now = systick_ms;
-    uint8_t result;
-
-    g_ncm_notify_poll_count++;
 
     if (g_target_ncm_notify_state == 0) {
-        g_ncm_notify_state0_count++;
         return;
     }
 
     if ((int32_t)(now - g_target_ncm_notify_hold_until_ms) < 0) {
-        g_ncm_notify_hold_count++;
+        return;
+    }
+
+    /* Space notification packets out so the host's interrupt URB can retire. */
+    if (now - g_target_ncm_notify_last_send_ms < 50) {
         return;
     }
 
     /* USBFS EP6 IN busy check */
     if (USBFS_Endp_Busy[DEF_UEP6] != 0) {
-        g_ncm_notify_busy_count++;
-        USB_DEBUG("NCM: EP6 busy=%d, skipping notification\r\n", USBFS_Endp_Busy[DEF_UEP6]);
         return;
     }
 
     len = make_target_notification(g_target_ncm_notify_state, NCM_BRIDGE_TARGET_COMM_IF, packet);
-    USB_DEBUG("NCM: Sending notification state=%d len=%d\r\n", g_target_ncm_notify_state, len);
-    if (len > 0) {
-        result = USBFS_Endp_DataUp(DEF_UEP6, packet, len, DEF_UEP_CPY_LOAD);
-        USB_DEBUG("NCM: Endp_DataUp result=%d (READY=%d)\r\n", result, READY);
-        if (result == READY) {
-            USB_DEBUG("NCM: Notification sent, state=%d\r\n", g_target_ncm_notify_state);
-            g_target_ncm_notify_last_send_ms = now;
-            g_target_ncm_notify_tx_count++;
-            if (g_target_ncm_notify_state == NCM_NOTIFY_DOWN) {
-                g_target_ncm_notify_state = NCM_NOTIFY_UP;
-                g_target_ncm_notify_hold_until_ms = now + NCM_LINK_UP_DELAY_MS;
-            } else if (g_target_ncm_notify_state == NCM_NOTIFY_UP) {
-                g_target_ncm_notify_state = NCM_NOTIFY_SPEED;
-                g_target_ncm_notify_hold_until_ms = now + NCM_LINK_SPEED_DELAY_MS;
-            } else if (g_target_ncm_notify_state == NCM_NOTIFY_SPEED) {
-                g_target_ncm_notify_state = NCM_NOTIFY_BEACON;
-                g_target_ncm_notify_hold_until_ms = now + NCM_LINK_UP_BEACON_MS;
-            } else if (g_target_ncm_notify_state == NCM_NOTIFY_BEACON) {
-                g_target_ncm_notify_state = 0;  /* Done */
-            }
-        } else {
-            g_ncm_notify_noready_count++;
-            USB_DEBUG("NCM: Failed to send notification, result=%d\r\n", result);
+    if (len > 0 &&
+        USBFS_Endp_DataUp(DEF_UEP6, packet, len, DEF_UEP_CPY_LOAD) == READY) {
+        g_target_ncm_notify_last_send_ms = now;
+        g_target_ncm_notify_tx_count++;
+        if (g_target_ncm_notify_state == NCM_NOTIFY_DOWN) {
+            g_target_ncm_notify_state = NCM_NOTIFY_UP;
+            g_target_ncm_notify_hold_until_ms = now + NCM_LINK_UP_DELAY_MS;
+        } else if (g_target_ncm_notify_state == NCM_NOTIFY_UP) {
+            g_target_ncm_notify_state = NCM_NOTIFY_SPEED;
+            g_target_ncm_notify_hold_until_ms = now + NCM_LINK_SPEED_DELAY_MS;
+        } else if (g_target_ncm_notify_state == NCM_NOTIFY_SPEED) {
+            g_target_ncm_notify_state = NCM_NOTIFY_BEACON;
+            g_target_ncm_notify_hold_until_ms = now + NCM_LINK_UP_BEACON_MS;
+        } else if (g_target_ncm_notify_state == NCM_NOTIFY_BEACON) {
+            g_target_ncm_notify_state = 0;  /* Done */
         }
     }
 }
@@ -1296,6 +1359,24 @@ void NCM_Bridge_Target_RearmLinkNotify(void)
 {
     g_target_ncm_notify_state = NCM_NOTIFY_UP;
     g_target_ncm_notify_hold_until_ms = systick_ms + 100;
+}
+
+void NCM_Bridge_Target_SetDataAlt(uint8_t alt)
+{
+    /* A partially received NTB or queued TX belongs to the previous alt. */
+    s_target_rx_len = 0;
+    s_target_rx_need = 0;
+    s_target_zlp_pending = 0;
+    s_target_ntb_tx_len = 0;
+    s_target_ntb_tx_off = 0;
+
+    /* Stay open in both alts: hosts toggle alt 0/1 quickly and ARP/DHCP
+     * must still flow during that window. */
+    g_target_ncm_data_if_active = 1;
+
+    if (alt == 1) {
+        NCM_Bridge_Target_RearmLinkNotify();
+    }
 }
 
 /*******************************************************************************
@@ -1671,6 +1752,132 @@ static uint8_t handle_target_dhcp_packet(const uint8_t *frame, uint16_t frame_le
 }
 
 /*******************************************************************************
+ * Target-side ICMP Handler
+ ******************************************************************************/
+static uint8_t handle_target_icmp_packet(const uint8_t *frame, uint16_t frame_len)
+{
+    static uint8_t reply[NCM_BRIDGE_MTU_FRAME_SIZE];
+    const uint8_t *ip;
+    const uint8_t *icmp;
+    uint16_t eth_offset;
+    uint16_t eth_type;
+    uint16_t ip_header_len;
+    uint16_t ip_total_len;
+    uint16_t icmp_len;
+    uint16_t off;
+    uint16_t ip_start;
+    uint16_t icmp_start;
+    uint32_t sum;
+    uint16_t chk;
+
+    if (frame == NULL || frame_len < NCM_ETH_HEADER_LEN) {
+        return 0;
+    }
+
+    eth_offset = NCM_ETH_HEADER_LEN;
+    eth_type = get_be16(&frame[12]);
+    while ((eth_type == NCM_ETH_TYPE_VLAN || eth_type == NCM_ETH_TYPE_QINQ) &&
+           frame_len >= (uint16_t)(eth_offset + 4u)) {
+        eth_type = get_be16(&frame[eth_offset + 2u]);
+        eth_offset = (uint16_t)(eth_offset + 4u);
+    }
+
+    if (eth_type != NCM_ETH_TYPE_IPV4 ||
+        frame_len < (uint16_t)(eth_offset + NCM_IPV4_MIN_HEADER_LEN)) {
+        return 0;
+    }
+
+    ip = &frame[eth_offset];
+    if ((ip[0] >> 4) != 4u) {
+        return 0;
+    }
+
+    ip_header_len = (uint16_t)((ip[0] & 0x0Fu) * 4u);
+    if (ip_header_len < NCM_IPV4_MIN_HEADER_LEN ||
+        frame_len < (uint16_t)(eth_offset + ip_header_len)) {
+        return 0;
+    }
+
+    ip_total_len = get_be16(&ip[2]);
+    if (ip_total_len < (uint16_t)(ip_header_len + 8u) ||
+        frame_len < (uint16_t)(eth_offset + ip_total_len)) {
+        return 0;
+    }
+
+    if (ip[9] != NCM_IPV4_PROTO_ICMP) {
+        return 0;
+    }
+
+    if (memcmp(&ip[16], ncm_target_dev_ip, 4) != 0) {
+        return 0;
+    }
+
+    icmp = &ip[ip_header_len];
+    icmp_len = (uint16_t)(ip_total_len - ip_header_len);
+    if (icmp_len < 8u || icmp[0] != NCM_ICMP_ECHO_REQUEST) {
+        return 0;
+    }
+
+    if ((uint16_t)(14u + ip_header_len + icmp_len) > sizeof(reply)) {
+        return 0;
+    }
+
+    off = 0;
+    /* Ethernet: swap MACs */
+    memcpy(&reply[off], &frame[6], 6);
+    off += 6;
+    memcpy(&reply[off], &frame[0], 6);
+    off += 6;
+    reply[off++] = 0x08;
+    reply[off++] = 0x00;
+
+    /* IPv4 header with swapped addresses */
+    ip_start = off;
+    memcpy(&reply[off], ip, ip_header_len);
+    memcpy(&reply[off + 12], &ip[16], 4);
+    memcpy(&reply[off + 16], &ip[12], 4);
+    reply[off + 10] = 0;
+    reply[off + 11] = 0;
+    off += ip_header_len;
+
+    /* ICMP echo reply */
+    icmp_start = off;
+    memcpy(&reply[off], icmp, icmp_len);
+    reply[off] = NCM_ICMP_ECHO_REPLY;
+    reply[off + 2] = 0;
+    reply[off + 3] = 0;
+    off += icmp_len;
+
+    sum = 0;
+    for (uint16_t i = 0; i < icmp_len; i += 2) {
+        if (i + 1 < icmp_len) {
+            sum += (uint16_t)(reply[icmp_start + i] << 8) | reply[icmp_start + i + 1];
+        } else {
+            sum += (uint16_t)reply[icmp_start + i] << 8;
+        }
+    }
+    while (sum >> 16) {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    chk = (~sum) & 0xFFFF;
+    put_be16(&reply[icmp_start + 2], chk);
+
+    put_be16(&reply[ip_start + 2], (uint16_t)(off - ip_start));
+    sum = 0;
+    for (uint16_t i = 0; i < ip_header_len; i += 2) {
+        sum += (uint16_t)(reply[ip_start + i] << 8) | reply[ip_start + i + 1];
+    }
+    while (sum >> 16) {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    chk = (~sum) & 0xFFFF;
+    put_be16(&reply[ip_start + 10], chk);
+
+    queue_push(&g_target_tx_queue, reply, off);
+    return 1;
+}
+
+/*******************************************************************************
  * Target-side Frame Handler (RX from Target PC)
  ******************************************************************************/
 static uint8_t handle_target_frame(const uint8_t *data, uint16_t len)
@@ -1690,11 +1897,12 @@ static uint8_t handle_target_frame(const uint8_t *data, uint16_t len)
 
     /* Handle IPv4 */
     if (eth_type == NCM_ETH_TYPE_IPV4) {
-        /* Check for DHCP */
         if (handle_target_dhcp_packet(data, len)) {
             return 1;
         }
-        /* TODO: Handle ICMP, TCP, UDP */
+        if (handle_target_icmp_packet(data, len)) {
+            return 1;
+        }
     }
 
     /* Frame not handled */
@@ -1702,12 +1910,49 @@ static uint8_t handle_target_frame(const uint8_t *data, uint16_t len)
 }
 
 /**
- * Handle data received from target via EP5 OUT (NTB data).
+ * Handle data received from the target PC via EP5 OUT.
+ *
+ * USBFS delivers one bulk packet per interrupt (64 bytes for every packet
+ * except the last one of a transfer), so an NTB has to be reassembled from
+ * consecutive packets before it can be parsed. The NTB header carries
+ * wBlockLength, which is used as the expected size.
  */
 void NCM_Bridge_TargetRxDone(const uint8_t *data, uint16_t len)
 {
-    g_target_ncm_data_if_active = 1;
-    NCM_ParseNtb(data, len, handle_target_frame);
+    if (data == NULL || len == 0) {
+        return;
+    }
+
+    if (s_target_rx_need == 0) {
+        /* Start of a new transfer: the first packet holds the NTB header. */
+        if (len < NCM_NTB_HEADER_SIZE) {
+            return;
+        }
+        if (data[0] != 'N' || data[1] != 'C' || data[2] != 'M' || data[3] != 'H') {
+            return;
+        }
+        uint16_t block_len = (uint16_t)(data[8] | ((uint16_t)data[9] << 8));
+        if (block_len < NCM_NTB_HEADER_SIZE || block_len > sizeof(s_target_rx_buf)) {
+            return;
+        }
+        s_target_rx_need = block_len;
+        s_target_rx_len = 0;
+    }
+
+    if (len > (uint16_t)(sizeof(s_target_rx_buf) - s_target_rx_len)) {
+        s_target_rx_len = 0;
+        s_target_rx_need = 0;
+        return;
+    }
+
+    memcpy(&s_target_rx_buf[s_target_rx_len], data, len);
+    s_target_rx_len = (uint16_t)(s_target_rx_len + len);
+
+    if (s_target_rx_len >= s_target_rx_need) {
+        NCM_ParseNtb(s_target_rx_buf, s_target_rx_need, handle_target_frame);
+        s_target_rx_len = 0;
+        s_target_rx_need = 0;
+    }
 }
 
 /**
@@ -1717,18 +1962,25 @@ void NCM_Bridge_InitTarget(void)
 {
     USB_DEBUG("NCM: InitTarget called\r\n");
     memset(&g_target_tx_queue, 0, sizeof(g_target_tx_queue));
-    memset(&g_target_rx_frame, 0, sizeof(g_target_rx_frame));
+    s_target_ntb_seq = 0;
+    s_target_zlp_pending = 0;
+    s_target_ntb_tx_len = 0;
+    s_target_ntb_tx_off = 0;
+    s_target_rx_len = 0;
+    s_target_rx_need = 0;
 
     /* Start link notification sequence: DOWN -> UP -> SPEED -> BEACON */
     g_target_ncm_notify_state = NCM_NOTIFY_DOWN;
     g_target_ncm_notify_hold_until_ms = 0;
     g_target_ncm_notify_tx_count = 0;
+    g_target_ncm_notify_last_send_ms = 0;
     g_target_ncm_data_if_active = 0;
     g_ncm_target_tx_count = 0;
 
     /* Load target-side IP config */
     ECM_IPConfig_GetTargetHostIP(ncm_target_host_ip);
     ECM_IPConfig_GetTargetDevIP(ncm_target_dev_ip);
+    ECM_IPConfig_GetSubnetMask(ncm_subnet_mask);
     USB_DEBUG("NCM: Target IP=%d.%d.%d.%d\r\n",
               ncm_target_dev_ip[0], ncm_target_dev_ip[1],
               ncm_target_dev_ip[2], ncm_target_dev_ip[3]);

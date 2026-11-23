@@ -22,11 +22,37 @@ extern volatile uint32_t systick_ms;
 
 #define ECM_BRIDGE_MTU_FRAME_SIZE       1514u
 #define ECM_BRIDGE_QUEUE_DEPTH          2u
-#define ECM_BRIDGE_USBFS_PACKET_SIZE    32u
-/* ECM bridge uses 32-byte bulk packets on USBD side (reduced to fit 512B PMA).
-   Note: DEF_USBD_MAX_PACK_SIZE is 16 (legacy ACM), but the runtime ECM
-   descriptor advertises 32-byte max packet for EP4/EP6 bulk endpoints. */
-#define ECM_BRIDGE_USBD_PACKET_SIZE     32u
+/* One transport chunk. A frame is emitted as a run of full-MPS packets; the
+ * host ends the bulk URB on the first short packet, so every chunk except the
+ * last must equal the bulk endpoint's wMaxPacketSize (a 32-byte chunk on a
+ * 64-byte endpoint becomes a short packet and the host treats it as a
+ * complete, truncated Ethernet frame). The ZLP covers frames whose length is
+ * an exact multiple of the MPS. */
+#define ECM_BRIDGE_TX_CHUNK_MAX         64u
+
+/* Bulk endpoint MPS that the active configuration descriptors advertise. */
+static uint16_t ecm_usbd_packet_size(void)
+{
+#if USB_WORK_MODE_RUNTIME_PROFILES
+    /* Combined host ACM+ECM runtime descriptor shrinks the ECM bulk pair to
+     * 32 bytes to fit the 512-byte PMA; the ECM-only runtime descriptor uses
+     * 64. */
+    if (USB_ModeConfig_ActiveModeHasHostCdcAcm() &&
+        USB_ModeConfig_ActiveModeHasHostCdcEcm()) {
+        return 32u;
+    }
+#endif
+    return 64u;
+}
+
+/* Target-side USBFS bulk MPS: the runtime ECM blocks and the combined
+ * host-ACM+ECM static block advertise 32 bytes; every other static
+ * configuration advertises 64. */
+#if USB_WORK_MODE_RUNTIME_PROFILES || USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
+#define ECM_BRIDGE_USBFS_MPS            32u
+#else
+#define ECM_BRIDGE_USBFS_MPS            64u
+#endif
 #define ECM_BRIDGE_TARGET_COMM_IF       4u
 /* Host-side ECM communication interface number on the USBLIB controller:
  *   IF0-IF1: CDC ACM
@@ -121,7 +147,7 @@ typedef struct {
  * The USB transfer is issued from this local copy so an ISR push/clear cannot
  * modify the bytes after they have been handed to the controller. */
 typedef struct {
-    uint8_t  data[ECM_BRIDGE_USBD_PACKET_SIZE];
+    uint8_t  data[ECM_BRIDGE_TX_CHUNK_MAX];
     uint16_t len;        /* bytes in data (0 for a terminating ZLP) */
     uint16_t frame_len;  /* total length of the frame being transmitted */
     uint16_t gen;        /* queue generation the frame belongs to */
@@ -2237,7 +2263,7 @@ static void poll_target_tx(void)
     if (USBFS_Endp_DataUp(DEF_UEP7, chunk.data, chunk.len, DEF_UEP_CPY_LOAD) == READY) {
         g_target_tx_offset = (uint16_t)(g_target_tx_offset + chunk.len);
         if (g_target_tx_offset >= chunk.frame_len) {
-            if (chunk.len == ECM_BRIDGE_USBFS_PACKET_SIZE) {
+            if (chunk.len == ECM_BRIDGE_USBFS_MPS) {
                 g_target_zlp_pending = 1;
             }
             else {
@@ -2326,7 +2352,7 @@ static void poll_host_tx(void)
         g_ecm_tx_state = 2;  /* success */
         g_host_tx_offset = (uint16_t)(g_host_tx_offset + chunk.len);
         if (g_host_tx_offset >= chunk.frame_len) {
-            if (chunk.len == ECM_BRIDGE_USBD_PACKET_SIZE) {
+            if (chunk.len == ecm_usbd_packet_size()) {
                 g_host_zlp_pending = 1;
             }
             else {
@@ -2657,10 +2683,10 @@ void ECM_Bridge_HostRxDone(const uint8_t *data, uint16_t len)
     if (len > 0) g_ecm_led_override = 1;
 #if USB_WORK_MODE_COMPILES_TARGET_CDC_ECM
     rx_frame_append(&g_host_rx_frame, &g_host_to_target, data, len,
-                    ECM_BRIDGE_USBD_PACKET_SIZE, handle_host_control_frame);
+                    ecm_usbd_packet_size(), handle_host_control_frame);
 #else
     rx_frame_append(&g_host_rx_frame, NULL, data, len,
-                    ECM_BRIDGE_USBD_PACKET_SIZE, handle_host_control_frame);
+                    ecm_usbd_packet_size(), handle_host_control_frame);
 #endif
 }
 
@@ -2681,7 +2707,7 @@ void ECM_Bridge_TargetRxDone(const uint8_t *data, uint16_t len)
     g_target_ecm_data_if_active = 1;
 
     rx_frame_append(&g_target_rx_frame, &g_target_to_host, data, len,
-                    ECM_BRIDGE_USBFS_PACKET_SIZE, handle_target_frame);
+                    ECM_BRIDGE_USBFS_MPS, handle_target_frame);
 }
 
 static uint8_t handle_target_frame(const uint8_t *frame, uint16_t frame_len)

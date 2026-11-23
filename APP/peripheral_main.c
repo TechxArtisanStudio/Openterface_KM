@@ -42,7 +42,8 @@ static void Systick_Init(void)
 
     TIM_TimeBaseInitTypeDef TIM_TimeBaseStructure = {0};
     TIM_TimeBaseStructure.TIM_Period = 999;          /* 1000 ticks per period */
-    TIM_TimeBaseStructure.TIM_Prescaler = 35;        /* 36 MHz / 36 = 1 MHz */
+    /* HCLK = 96 MHz, PCLK1 = HCLK/2 = 48 MHz, TIM2 clock = PCLK1 x2 = 96 MHz */
+    TIM_TimeBaseStructure.TIM_Prescaler = SystemCoreClock / 1000000 - 1;
     TIM_TimeBaseStructure.TIM_ClockDivision = 0;
     TIM_TimeBaseStructure.TIM_CounterMode = TIM_CounterMode_Up;
     TIM_TimeBaseInit(TIM2, &TIM_TimeBaseStructure);
@@ -294,8 +295,7 @@ int main(void) {
     Set_USBConfig();
     USB_Init();
     USB_Interrupts_Config();
-/* Skip BLE init for NCM bridge mode to avoid version mismatch hang */
-#if defined(ENABLE_BLE) && USB_WORK_MODE != 8
+#if defined(ENABLE_BLE)
     WCHBLE_Init();
 #endif
     if (version == 1)
@@ -319,8 +319,7 @@ int main(void) {
     Keyboard_Init();
     Mouse_Init();
     //ble_init(Must be placed after USB initialization)
-/* Skip BLE init for NCM bridge mode to avoid version mismatch hang */
-#if defined(ENABLE_BLE) && USB_WORK_MODE != 8
+#if defined(ENABLE_BLE)
     HAL_Init();
     GAPRole_PeripheralInit();
     Peripheral_Init();

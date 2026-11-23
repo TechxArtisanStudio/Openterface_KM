@@ -10,7 +10,7 @@
  *
  * Timing:
  *   - TIM2 provides a 1 ms systick (systick_ms) used by all non-blocking effects.
- *   - TIM3 runs at 1 MHz (72 MHz / 72), ARR=999 -> 1 kHz PWM, 0~999 duty.
+ *   - TIM3 runs at 1 MHz (96 MHz timer clock / 96), ARR=999 -> 1 kHz PWM, 0~999 duty.
  *     Because the RGB LED is common-anode (active-low), a larger duty value
  *     means lower brightness: pwm = (1.0 - intensity) * 999.
  *
@@ -69,8 +69,8 @@ static uint8_t startup_active = 0;      /* 1 while startup sequence is running *
 
 /* ====================== TIM2: 1 ms Systick ====================== */
 /*
- * TIM2 is clocked at 36 MHz (APB1 x2), prescaler 36 -> 1 MHz tick.
- * ARR = 999 -> 1 kHz update interrupt = 1 ms period.
+ * HCLK = 96 MHz, PCLK1 = HCLK/2, so the TIM2 clock is 96 MHz.
+ * Prescaler 96 -> 1 MHz tick; ARR = 999 -> 1 kHz update = 1 ms period.
  * Used only as a timebase for RGB effects; does not drive any GPIO.
  */
 void RGB_TIM_Init(void)
@@ -79,7 +79,7 @@ void RGB_TIM_Init(void)
 
     TIM_TimeBaseInitTypeDef TIM_TimeBaseStructure = {0};
     TIM_TimeBaseStructure.TIM_Period = 999;          /* 1000 ticks per period */
-    TIM_TimeBaseStructure.TIM_Prescaler = 35;        /* 36 MHz / 36 = 1 MHz */
+    TIM_TimeBaseStructure.TIM_Prescaler = SystemCoreClock / 1000000 - 1;
     TIM_TimeBaseStructure.TIM_ClockDivision = 0;
     TIM_TimeBaseStructure.TIM_CounterMode = TIM_CounterMode_Up;
     TIM_TimeBaseInit(TIM2, &TIM_TimeBaseStructure);
@@ -131,13 +131,13 @@ void RGB_Init(void)
 
     /* --- Step 2: TIM3 PWM timebase --- */
     /*
-     * TIM3 clock = 72 MHz, prescaler 72 -> 1 MHz,
+     * TIM3 clock = PCLK1 x2 = 96 MHz, prescaler 96 -> 1 MHz,
      * ARR = 999 -> 1 kHz PWM frequency, duty range 0~999.
      */
     RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM3, ENABLE);
     TIM_TimeBaseInitTypeDef TIM_TimeBaseStructure = {0};
     TIM_TimeBaseStructure.TIM_Period = 999;
-    TIM_TimeBaseStructure.TIM_Prescaler = 71;
+    TIM_TimeBaseStructure.TIM_Prescaler = SystemCoreClock / 1000000 - 1;
     TIM_TimeBaseStructure.TIM_ClockDivision = 0;
     TIM_TimeBaseStructure.TIM_CounterMode = TIM_CounterMode_Up;
     TIM_TimeBaseInit(TIM3, &TIM_TimeBaseStructure);

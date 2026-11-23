@@ -56,6 +56,7 @@ void HAL_TimeInit(void)
 {
     uint16_t temp=0;
     uint8_t state=0;
+    uint8_t lsi_clock=0;
     bleClockConfig_t  conf={0};
 
     RCC_APB1PeriphClockCmd(RCC_APB1Periph_PWR|RCC_APB1Periph_BKP, ENABLE);
@@ -64,20 +65,31 @@ void HAL_TimeInit(void)
     RCC_LSICmd(ENABLE);
     RCC_LSEConfig(RCC_LSE_OFF);
     RCC_RTCCLKConfig(RCC_RTCCLKSource_LSI);
+    lsi_clock = 1;
 #else
     RCC_LSEConfig(RCC_LSE_ON);
-    /* Check the specified RCC logo position settings or not, 
-     * wait for the low-speed crystal oscillator to be ready */
-    while (RCC_GetFlagStatus(RCC_FLAG_LSERDY) == RESET) 
+    /* Wait for the low-speed crystal. This wait must be bounded: the dev kit
+     * variant has no 32.768 kHz crystal populated, and an unbounded wait here
+     * hangs the firmware before the main loop starts (no ECM/ARP servicing,
+     * no watchdog init). Fall back to the internal RC instead. */
+    while (RCC_GetFlagStatus(RCC_FLAG_LSERDY) == RESET && temp < 100)
     {
         temp++;
         Delay_Ms(10);
     }
-    if(temp>=250)
+    if(RCC_GetFlagStatus(RCC_FLAG_LSERDY) == RESET)
     {
-        printf("time error..\n");
+        printf("LSE not ready, using LSI\n");
+        RCC_LSEConfig(RCC_LSE_OFF);
+        RCC_LSICmd(ENABLE);
+        while(RCC_GetFlagStatus(RCC_FLAG_LSIRDY) == RESET);
+        RCC_RTCCLKConfig(RCC_RTCCLKSource_LSI);
+        lsi_clock = 1;
     }
-    RCC_RTCCLKConfig(RCC_RTCCLKSource_LSE);
+    else
+    {
+        RCC_RTCCLKConfig(RCC_RTCCLKSource_LSE);
+    }
 #endif
     RCC_RTCCLKCmd(ENABLE);
     RTC_WaitForLastTask();
@@ -86,10 +98,11 @@ void HAL_TimeInit(void)
     RTC_WaitForLastTask();
     RTC_SetCounter(0);
     RTC_WaitForLastTask();
-#if( CLK_OSC32K )
-    Lib_Calibration_LSI();
-#endif
-    conf.ClockAccuracy = CLK_OSC32K?1000:100;
+    if( lsi_clock )
+    {
+        Lib_Calibration_LSI();
+    }
+    conf.ClockAccuracy = lsi_clock?1000:100;
     conf.ClockFrequency = CAB_LSIFQ/2;
     conf.ClockMaxCount = 0xFFFFFFFF;
     conf.getClockValue = RTC_GetCounter;

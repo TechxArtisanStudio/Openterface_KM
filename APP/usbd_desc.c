@@ -58,8 +58,8 @@ const uint8_t MyCfgDescr[ ] =
     0x0D, 0x01,                                             // wTotalLength: 269 = 0x010D (9 cfg + 50 HID + 66 ACM + 72 Host ECM + 72 Target ECM)
     0x08,                                                   // bNumInterfaces: 2 HID + 2 ACM + 2 Host ECM + 2 Target ECM = 8
 #elif USB_WORK_MODE_HAS_HOST_CDC_NCM
-    0x94, 0x00,                                             // wTotalLength: 148 = 0x0094 (59 HID + 89 NCM)
-    0x04,                                                   // bNumInterfaces: 2 HID + 2 CDC NCM = 4
+    0xCA, 0x00,                                             // wTotalLength: 202 = 0x00CA (9 cfg + 4*25 HID + 93 NCM)
+    0x06,                                                   // bNumInterfaces: 4 HID + 2 CDC NCM = 6
 #elif USB_WORK_MODE_HAS_TARGET_CDC_ACM
     0xAF, 0x00,                                             // wTotalLength: 175 = 0x00AF (100 HID + 9 cfg + 66 CDC ACM)
     0x06,                                                   // bNumInterfaces: 4 HID + 2 CDC ACM = 6
@@ -131,7 +131,7 @@ const uint8_t MyCfgDescr[ ] =
     0x08, 0x00,                                             // wMaxPacketSize
     0x01,                                                   // bInterval: 1mS
 
-#if !USB_WORK_MODE_HAS_HOST_ACM_AND_ECM && !USB_WORK_MODE_HAS_HOST_CDC_NCM
+#if !USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
     /* Interface Descriptor (Absolute Mouse / Touch Digitizer) */
     0x09,                                                   // bLength
     0x04,                                                   // bDescriptorType
@@ -403,29 +403,31 @@ const uint8_t MyCfgDescr[ ] =
 #endif /* USB_WORK_MODE_HAS_TARGET_CDC_ECM */
 
 #elif USB_WORK_MODE_HAS_HOST_CDC_NCM
-    /* CDC-NCM bridge mode: 2 HID interfaces + 2 CDC NCM interfaces
+    /* CDC-NCM bridge mode: 4 HID interfaces + 2 CDC NCM interfaces
      * IF0: Keyboard (EP1 IN)
      * IF1: Mouse (EP2 IN)
-     * IF2: CDC NCM Communication (EP5 IN - notification)
-     * IF3: CDC NCM Data (EP3 OUT, EP4 IN - bulk data)
+     * IF2: Absolute Mouse (EP3 IN)
+     * IF3: Media/Consumer (EP4 IN)
+     * IF4: CDC NCM Communication (EP6 IN - notification)
+     * IF5: CDC NCM Data (EP5 OUT, EP7 IN - bulk data)
      *
      * This mode provides native Windows 10/11 support via usbncm.sys.
      */
 
-    /* IAD: CDC NCM (IF2=comm + IF3=data) */
+    /* IAD: CDC NCM (IF4=comm + IF5=data) */
     0x08,                                                   // bLength
     0x0B,                                                   // bDescriptorType (IAD)
-    0x02,                                                   // bFirstInterface
+    0x04,                                                   // bFirstInterface
     0x02,                                                   // bInterfaceCount
     0x02,                                                   // bFunctionClass: Communications
     0x0D,                                                   // bFunctionSubClass: Network Control Model (NCM)
     0x00,                                                   // bFunctionProtocol
     0x00,                                                   // iFunction
 
-    /* Interface Descriptor: CDC NCM Communication (IF2) */
+    /* Interface Descriptor: CDC NCM Communication (IF4) */
     0x09,                                                   // bLength
     0x04,                                                   // bDescriptorType
-    0x02,                                                   // bInterfaceNumber
+    0x04,                                                   // bInterfaceNumber
     0x00,                                                   // bAlternateSetting
     0x01,                                                   // bNumEndpoints (notification)
     0x02,                                                   // bInterfaceClass: Communications
@@ -435,30 +437,32 @@ const uint8_t MyCfgDescr[ ] =
 
     /* CDC NCM Functional Descriptors */
     0x05, 0x24, 0x00, 0x10, 0x01,                           // Header, CDC 1.10
-    0x05, 0x24, 0x06, 0x02, 0x03,                           // Union: control IF2, data IF3
-    0x0D, 0x24, 0x0F, 0x02,                                 // Ethernet Networking, iMACAddress=2
+    0x05, 0x24, 0x06, 0x04, 0x05,                           // Union: control IF4, data IF5
+    0x0D, 0x24, 0x0F, 0x06,                                 // Ethernet Networking, iMACAddress=6 (NCM MAC)
     0x00, 0x00, 0x00, 0x00,                                 // bmEthernetStatistics
     0xEA, 0x05,                                             // wMaxSegmentSize: 1514
     0x00, 0x00,                                             // wNumberMCFilters: none
     0x00,                                                   // bNumberPowerFilters
-    /* NCM Functional Descriptor: 8 bytes */
-    0x08, 0x24, 0x0D,                                       // NCM Functional
-    0x00,                                                   // bmCapabilities (no filtering)
-    0x00, 0x05,                                             // wNtbInMaxSize: 1280 bytes
-    0x10, 0x00,                                             // wNdpInMaxSize: 16 bytes
+    /* NCM Functional Descriptor: 14 bytes (subtype 0x1A) */
+    0x0E, 0x24, 0x1A,                                       // NCM Functional (subtype 0x1A)
+    0x00, 0x01,                                             // bcdNCMVersion: 1.00
+    0x01, 0x00, 0x00, 0x00,                                 // bmNetworkCapabilities: NET_ADDRESS
+    0xEA, 0x05,                                             // wMaxSegmentSize: 1514
+    0x00, 0x00,                                             // wNumberMCFilters
+    0x00,                                                   // bNumberPowerFilters
 
-    /* Endpoint Descriptor: CDC NCM notification EP5 IN */
+    /* Endpoint Descriptor: CDC NCM notification EP6 IN */
     0x07,                                                   // bLength
     0x05,                                                   // bDescriptorType
-    0x85,                                                   // bEndpointAddress: EP5 IN
+    0x86,                                                   // bEndpointAddress: EP6 IN
     0x03,                                                   // bmAttributes: Interrupt
     0x10, 0x00,                                             // wMaxPacketSize: 16 bytes
     0x10,                                                   // bInterval: 16ms
 
-    /* Interface Descriptor: CDC NCM Data (IF3 alt 0, idle) */
+    /* Interface Descriptor: CDC NCM Data (IF5 alt 0, idle) */
     0x09,                                                   // bLength
     0x04,                                                   // bDescriptorType
-    0x03,                                                   // bInterfaceNumber
+    0x05,                                                   // bInterfaceNumber
     0x00,                                                   // bAlternateSetting
     0x00,                                                   // bNumEndpoints
     0x0A,                                                   // bInterfaceClass: Data
@@ -466,10 +470,10 @@ const uint8_t MyCfgDescr[ ] =
     0x00,                                                   // bInterfaceProtocol
     0x00,                                                   // iInterface
 
-    /* Interface Descriptor: CDC NCM Data (IF3 alt 1, active) */
+    /* Interface Descriptor: CDC NCM Data (IF5 alt 1, active) */
     0x09,                                                   // bLength
     0x04,                                                   // bDescriptorType
-    0x03,                                                   // bInterfaceNumber
+    0x05,                                                   // bInterfaceNumber
     0x01,                                                   // bAlternateSetting
     0x02,                                                   // bNumEndpoints
     0x0A,                                                   // bInterfaceClass: Data
@@ -477,18 +481,18 @@ const uint8_t MyCfgDescr[ ] =
     0x00,                                                   // bInterfaceProtocol
     0x00,                                                   // iInterface
 
-    /* Endpoint Descriptor: CDC NCM data OUT EP3 */
+    /* Endpoint Descriptor: CDC NCM data OUT EP5 */
     0x07,                                                   // bLength
     0x05,                                                   // bDescriptorType
-    0x03,                                                   // bEndpointAddress: EP3 OUT
+    0x05,                                                   // bEndpointAddress: EP5 OUT
     0x02,                                                   // bmAttributes: Bulk
     0x40, 0x00,                                             // wMaxPacketSize: 64 bytes
     0x00,                                                   // bInterval
 
-    /* Endpoint Descriptor: CDC NCM data IN EP4 */
+    /* Endpoint Descriptor: CDC NCM data IN EP7 */
     0x07,                                                   // bLength
     0x05,                                                   // bDescriptorType
-    0x84,                                                   // bEndpointAddress: EP4 IN
+    0x87,                                                   // bEndpointAddress: EP7 IN
     0x02,                                                   // bmAttributes: Bulk
     0x40, 0x00,                                             // wMaxPacketSize: 64 bytes
     0x00,                                                   // bInterval
@@ -846,7 +850,7 @@ typedef char MyCfgDescr_SizeCheck[(sizeof(MyCfgDescr) == 274) ? 1 : -1];
 #elif USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
 typedef char MyCfgDescr_SizeCheck[(sizeof(MyCfgDescr) == 269) ? 1 : -1];
 #elif USB_WORK_MODE_HAS_HOST_CDC_NCM
-//typedef char MyCfgDescr_SizeCheck[(sizeof(MyCfgDescr) == 148) ? 1 : -1];
+typedef char MyCfgDescr_SizeCheck[(sizeof(MyCfgDescr) == 202) ? 1 : -1];
 #elif USB_WORK_MODE_HAS_TARGET_CDC_ACM
 typedef char MyCfgDescr_SizeCheck[(sizeof(MyCfgDescr) == 175) ? 1 : -1];
 #elif USB_WORK_MODE_HAS_TARGET_CDC_ECM
@@ -859,7 +863,6 @@ typedef char MyCfgDescr_SizeCheck[(sizeof(MyCfgDescr) == 109) ? 1 : -1];
 #define USBFS_RUNTIME_HID_CONFIG_DESC_SIZE 109u
 #define USBFS_RUNTIME_ACM_BLOCK_SIZE       66u
 #define USBFS_RUNTIME_ECM_BLOCK_SIZE       79u
-#define USBFS_RUNTIME_NCM_BLOCK_SIZE       87u   /* NCM block: IAD(8) + CommIF(9) + FDs(29) + NotifEP(7) + DataIF0(9) + DataIF1(9) + BulkEPs(14) = 87 */
 #define USBFS_RUNTIME_UAC_BLOCK_SIZE       UAC_USBFS_BLOCK_LEN
 #define USBFS_RUNTIME_MAX_CONFIG_DESC_SIZE 274u
 
@@ -913,7 +916,7 @@ static const uint8_t USBFS_RuntimeEcmBlock[USBFS_RUNTIME_ECM_BLOCK_SIZE] = {
  * IF4: CDC NCM Communication (EP6 IN notification)
  * IF5: CDC NCM Data (EP5 OUT, EP7 IN)
  */
-#define USBFS_RUNTIME_NCM_BLOCK_SIZE  87u   /* NCM block: IAD(8) + CommIF(9) + FDs(29) + NotifEP(7) + DataIF0(9) + DataIF1(9) + BulkEPs(14) = 87 */
+#define USBFS_RUNTIME_NCM_BLOCK_SIZE  93u   /* NCM block: IAD(8) + CommIF(9) + FDs(37) + NotifEP(7) + DataIF0(9) + DataIF1(9) + BulkEPs(14) = 93 */
 static const uint8_t USBFS_RuntimeNcmBlock[USBFS_RUNTIME_NCM_BLOCK_SIZE] = {
     /* IAD: CDC NCM (IF4=comm + IF5=data) */
     0x08, 0x0B, 0x04, 0x02, 0x02, 0x0D, 0x00, 0x00,
@@ -927,11 +930,13 @@ static const uint8_t USBFS_RuntimeNcmBlock[USBFS_RUNTIME_NCM_BLOCK_SIZE] = {
     0xEA, 0x05,                                             // wMaxSegmentSize: 1514
     0x00, 0x00,                                             // wNumberMCFilters: none
     0x00,                                                   // bNumberPowerFilters
-    /* NCM Functional Descriptor: 8 bytes */
-    0x08, 0x24, 0x1A,                                       // NCM Functional (subtype 0x1A = USB_CDC_NCM_TYPE)
-    0x00,                                                   // bmNetworkCapabilities (no filtering)
-    0x00, 0x05,                                             // wNtbInMaxSize: 1280 bytes (little-endian!)
-    0x10, 0x00,                                             // wNdpInMaxSize: 16 bytes (little-endian!)
+    /* NCM Functional Descriptor: 14 bytes (subtype 0x1A) */
+    0x0E, 0x24, 0x1A,                                       // NCM Functional (subtype 0x1A)
+    0x00, 0x01,                                             // bcdNCMVersion: 1.00
+    0x01, 0x00, 0x00, 0x00,                                 // bmNetworkCapabilities: NET_ADDRESS
+    0xEA, 0x05,                                             // wMaxSegmentSize: 1514
+    0x00, 0x00,                                             // wNumberMCFilters
+    0x00,                                                   // bNumberPowerFilters
     /* Endpoint Descriptor: CDC NCM notification EP6 IN */
     0x07, 0x05, 0x86, 0x03, 0x10, 0x00, 0x10,
     /* Interface Descriptor: CDC NCM Data (IF5 alt 0, idle) */
@@ -1146,12 +1151,11 @@ static void USBFS_BuildRuntimeConfigDescriptor(void)
             }
         }
         if (USB_ModeConfig_ModeHasHostCdcNcm(mode)) {
-            /* Host CDC-NCM mode: NCM block at IF4-IF5 with EP5 notification + EP3/EP4 bulk */
-            uint16_t ncm_block_start = total_len;
+            /* CDC-NCM bridge mode: NCM block at IF4-IF5 with EP6 IN notification
+             * + EP5 OUT / EP7 IN bulk. */
             memcpy(&USBFS_RuntimeConfigDescriptor[total_len], USBFS_RuntimeNcmBlock, USBFS_RUNTIME_NCM_BLOCK_SIZE);
             total_len = (uint16_t)(total_len + USBFS_RUNTIME_NCM_BLOCK_SIZE);
             num_interfaces = 6u;
-            (void)ncm_block_start;  /* Suppress unused warning */
         }
     }
 

@@ -1,9 +1,10 @@
 #include "include/ecm_ip_config.h"
 
-#if USB_WORK_MODE_COMPILES_BRIDGE_ECM
+#if USB_WORK_MODE_COMPILES_BRIDGE_ECM || USB_WORK_MODE_COMPILES_BRIDGE_NCM
 
 #include "ch32v20x_flash.h"
 #include "include/ecm_bridge.h"
+#include "include/ncm_bridge.h"
 #include "include/default_target_config.h"
 #include "include/ble_eth_protocol.h"
 #include "include/km_ring.h"
@@ -317,6 +318,7 @@ uint8_t ECM_IPConfig_Set(const ECM_IPConfig_t *config)
 
     /* 8. Immediately update bridge layer IP variables to make changes take effect */
     ECM_Bridge_UpdateIPConfig();
+    NCM_Bridge_UpdateIPConfig();
 
     /* 9. Keep the BLE-Eth tunnel's target-side identity in sync, otherwise
      *    tunneled TCP frames keep the stale source IP/MAC pair. */
@@ -381,4 +383,4 @@ void ECM_IPConfig_GetCurrent(ECM_IPConfig_t *config)
     *config = s_ram_cache;
 }
 
-#endif /* USB_WORK_MODE_COMPILES_BRIDGE_ECM */
+#endif /* USB_WORK_MODE_COMPILES_BRIDGE_ECM || USB_WORK_MODE_COMPILES_BRIDGE_NCM */

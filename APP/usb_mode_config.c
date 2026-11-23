@@ -18,7 +18,7 @@ typedef struct {
     uint32_t crc;
 } USB_ModeConfig_Record_t;
 
-static uint8_t g_active_mode = USB_WORK_MODE;
+static volatile uint8_t g_active_mode = USB_WORK_MODE;
 static uint8_t g_stored_mode = USB_WORK_MODE;
 static uint16_t g_stored_flags;
 static uint8_t g_status;

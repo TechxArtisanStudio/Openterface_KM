@@ -9,9 +9,9 @@ extern "C" {
 #endif
 
 /* --- NCM Protocol Constants --- */
-#define NCM_NTB_MAX_SIZE          1280    /* Max NTB size (matches descriptor) */
+#define NCM_NTB_MAX_SIZE          2048    /* Max NTB size - must match Linux cdc_ncm minimum (2048 for FS) */
 #define NCM_NDP_MAX_DATAGRAMS     4       /* Max frames per NTB */
-#define NCM_NTB_HEADER_SIZE       14      /* NTB header size */
+#define NCM_NTB_HEADER_SIZE       12      /* NTB header size (NTB-16 format) */
 #define NCM_NDP_HEADER_SIZE       8       /* NDP header (signature + length + next) */
 #define NCM_NDP_ENTRY_SIZE        4       /* Index + length per datagram entry */
 
@@ -29,6 +29,7 @@ void NCM_Bridge_Poll(void);
 void NCM_Bridge_SetBleTxCallback(void (*cb)(void));
 uint8_t NCM_Bridge_SendRawFrame(const uint8_t *data, uint16_t len);
 void NCM_Bridge_Target_RearmLinkNotify(void);
+void NCM_Bridge_Target_SetDataAlt(uint8_t alt);  /* Reset RX state on SET_INTERFACE */
 void NCM_Bridge_Target_NotificationPoll(void);  /* USBFS-side link notification poll */
 
 /* NTB builder/parser functions (exposed for testing) */
@@ -47,6 +48,7 @@ uint8_t NCM_ParseNtb(const uint8_t *ntb_buf, uint16_t ntb_len,
 #define NCM_Bridge_SetBleTxCallback(cb)    ((void)0)
 #define NCM_Bridge_SendRawFrame(data, len) ((uint8_t)0)
 #define NCM_Bridge_Target_RearmLinkNotify() ((void)0)
+#define NCM_Bridge_Target_SetDataAlt(alt)   ((void)0)
 #define NCM_Bridge_Target_NotificationPoll() ((void)0)
 #endif
 
