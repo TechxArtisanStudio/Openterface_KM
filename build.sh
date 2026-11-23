@@ -29,7 +29,7 @@ TARGET_NAME=""
 JOBS=$( (nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4) )
 
 # Compiler path - specify via --compiler or use env variable RISC_COMPILER_PATH
-RISC_COMPILER_PATH="${RISC_COMPILER_PATH:-}"
+RISC_COMPILER_PATH="/Users/txa/MRS_Toolchain_MAC_V240/Toolchain/RISC-V Embedded GCC/bin"
 
 # Help information
 show_help() {

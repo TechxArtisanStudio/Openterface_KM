@@ -341,8 +341,8 @@ endif
 # Enable with: make USE_LTO=1
 USE_LTO ?= 0
 ifeq ($(USE_LTO),1)
-CFLAGS += -flto=full -fuse-linker-plugin
-LDFLAGS += -flto=full -fuse-linker-plugin
+CFLAGS += -flto=auto -fuse-linker-plugin
+LDFLAGS += -flto=auto -fuse-linker-plugin
 # More aggressive dead code elimination
 CFLAGS += -ffat-lto-objects
 endif
@@ -373,7 +373,7 @@ $(OBJS): $(BUILD_CONFIG_STAMP)
 openterface-km-firmware.elf: $(OBJS) $(USER_OBJS)
 	@echo 'Building target: $@'
 	@echo 'Invoking: GNU RISC-V Cross C Linker'
-	riscv-none-embed-gcc -march=rv32imacxw -mabi=ilp32 -mcmodel=medany -msmall-data-limit=8 -mno-save-restore -fmax-errors=20 -Os -fmessage-length=0 -fsigned-char -ffunction-sections -fdata-sections -fno-common -g $(CFLAGS) $(LDFLAGS) -T "../HAL/Link.ld" -nostartfiles -Xlinker --gc-sections -L"../" -L"../LIB" -Xlinker --print-memory-usage -Wl,-Map,"openterface-km-firmware.map" --specs=nano.specs --specs=nosys.specs -o "openterface-km-firmware.elf" $(OBJS) $(USER_OBJS) $(LIBS)
+	riscv-none-embed-gcc -march=rv32imac -mabi=ilp32 -mcmodel=medany -msmall-data-limit=8 -mno-save-restore -fmax-errors=20 -Os -fmessage-length=0 -fsigned-char -ffunction-sections -fdata-sections -fno-common -g $(CFLAGS) $(LDFLAGS) -T "../HAL/Link.ld" -nostartfiles -Xlinker --gc-sections -L"../" -L"../LIB" -Xlinker --print-memory-usage -Wl,-Map,"openterface-km-firmware.map" --specs=nano.specs --specs=nosys.specs -o "openterface-km-firmware.elf" $(OBJS) $(USER_OBJS) $(LIBS)
 	@echo 'Finished building target: $@'
 	@
 openterface-km-firmware.hex: openterface-km-firmware.elf
