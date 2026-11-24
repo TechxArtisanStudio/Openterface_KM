@@ -40,6 +40,7 @@ static volatile uint16_t USBD_CDC_ECM_PacketFilter;
 #include "../../include/ncm_bridge.h"
 
 #if USB_WORK_MODE_COMPILES_HOST_CDC_NCM
+#define USBD_CDC_NCM_REQ_GET_NTB_PARAMS       0x80u
 #define USBD_CDC_NCM_REQ_GET_NTB_INPUT_SIZE   0x87u
 #define USBD_CDC_NCM_REQ_SET_NTB_INPUT_SIZE   0x86u
 #define USBD_CDC_NCM_REQ_GET_NTB_FORMAT       0x89u
@@ -60,6 +61,24 @@ static uint8_t USBD_CDC_NCM_NtbInSize[8] = {
 };
 static volatile uint16_t USBD_CDC_NCM_PacketFilter;
 static uint8_t USBD_CDC_NCM_CtrlBuf[8];
+/* NTB Parameters structure (28 bytes per CDC NCM 1.0 spec Table 6.3) —
+ * byte-identical to the USBFS-side table that Linux cdc_ncm accepts.
+ * Linux sends GET_NTB_PARAMETERS (0x80) during bind; without it the
+ * driver fails with "failed GET_NTB_PARAMETERS; bind() failure". */
+static uint8_t USBD_CDC_NCM_NtbParams[28] = {
+    0x1C, 0x00,  /* wLength: 28 bytes */
+    0x01, 0x00,  /* bmNtbFormatsSupported: 16-bit NTB only */
+    0x00, 0x08, 0x00, 0x00,  /* dwNtbInMaxSize: 2048 bytes */
+    0x04, 0x00,  /* wNdpInDivisor: 4 */
+    0x00, 0x00,  /* wNdpInPayloadRemainder: 0 */
+    0x04, 0x00,  /* wNdpInAlignment: 4 */
+    0x00, 0x00,  /* wPadding1 */
+    0x00, 0x08, 0x00, 0x00,  /* dwNtbOutMaxSize: 2048 bytes */
+    0x04, 0x00,  /* wNdpOutDivisor: 4 */
+    0x00, 0x00,  /* wNdpOutPayloadRemainder: 0 */
+    0x04, 0x00,  /* wNdpOutAlignment: 4 */
+    0x10, 0x00,  /* wNtbOutMaxDatagrams: 16 */
+};
 #endif
 
 extern uint8_t USBD_Endp3_Busy;
@@ -110,7 +129,11 @@ ONE_DESCRIPTOR Device_Descriptor =
 
 ONE_DESCRIPTOR Config_Descriptor =
 {
+#if USB_WORK_MODE_BRIDGE_NCM
+	(uint8_t*)USBD_NcmConfigDescriptor,
+#else
 	(uint8_t*)USBD_ConfigDescriptor,
+#endif
 	USBD_SIZE_CONFIG_DESC
 };
 
@@ -122,6 +145,11 @@ ONE_DESCRIPTOR String_Descriptor[] =
   {(uint8_t*)USBD_StringSerial,  USBD_SIZE_STRING_SERIAL},
 #if USB_WORK_MODE_COMPILES_HOST_CDC_ECM
   {(uint8_t*)USBD_StringEcmMac,  USBD_SIZE_STRING_ECM_MAC},
+#endif
+#if USB_WORK_MODE_BRIDGE_NCM
+  /* Mode 8: index 4 = NCM MAC, referenced by iMACAddress=4 in the
+   * USBLIB NCM configuration descriptor. */
+  {(uint8_t*)USBD_StringNcmMac,  USBD_SIZE_STRING_NCM_MAC},
 #endif
 };
 
@@ -350,6 +378,27 @@ void USBD_SetInterface_Impl(void)
     }
 #endif
 
+#if USB_WORK_MODE_COMPILES_BRIDGE_NCM
+    /* Mode 8: IF1 = CDC-NCM Data interface.  alt=1: enable EP3 bulk RX
+     * (NTB packets from host) and EP4 bulk TX (NTBs to host). */
+    if (USB_ModeConfig_ActiveModeBridgeNcm() && iface == 1) {
+        extern volatile uint8_t g_host_ncm_data_if_active;
+        if (alt == 1) {
+            _ClearDTOG_RX(ENDP3);
+            _ClearDTOG_TX(ENDP4);
+            SetEPRxAddr(ENDP3, ENDP3_NCM_RXADDR);
+            SetEPRxCount(ENDP3, 64);
+            SetEPRxStatus(ENDP3, EP_RX_VALID);
+            SetEPTxStatus(ENDP4, EP_TX_NAK);
+            g_host_ncm_data_if_active = 1;
+        } else {
+            SetEPRxStatus(ENDP3, EP_RX_DIS);
+            SetEPTxStatus(ENDP4, EP_TX_DIS);
+            g_host_ncm_data_if_active = 0;
+        }
+    }
+#endif
+
 #if USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
     /* Combined ACM+ECM mode: IF3 = CDC-ECM Data interface.
      * alt=0: EP6 (bidirectional bulk) disabled;
@@ -425,6 +474,34 @@ void USBD_Reset(void)
   }
 #endif
 
+#if USB_WORK_MODE_BRIDGE_NCM
+  /* Mode 8: EP3 OUT = NCM bulk RX (host -> device NTBs).  Packets are
+   * accumulated by NCM_Bridge_HostRxPacket; the endpoint is armed here and
+   * formally enabled when the host selects data interface alt setting 1. */
+  SetEPType(ENDP3, EP_BULK);
+  SetEPRxAddr(ENDP3, ENDP3_NCM_RXADDR);
+  SetEPRxCount(ENDP3, 64);
+  SetEPRxStatus(ENDP3, EP_RX_DIS);
+  SetEPTxStatus(ENDP3, EP_TX_DIS);
+  _ClearDTOG_TX(ENDP3);
+  _ClearDTOG_RX(ENDP3);
+
+  /* EP4 IN = NCM bulk TX (device -> host NTBs), streamed in 64-byte packets */
+  SetEPType(ENDP4, EP_BULK);
+  SetEPTxAddr(ENDP4, ENDP4_NCM_TXADDR);
+  SetEPTxStatus(ENDP4, EP_TX_DIS);
+  SetEPRxStatus(ENDP4, EP_RX_DIS);
+  _ClearDTOG_TX(ENDP4);
+  _ClearDTOG_RX(ENDP4);
+
+  /* EP5 IN = NCM notification (interrupt); EP5 OUT is unused in this mode */
+  SetEPType(ENDP5, EP_INTERRUPT);
+  SetEPTxAddr(ENDP5, ENDP5_NCM_TXADDR);
+  SetEPTxStatus(ENDP5, EP_TX_NAK);
+  SetEPRxStatus(ENDP5, EP_RX_DIS);
+  _ClearDTOG_TX(ENDP5);
+  _ClearDTOG_RX(ENDP5);
+#else
   /* EP3: ECM bulk IN (host PC side). Start disabled per CDC-ECM spec;
    * enabled when the host selects data interface alt setting 1. */
   SetEPType(ENDP3, EP_BULK);
@@ -433,11 +510,7 @@ void USBD_Reset(void)
   SetEPRxStatus(ENDP3, EP_RX_DIS);
   _ClearDTOG_TX(ENDP3);
   _ClearDTOG_RX(ENDP3);
-
-  /* EP5 RX buffer: allocate enough space for ECM bulk packets (64 bytes) */
-  if (USB_ModeConfig_ActiveModeBridgeEcm()) {
-      SetEPRxCount(ENDP5, 64);
-  }
+#endif
 
 #ifdef ENABLE_UAC
   if (USB_ModeConfig_ActiveModeHasHostUac())
@@ -458,6 +531,7 @@ void USBD_Reset(void)
   }
 #endif /* ENABLE_UAC */
 
+#ifndef USB_WORK_MODE_BRIDGE_NCM
   SetEPType(ENDP5, EP_BULK);
   SetEPRxAddr(ENDP5, ENDP5_BULK_RXADDR);
   SetEPRxCount(ENDP5, USB_ModeConfig_ActiveModeBridgeEcm() ? 64 : DEF_USBD_MAX_PACK_SIZE);
@@ -468,6 +542,7 @@ void USBD_Reset(void)
    * EP5 is the ACM bulk-OUT endpoint — must be enabled immediately.        */
   SetEPRxStatus(ENDP5, (USB_ModeConfig_ActiveModeBridgeEcm() && !USB_ModeConfig_ActiveModeHasHostCdcAcm()) ? EP_RX_DIS : EP_RX_VALID);
   SetEPTxStatus(ENDP5, EP_TX_DIS);
+#endif
 
 #if USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
   /* Combined ACM+ECM mode: initialize ECM endpoints (EP2, EP4, EP6) */
@@ -505,6 +580,12 @@ void USBD_Reset(void)
 #if USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
   USBD_Endp2_Busy = 0;
   USBD_Endp6_Busy = 0;
+#endif
+#if USB_WORK_MODE_BRIDGE_NCM
+  extern uint8_t USBD_Endp4_Busy;   /* defined in usb_endp.c */
+  extern uint8_t USBD_Endp5_Busy;   /* defined in usb_endp.c */
+  USBD_Endp4_Busy = 0;
+  USBD_Endp5_Busy = 0;
 #endif
   if (USB_ModeConfig_ActiveModeBridgeAcm())
   {
@@ -700,6 +781,22 @@ RESULT USBD_Get_Interface_Setting(uint8_t Interface, uint8_t AlternateSetting)
   {
     return USB_UNSUPPORT;
   }
+#elif USB_WORK_MODE_BRIDGE_NCM
+  /* Mode 8: IF0 = NCM comm (alt 0 only), IF1 = NCM data (alt 0/1) */
+  if (Interface == 0)
+  {
+    if (AlternateSetting > 0)
+      return USB_UNSUPPORT;
+  }
+  else if (Interface == 1)
+  {
+    if (AlternateSetting > 1)
+      return USB_UNSUPPORT;
+  }
+  else
+  {
+    return USB_UNSUPPORT;
+  }
 #else
 #ifdef ENABLE_UAC
   /* Interface layout:
@@ -826,6 +923,16 @@ static uint8_t *USBD_CDC_NCM_GetNtbInputSize(uint16_t Length)
   return USBD_CDC_NCM_NtbInSize;
 }
 
+static uint8_t *USBD_CDC_NCM_GetNtbParams(uint16_t Length)
+{
+  if (Length == 0)
+  {
+    pInformation->Ctrl_Info.Usb_wLength = sizeof(USBD_CDC_NCM_NtbParams);
+    return NULL;
+  }
+  return USBD_CDC_NCM_NtbParams;
+}
+
 static uint8_t *USBD_CDC_NCM_SetNtbInputSize(uint16_t Length)
 {
   if (Length == 0)
@@ -893,6 +1000,11 @@ RESULT USBD_Data_Setup(uint8_t RequestNo)
 #endif
 #if USB_WORK_MODE_COMPILES_HOST_CDC_NCM
     if (USB_ModeConfig_ActiveModeHasHostCdcNcm() &&
+        Request_No == USBD_CDC_NCM_REQ_GET_NTB_PARAMS)
+    {
+      CopyRoutine = &USBD_CDC_NCM_GetNtbParams;
+    }
+    else if (USB_ModeConfig_ActiveModeHasHostCdcNcm() &&
         Request_No == USBD_CDC_NCM_REQ_GET_NTB_INPUT_SIZE)
     {
       CopyRoutine = &USBD_CDC_NCM_GetNtbInputSize;

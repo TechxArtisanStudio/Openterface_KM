@@ -582,7 +582,7 @@ class BleEthClient:
     Usage::
 
         client = BleEthClient("KVM-GO")
-        async with client.connect():
+        async with client:
             conn_id = await client.open_tunnel("192.168.1.100", 22)
             await client.send_data(conn_id, b"hello")
             data = await client.recv_data(conn_id)

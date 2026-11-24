@@ -109,16 +109,16 @@
 #define CLK_OSC32K                          1   // Do not modify this item here, must modify in project configuration preprocessor if master role is included
 #endif
 #ifndef BLE_MEMHEAP_SIZE
-#define BLE_MEMHEAP_SIZE                    (1024*7)
+#define BLE_MEMHEAP_SIZE                    (1024*10)
 #endif
 #ifndef BLE_BUFF_MAX_LEN            
-#define BLE_BUFF_MAX_LEN                    64
+#define BLE_BUFF_MAX_LEN                    251
 #endif
 #ifndef BLE_BUFF_NUM
-#define BLE_BUFF_NUM                        5
+#define BLE_BUFF_NUM                        8
 #endif
 #ifndef BLE_TX_NUM_EVENT
-#define BLE_TX_NUM_EVENT                    1
+#define BLE_TX_NUM_EVENT                    4
 #endif
 #ifndef BLE_TX_POWER
 #define BLE_TX_POWER                        LL_TX_POWEER_0_DBM

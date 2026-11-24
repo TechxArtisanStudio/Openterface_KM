@@ -38,11 +38,12 @@ show_help() {
     echo "Usage: ./build.sh [options] <product version>"
     echo ""
     echo "Product versions (flags come from the PRODUCT table in build/makefile):"
-    echo "  kvmgo          KVMGo (BOARD_VERSION=1, HID+ACM+ECM bridge, no BLE)"
-    echo "  minikvm        Mini-KVM v1.2 (BOARD_VERSION=2, CDC COM+ECM, no BLE)"
-    echo "  keymod-plus    KeyMod Plus (BOARD_VERSION=3, external 32KHz oscillator, BLE)"
-    echo "  keymod-mini    KeyMod Mini (BOARD_VERSION=3, internal RC oscillator, BLE, no serial)"
-    echo "  all            Build all versions"
+    echo "  kvmgo              KVMGo (BOARD_VERSION=1, HID+ACM+ECM bridge, no BLE)"
+    echo "  minikvm            Mini-KVM v1.2 (BOARD_VERSION=2, CDC COM+ECM, no BLE)"
+    echo "  keymod-plus        KeyMod Plus (BOARD_VERSION=3, external 32KHz oscillator, BLE)"
+    echo "  keymod-plus-beta   KeyMod Plus beta (BOARD_VERSION=3, internal RC oscillator, BLE)"
+    echo "  keymod-mini        KeyMod Mini (BOARD_VERSION=3, internal RC oscillator, BLE, no serial)"
+    echo "  all                Build all versions"
     echo ""
     echo "Options:"
     echo "  --no-ble           Disable Bluetooth (saves ~14KB RAM)"
@@ -170,7 +171,7 @@ while [[ $# -gt 0 ]]; do
             RISC_COMPILER_PATH="$2"
             shift 2
             ;;
-        kvmgo|minikvm|keymod-plus|keymod-mini|all)
+        kvmgo|minikvm|keymod-plus|keymod-plus-beta|keymod-mini|all)
             TARGET=$1
             shift
             ;;
@@ -216,6 +217,7 @@ case ${TARGET} in
         build_one "kvmgo"
         build_one "minikvm"
         build_one "keymod-plus"
+        build_one "keymod-plus-beta"
         build_one "keymod-mini"
         ;;
     *)

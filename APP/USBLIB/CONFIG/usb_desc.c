@@ -41,6 +41,60 @@ const uint8_t  USBD_DeviceDescriptor[] = {
 };
 
 /* USB Configuration Descriptors */
+#if USB_WORK_MODE_BRIDGE_NCM
+/* Mode 8 (hid_ncm_bridge): host-facing CDC-NCM NIC on the USBLIB (PMA)
+ * controller.  IF0 = NCM comm (EP5 IN notification), IF1 = NCM data
+ * (EP3 OUT / EP4 IN bulk).  iMACAddress=4 -> USBD_StringNcmMac.
+ * NOTE: the legacy USBD_ConfigDescriptor (CDC-ACM layout) below is not
+ * compiled in this mode; ECM support is intentionally omitted for now. */
+const uint8_t  USBD_NcmConfigDescriptor[USBD_SIZE_CONFIG_DESC] = {
+    /* Configuration Descriptor */
+    0x09,                           // bLength
+    0x02,                           // bDescriptorType
+    USBD_SIZE_CONFIG_DESC & 0xFF, USBD_SIZE_CONFIG_DESC >> 8, // wTotalLength: 102
+    0x02,                           // bNumInterfaces: NCM comm + NCM data
+    0x01,                           // bConfigurationValue
+    0x00,                           // iConfiguration
+    0x80,                           // bmAttributes: Bus Powered
+    0x32,                           // MaxPower: 100mA
+
+    /* IAD: CDC NCM (IF0=comm + IF1=data) */
+    0x08, 0x0B, 0x00, 0x02, 0x02, 0x0D, 0x00, 0x00,
+
+    /* Interface 0: CDC NCM Communication */
+    0x09, 0x04, 0x00, 0x00, 0x01, 0x02, 0x0D, 0x00, 0x00,
+    0x05, 0x24, 0x00, 0x10, 0x01,           /* Header, CDC 1.10 */
+    0x05, 0x24, 0x06, 0x00, 0x01,           /* Union: control IF0, data IF1 */
+    0x0D, 0x24, 0x0F, 0x04,                 /* Ethernet Networking, iMACAddress=4 */
+    0x00, 0x00, 0x00, 0x00,                 /* bmEthernetStatistics */
+    0xEA, 0x05,                             /* wMaxSegmentSize: 1514 */
+    0x00, 0x00,                             /* wNumberMCFilters: none */
+    0x00,                                   /* bNumberPowerFilters */
+    /* NCM Functional Descriptor (14 bytes, subtype 0x1A) */
+    0x0E, 0x24, 0x1A,                       /* NCM Functional */
+    0x00, 0x01,                             /* bcdNCMVersion: 1.00 */
+    0x01, 0x00, 0x00, 0x00,                 /* bmNetworkCapabilities: NET_ADDRESS */
+    0xEA, 0x05,                             /* wMaxSegmentSize: 1514 */
+    0x00, 0x00,                             /* wNumberMCFilters */
+    0x00,                                   /* bNumberPowerFilters */
+
+    /* Endpoint Descriptor: NCM notification EP5 IN (interrupt) */
+    0x07, 0x05, 0x85, 0x03, 0x10, 0x00, 0x10,
+
+    /* Interface 1: CDC NCM Data (alt 0, idle) */
+    0x09, 0x04, 0x01, 0x00, 0x00, 0x0A, 0x00, 0x00, 0x00,
+    /* Interface 1: CDC NCM Data (alt 1, active) */
+    0x09, 0x04, 0x01, 0x01, 0x02, 0x0A, 0x00, 0x00, 0x00,
+
+    /* Endpoint Descriptor: NCM data OUT EP3 (bulk) */
+    0x07, 0x05, 0x03, 0x02, 0x40, 0x00, 0x00,
+    /* Endpoint Descriptor: NCM data IN EP4 (bulk) */
+    0x07, 0x05, 0x84, 0x02, 0x40, 0x00, 0x00,
+};
+typedef char USBD_NcmConfigDescriptor_SizeCheck[
+    (sizeof(USBD_NcmConfigDescriptor) == USBD_SIZE_CONFIG_DESC) ? 1 : -1
+];
+#else
 const uint8_t  USBD_ConfigDescriptor[] = {
     /* Configuration Descriptor */
     0x09,                           // bLength
@@ -715,6 +769,7 @@ const uint8_t  USBD_ConfigDescriptor[] = {
 typedef char USBD_ConfigDescriptor_SizeCheck[
     (sizeof(USBD_ConfigDescriptor) == USBD_SIZE_CONFIG_DESC) ? 1 : -1
 ];
+#endif /* !USB_WORK_MODE_BRIDGE_NCM */
 
 #if USB_WORK_MODE_RUNTIME_PROFILES
 #define USBD_RUNTIME_ACM_CONFIG_DESC_SIZE 75u
@@ -939,10 +994,18 @@ const uint8_t *USBD_GetActiveConfigDescriptorData(uint16_t *len)
     }
     return USBD_RuntimeAcmConfigDescriptor;
 #else
+#if USB_WORK_MODE_BRIDGE_NCM
+    /* Mode 8: serve the host-facing CDC-NCM configuration descriptor. */
+    if (len != 0) {
+        *len = USBD_SIZE_CONFIG_DESC;
+    }
+    return USBD_NcmConfigDescriptor;
+#else
     if (len != 0) {
         *len = USBD_SIZE_CONFIG_DESC;
     }
     return USBD_ConfigDescriptor;
+#endif
 #endif
 }
 

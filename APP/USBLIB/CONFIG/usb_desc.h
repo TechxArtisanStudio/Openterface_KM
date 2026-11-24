@@ -46,6 +46,9 @@
 #elif USB_WORK_MODE_HAS_HOST_CDC_ECM
 /* 9(cfg) + 79(CDC-ECM) = 88 */
 #define USBD_SIZE_CONFIG_DESC        88
+#elif USB_WORK_MODE_BRIDGE_NCM
+/* Mode 8 host-facing CDC-NCM NIC: 9(cfg) + 93(CDC-NCM) = 102 */
+#define USBD_SIZE_CONFIG_DESC        102
 #else
 /* 9(cfg) + 66(CDC-ACM) = 75 */
 #define USBD_SIZE_CONFIG_DESC        75
@@ -62,7 +65,11 @@
 #define USBD_SIZE_STRING_NCM_MAC     26
 
 extern const uint8_t USBD_DeviceDescriptor[USBD_SIZE_DEVICE_DESC];
+#if !USB_WORK_MODE_BRIDGE_NCM
 extern const uint8_t USBD_ConfigDescriptor[USBD_SIZE_CONFIG_DESC];
+#else
+extern const uint8_t USBD_NcmConfigDescriptor[USBD_SIZE_CONFIG_DESC];
+#endif
 extern const uint8_t USBD_StringLangID [USBD_SIZE_STRING_LANGID];
 extern const uint8_t USBD_StringVendor [USBD_SIZE_STRING_VENDOR];
 extern const uint8_t USBD_StringProduct[USBD_SIZE_STRING_PRODUCT];

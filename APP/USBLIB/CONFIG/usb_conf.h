@@ -71,6 +71,19 @@
 #define ENDP6_RX_ECM_ADDR       (0x180)                     /* 32B, ECM bulk OUT */
 #define ENDP6_TX_ECM_ADDR       (0x1A0)                     /* 32B, ECM bulk IN (same EP, other direction) */
 
+/* Mode 8 (NCM bridge) USBLIB-side PMA buffers.  They reuse PMA regions
+ * whose owners are unused in this mode (no CDC-ACM serial, no UAC, no HID
+ * on the USBLIB controller):
+ *   EP5 IN  notification INT 16B  -> EP1 TX slot
+ *   EP3 OUT bulk RX 64B           -> EP3 TX slot (EP3 is OUT-only in mode 8)
+ *   EP4 IN  bulk TX 64B           -> UAC ISO IN slot
+ * NTBs are streamed in 64-byte packets; PMA cannot hold a whole NTB. */
+#if USB_WORK_MODE_BRIDGE_NCM
+#define ENDP5_NCM_TXADDR    (0xC0)                          /* 16B, NCM notification IN */
+#define ENDP3_NCM_RXADDR    (0x110)                         /* 64B, NCM bulk OUT */
+#define ENDP4_NCM_TXADDR    (0x150)                         /* 64B, NCM bulk IN */
+#endif
+
 /* Serial data endpoint for CDC-ACM. */
 #define USBD_SERIAL_ENDP       ENDP3
 #define USBD_SERIAL_BUSY       USBD_Endp3_Busy

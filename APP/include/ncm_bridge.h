@@ -24,7 +24,9 @@ void NCM_Bridge_Init(void);
 void NCM_Bridge_InitTarget(void);      /* Target-facing USBFS (re-)enumeration only */
 void NCM_Bridge_UpdateIPConfig(void);  /* Update IP config immediately after modification */
 void NCM_Bridge_HostRxDone(const uint8_t *data, uint16_t len);
+void NCM_Bridge_HostRxPacket(const uint8_t *data, uint16_t len);  /* one 64B bulk packet */
 void NCM_Bridge_TargetRxDone(const uint8_t *data, uint16_t len);
+uint16_t NCM_Bridge_GetHostDiagnostics(uint8_t *out, uint16_t max_len);
 void NCM_Bridge_Poll(void);
 void NCM_Bridge_SetBleTxCallback(void (*cb)(void));
 uint8_t NCM_Bridge_SendRawFrame(const uint8_t *data, uint16_t len);
@@ -43,7 +45,9 @@ uint8_t NCM_ParseNtb(const uint8_t *ntb_buf, uint16_t ntb_len,
 #define NCM_Bridge_InitTarget()            ((void)0)
 #define NCM_Bridge_UpdateIPConfig()        ((void)0)
 #define NCM_Bridge_HostRxDone(data, len)   ((void)0)
+#define NCM_Bridge_HostRxPacket(data, len) ((void)0)
 #define NCM_Bridge_TargetRxDone(data, len) ((void)0)
+#define NCM_Bridge_GetHostDiagnostics(out, max_len) (0U)
 #define NCM_Bridge_Poll()                  ((void)0)
 #define NCM_Bridge_SetBleTxCallback(cb)    ((void)0)
 #define NCM_Bridge_SendRawFrame(data, len) ((uint8_t)0)

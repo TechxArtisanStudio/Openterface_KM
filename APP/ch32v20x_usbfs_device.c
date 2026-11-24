@@ -125,7 +125,7 @@ static void USBFS_ModeHid_FillReport(uint8_t *report)
 
     /* Append-only diagnostics (do not change existing offsets above). */
     report[USBFS_MODE_HID_DIAG_VERSION_OFFSET] = 0x01u;
-#if USB_WORK_MODE_BRIDGE_ECM
+#if USB_WORK_MODE_BRIDGE_TUNNEL
     report[USBFS_MODE_HID_DIAG_FLAGS_OFFSET] = 0x01u; /* bit0: BLE-Eth stats present */
 
     ble_eth_reliability_stats_t st;
@@ -418,6 +418,34 @@ const uint8_t StrDesc[28] =
 const uint8_t Return1[2] = {0x31, 0x00};
 const uint8_t Return2[2] = {0xC3, 0x00};
 const uint8_t Return3[2] = {0x9F, 0xEE};
+
+/* Microsoft OS 1.0 string descriptor (string index 0xEE).  Windows needs this
+ * plus a CompatibleID feature descriptor with "WINNCM" before its in-box
+ * UsbNcm host driver (usbncm.inf) will start the target-side CDC-NCM NIC;
+ * without it the NIC sits at Code 56 (CM_PROB_NEED_CLASS_CONFIG). */
+static const uint8_t MsOsStringDesc[18] = {
+    0x12, 0x03,                                             /* len, STRING   */
+    'M', 0x00, 'S', 0x00, 'F', 0x00, 'T', 0x00,
+    '1', 0x00, '0', 0x00, '0', 0x00,                        /* "MSFT100"     */
+    0x52,                                                   /* bMS_VendorCode: 0xC0/0x52 GET_MS_DESCRIPTOR */
+    0x00                                                    /* bPad          */
+};
+
+/* Microsoft OS 1.0 CompatibleID feature descriptor (40 bytes).  Returned for
+ * vendor request 0x52, wIndex = 0x0004.  bFirstInterface = 4 selects the
+ * CDC-NCM function (IF4 comm + IF5 data, IAD first interface = 4). */
+static const uint8_t MsOsCompatIdDesc[40] = {
+    0x28, 0x00, 0x00, 0x00,                                 /* dwLength = 40 */
+    0x00, 0x01,                                             /* bcdVersion 1.00 */
+    0x04, 0x00,                                             /* wIndex = 4 (CompatibleID) */
+    0x01,                                                   /* bCount = 1    */
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,               /* reserved[7]   */
+    0x04,                                                   /* bFirstInterface = 4 */
+    0x00,                                                   /* reserved      */
+    'W', 'I', 'N', 'N', 'C', 'M', 0x00, 0x00,               /* CompatibleID  */
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,         /* SubCompatibleID */
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00                      /* reserved[6]   */
+};
 
 void USBFS_IRQHandler(void) __attribute__((interrupt("WCH-Interrupt-fast")));
 /*********************************************************************
@@ -1511,6 +1539,34 @@ void USBFS_IRQHandler( void )
                             }
                             break;
 
+                        case 0x52:  /* GET_MS_DESCRIPTOR (Microsoft OS 1.0) */
+                            /* wIndex = 0x0004 -> CompatibleID feature descriptor.
+                             * Windows requests this (after reading string 0xEE)
+                             * before binding the in-box UsbNcm host driver.
+                             * NOTE: cap the response at the host's wLength —
+                             * Windows may read the 16-byte header first; sending
+                             * more than requested makes the query fail and the
+                             * driver falls back to a generic class match. */
+                            {
+#if USB_WORK_MODE_COMPILES_BRIDGE_NCM
+                                if( USB_ModeConfig_ActiveModeBridgeNcm() &&
+                                    USBFS_SetupReqIndex == 0x0004 )
+                                {
+                                    memcpy( USBFS_EP0_Buf, MsOsCompatIdDesc, sizeof(MsOsCompatIdDesc) );
+                                    if( USBFS_SetupReqLen > sizeof(MsOsCompatIdDesc) )
+                                    {
+                                        USBFS_SetupReqLen = sizeof(MsOsCompatIdDesc);
+                                    }
+                                    len = USBFS_SetupReqLen;
+                                }
+                                else
+#endif
+                                {
+                                    errflag = 0xFF;
+                                }
+                            }
+                            break;
+
                         default:
                             errflag = 0xFF;
                             break;
@@ -1656,6 +1712,21 @@ void USBFS_IRQHandler( void )
                                             {
                                                 pUSBFS_Descr = MyNcmMacInfo;
                                                 len = 0x1A;  /* 26 bytes */
+                                            }
+                                            else
+                                            {
+                                                errflag = 0xFF;
+                                            }
+                                            break;
+
+                                        case 0xEE:
+                                            /* Microsoft OS 1.0 string descriptor:
+                                             * tells Windows the vendor-code request
+                                             * that serves the WINNCM CompatibleID. */
+                                            if( USB_ModeConfig_ActiveModeBridgeNcm() )
+                                            {
+                                                pUSBFS_Descr = MsOsStringDesc;
+                                                len = sizeof(MsOsStringDesc);
                                             }
                                             else
                                             {

@@ -314,14 +314,17 @@ endif
 ifeq ($(ENABLE_BLE),1)
 CFLAGS += -DENABLE_BLE
 CFLAGS += -DBLE_DEVICE_NAME="\"$(BLE_NAME)\""
-# BLE heap size in bytes — WCH minimum is 6144 (6 KB); default was 10240.
-# 8 KB covers the larger controller packet cache below with headroom for GATT
-# allocations (the ATT pool and the controller cache share this heap).
-BLE_MEMHEAP_SIZE ?= 8192
+# BLE heap size in bytes — WCH minimum is 6144 (6 KB).
+# 10 KB gives the ATT pool and the enlarged controller cache (251-byte packets
+# x 8 buffers x up to 2 connections) enough headroom; the BLE-Eth tunnel needs
+# 246-byte fragments, so 8 KB leaves too little margin.
+BLE_MEMHEAP_SIZE ?= 10240
 CFLAGS += -DBLE_MEMHEAP_SIZE=$(BLE_MEMHEAP_SIZE)
 # Max BLE packet length (ATT_MTU = BLE_BUFF_MAX_LEN - 4).
-# 64 is the WCH default; fully adequate for HID keyboard/mouse reports.
-BLE_BUFF_MAX_LEN ?= 64
+# 64 (ATT_MTU 60) is the WCH default and enough for HID reports, but it forces
+# the BLE-Eth 246-byte fragments to span many notifications and throttles the
+# tunnel. 251 -> ATT_MTU 247 lets one fragment ride in a single notification.
+BLE_BUFF_MAX_LEN ?= 251
 CFLAGS += -DBLE_BUFF_MAX_LEN=$(BLE_BUFF_MAX_LEN)
 # Controller packet cache, shared by TX and RX (WCH default 5). Four TX
 # packets per event would leave the RX side a single buffer, so raise the pool.

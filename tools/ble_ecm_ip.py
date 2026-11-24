@@ -87,7 +87,7 @@ async def run(args: argparse.Namespace) -> int:
         trace_frames=args.trace,
     )
 
-    async with client.connect():
+    async with client:
         if args.action == "get":
             sub = GET_SUBCOMMANDS[args.sub]
             print(f"GET_ECM_IP sub={args.sub}")

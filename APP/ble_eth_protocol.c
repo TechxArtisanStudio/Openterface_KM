@@ -20,7 +20,7 @@
 #include "include/pwm_led.h"
 #include "include/km_ring.h"
 
-#if USB_WORK_MODE_BRIDGE_ECM
+#if USB_WORK_MODE_BRIDGE_TUNNEL
 
 /* LED diagnostic patterns for BLE-Eth tunnel debugging */
 #define LED_DIAG_CONNECT_RX      90   /* CONNECT received from BLE */
@@ -35,12 +35,27 @@ static ble_eth_conn_t       g_connections[BLE_ETH_MAX_CONNECTIONS];
 static ble_eth_event_cb_t   g_event_cb;
 
 /* TX queue: holds pre-built frames ready for BLE notification */
-#define BLE_ETH_TX_QUEUE_DEPTH  8U
-#define BLE_ETH_TX_CHUNK_SIZE   255U  /* fits in ble notify (uint8_t len param, max 255) */
-/* Reserve a small number of TX queue slots for control/ACK frames so
- * large DATA_PUSH bursts cannot completely block host->device progress.
+#define BLE_ETH_TX_QUEUE_DEPTH  16U
+#define BLE_ETH_TX_CHUNK_SIZE   244U  /* one frame fits one notification (ATT MTU - 3) */
+/* Slots the DATA_PUSH path must leave free for control replies (info,
+ * disconnect); DATA ACKs have their own queue below. */
+#define BLE_ETH_TX_ACK_RESERVE  2U
+
+/* ACK queue: DATA ACKs bypass the data ring. Queued behind a DATA_PUSH
+ * backlog, ACKs arrive too late and the host's flow window collapses, so the
+ * TX pump drains this queue first (only at a frame boundary, so the host's
+ * byte-stream parser never sees an ACK spliced into a data frame).
  */
-#define BLE_ETH_TX_QUEUE_CTRL_RESERVE  1U
+#define BLE_ETH_ACK_FRAME_MAX    16U
+#define BLE_ETH_ACK_QUEUE_DEPTH  16U
+/* While more fragments of the same message are still expected, a success ACK
+ * is held for up to this long so later fragments can merge into it (their
+ * expected_seq supersedes it). The controller sends roughly one notification
+ * per connection event, so one ACK per message instead of one per fragment
+ * frees most of the return path for data. The hold is released immediately
+ * when the message completes, and expires after the deadline for hosts that
+ * use a window smaller than a whole message. */
+#define BLE_ETH_ACK_HOLD_MS      100U
 
 #define BLE_ETH_SYN_RETRY_TICKS 10U
 #define BLE_ETH_SYN_MAX_RETRIES 5U
@@ -70,6 +85,28 @@ static ble_eth_tx_queue_t  g_tx_queue;
  */
 static bool g_tx_head_partial;
 
+typedef struct {
+    uint8_t data[BLE_ETH_ACK_FRAME_MAX];
+    uint8_t len;
+} ble_eth_ack_chunk_t;
+
+typedef struct {
+    ble_eth_ack_chunk_t chunks[BLE_ETH_ACK_QUEUE_DEPTH];
+    volatile uint8_t    rd;
+    volatile uint8_t    wr;
+    volatile uint8_t    count;
+} ble_eth_ack_queue_t;
+
+static ble_eth_ack_queue_t g_ack_queue;
+/* Set by BLE_Eth_GetNextTxChunk so the matching consume call knows which queue
+ * the returned bytes came from. */
+static bool g_ack_get_pending;
+
+/* Delayed-ACK state: see BLE_ETH_ACK_HOLD_MS. deadline_ms == 0 means armed but
+ * not yet started; BLE_Eth_PumpTick() starts the clock on its first poll. */
+static bool     g_ack_hold_active;
+static uint32_t g_ack_hold_deadline_ms;
+
 /* WCH __disable_irq()/__enable_irq() act on CSR 0x800 bit 3 (MIE), not on
  * mstatus. Return the previous MIE so a critical section entered from an ISR
  * does not re-enable interrupts on exit. */
@@ -92,6 +129,21 @@ static inline void txq_unlock(uint32_t state)
 static ble_eth_reassembly_t g_reassembly;
 static ble_eth_reliability_stats_t g_reliability_stats;
 
+/* Debug counters exposed via the 0x33/0x10 diagnostics frame. */
+volatile uint16_t g_dbg_tx_push_ok;
+volatile uint16_t g_dbg_tx_push_drop;
+volatile uint16_t g_dbg_push_front_fallback;
+volatile uint16_t g_dbg_frames_parsed;
+volatile uint16_t g_dbg_cmd_ping;
+volatile uint16_t g_dbg_pong_queued;
+/* RX-side debug: write-callback invocations and bytes into BLE_Eth_Parse. */
+volatile uint16_t g_dbg_rx_evt_count;
+volatile uint16_t g_dbg_rx_bytes;
+
+/* Notify pump counters, defined in peripheral.c */
+extern volatile uint16_t g_ble_notify_ok_cum;
+extern volatile uint16_t g_ble_notify_fail_cum;
+
 typedef struct {
     bool    valid;
     uint8_t conn_id;
@@ -109,39 +161,39 @@ static uint8_t compute_rx_window(void)
      *
      * Notes:
      *  - Protocol defines rx_window as 1..15.
-     *  - Firmware reassembly buffer fits ~6 full-size (246B) fragments.
+     *  - Firmware reassembly buffer fits 7 full-size fragments (one MSS 1460
+     *    segment), which is what makes the host's window 7 useful.
      */
-    const uint16_t max_frag_data = 246U; /* BLE_ETH_MAX_PAYLOAD_LEN - BLE_ETH_FRAG_HEADER_LEN */
-    const uint8_t  max_frags_fit = (uint8_t)(sizeof(g_reassembly.data) / max_frag_data); /* ~= 6 */
+    const uint16_t max_frag_data = BLE_ETH_MAX_PAYLOAD_LEN - BLE_ETH_FRAG_HEADER_LEN;
+    const uint8_t  max_frags_fit = (uint8_t)(sizeof(g_reassembly.data) / max_frag_data); /* = 7 */
 
     uint8_t window_by_buf = max_frags_fit;
     if (window_by_buf < 1U) window_by_buf = 1U;
 
-    if (g_reassembly.in_progress) {
+    if (g_reassembly.in_progress && g_reassembly.total_frags > g_reassembly.next_seq) {
+        /* Only shrink the window while fragments of the current message are
+         * still outstanding. Once the final fragment has landed the buffer is
+         * released as soon as this frame dispatches, so keep advertising the
+         * full window; otherwise the last ACK of every message would report
+         * zero free fragments and pin the host to a stop-and-wait window for
+         * the next message.
+         */
         uint16_t remaining_bytes = (uint16_t)(sizeof(g_reassembly.data) - g_reassembly.received_len);
         uint8_t remaining_by_buf = (uint8_t)(remaining_bytes / max_frag_data);
+        uint8_t remaining_by_msg = (uint8_t)(g_reassembly.total_frags - g_reassembly.next_seq);
         if (remaining_by_buf < 1U) remaining_by_buf = 1U;
-
-        uint8_t remaining_by_msg = 1U;
-        if (g_reassembly.total_frags > g_reassembly.next_seq) {
-            remaining_by_msg = (uint8_t)(g_reassembly.total_frags - g_reassembly.next_seq);
-            if (remaining_by_msg < 1U) remaining_by_msg = 1U;
-        }
 
         window_by_buf = remaining_by_buf;
         if (remaining_by_msg < window_by_buf) window_by_buf = remaining_by_msg;
     }
 
-    /* Ensure we have room to enqueue ACK frames into the notify TX queue.
-     * Keep at least one slot reserved for non-ACK traffic.
+    /* Ensure ACK frames have room in their own queue; that queue is drained
+     * ahead of DATA_PUSH traffic, so its occupancy (not the data backlog)
+     * decides whether an acknowledgement can still be generated.
      */
-    uint8_t occupancy = g_tx_queue.count;
-    uint8_t headroom = 0U;
-    if (occupancy < BLE_ETH_TX_QUEUE_DEPTH) {
-        headroom = (uint8_t)(BLE_ETH_TX_QUEUE_DEPTH - occupancy);
-    }
-    if (headroom > 1U) {
-        headroom = (uint8_t)(headroom - 1U);
+    uint8_t headroom = BLE_ETH_ACK_QUEUE_DEPTH;
+    if (g_ack_queue.count < BLE_ETH_ACK_QUEUE_DEPTH) {
+        headroom = (uint8_t)(BLE_ETH_ACK_QUEUE_DEPTH - g_ack_queue.count);
     } else {
         headroom = 1U;
     }
@@ -250,7 +302,16 @@ static uint16_t build_frame(uint8_t *buf, uint8_t addr, uint8_t cmd,
         off += plen;
     }
 
-    buf[off++] = calc_checksum(buf, off);
+    /* Compute over the bytes written so far before advancing off. Writing
+     * buf[off++] = calc_checksum(buf, off) leaves the increment and the read of
+     * off unsequenced (undefined behaviour); the compiler could sum off+1 bytes
+     * and bake an uninitialized byte into the checksum. That was masked while
+     * every queued frame also ran normalize_frame_checksum, but the DATA ACK
+     * path queues straight from this buffer, so it must be correct here. */
+    {
+        uint8_t checksum = calc_checksum(buf, off);
+        buf[off++] = checksum;
+    }
     return off;
 }
 
@@ -272,7 +333,65 @@ static void tx_queue_clear(void)
     g_tx_queue.wr = 0;
     g_tx_queue.count = 0;
     g_tx_head_partial = false;
+    g_ack_queue.rd = 0;
+    g_ack_queue.wr = 0;
+    g_ack_queue.count = 0;
+    g_ack_get_pending = false;
     txq_unlock(irq);
+}
+
+static bool ack_queue_push(const uint8_t *data, uint8_t len)
+{
+    if (len == 0 || len > BLE_ETH_ACK_FRAME_MAX) return false;
+
+    uint32_t irq = txq_lock();
+
+    if (g_ack_queue.count >= BLE_ETH_ACK_QUEUE_DEPTH) {
+        /* Safe to drop: ACKs are cumulative, so the next one re-reports all
+         * progress. The queue only overflows if the pump is not running. */
+        g_reliability_stats.tx_ack_queue_drop++;
+        txq_unlock(irq);
+        return false;
+    }
+
+    /* A newer success ACK supersedes an older success ACK for the same
+     * connection that is still waiting for the pump. The metadata is
+     * cumulative (expected_seq advances), so collapsing a burst of
+     * per-fragment ACKs into one notification loses no information and
+     * avoids paying a notify round trip per fragment, which dominates the
+     * send time of a pipelined message. Error ACKs are left queued: their
+     * expected_seq marks the fragment the host has to retransmit.
+     * expected_seq restarts per message, so require it not to go backwards;
+     * a frame from a restarted message must not overwrite the final ACK of
+     * the aborted one. */
+    if (g_ack_queue.count > 0 && len >= 9) {
+        uint8_t tail = (g_ack_queue.wr == 0) ? (uint8_t)(BLE_ETH_ACK_QUEUE_DEPTH - 1U)
+                                             : (uint8_t)(g_ack_queue.wr - 1U);
+        ble_eth_ack_chunk_t *prev = &g_ack_queue.chunks[tail];
+
+        if (len == prev->len &&
+            data[2] == prev->data[2] &&                    /* addr */
+            data[3] == BLE_ETH_CMD_DATA_RESP &&
+            data[5] == BLE_ETH_STATUS_SUCCESS &&
+            prev->data[3] == BLE_ETH_CMD_DATA_RESP &&
+            prev->data[5] == BLE_ETH_STATUS_SUCCESS &&
+            data[6] == prev->data[6] &&                    /* conn_id */
+            data[8] >= prev->data[8] &&                    /* expected_seq */
+            !(g_ack_get_pending && g_ack_queue.rd == tail)) {
+            memcpy(prev->data, data, len);
+            txq_unlock(irq);
+            return true;
+        }
+    }
+
+    memcpy(g_ack_queue.chunks[g_ack_queue.wr].data, data, len);
+    g_ack_queue.chunks[g_ack_queue.wr].len = len;
+    g_ack_queue.wr++;
+    if (g_ack_queue.wr >= BLE_ETH_ACK_QUEUE_DEPTH) g_ack_queue.wr = 0;
+    g_ack_queue.count++;
+
+    txq_unlock(irq);
+    return true;
 }
 
 static bool tx_queue_push(const uint8_t *data, uint16_t len)
@@ -285,6 +404,7 @@ static bool tx_queue_push(const uint8_t *data, uint16_t len)
     uint16_t needed_chunks = (uint16_t)((len + BLE_ETH_TX_CHUNK_SIZE - 1U) / BLE_ETH_TX_CHUNK_SIZE);
     if ((uint16_t)(g_tx_queue.count + needed_chunks) > BLE_ETH_TX_QUEUE_DEPTH) {
         g_reliability_stats.tx_queue_full_drop++;
+        g_dbg_tx_push_drop++;
         txq_unlock(irq);
         return false;
     }
@@ -305,6 +425,7 @@ static bool tx_queue_push(const uint8_t *data, uint16_t len)
         offset = (uint16_t)(offset + copy_len);
     }
 
+    g_dbg_tx_push_ok++;
     txq_unlock(irq);
 
     return true;
@@ -315,6 +436,7 @@ static bool tx_queue_push_front(const uint8_t *data, uint16_t len)
     if (len == 0) return true;
     if (len > BLE_ETH_TX_CHUNK_SIZE) {
         /* Should not happen under protocol limits; fall back to normal push. */
+        g_dbg_push_front_fallback++;
         return tx_queue_push(data, len);
     }
 
@@ -434,8 +556,19 @@ static void queue_data_ack(uint8_t addr, uint8_t status, uint8_t conn_id, uint8_
     };
     uint8_t buf[16];
     uint16_t len = build_frame(buf, addr, BLE_ETH_CMD_DATA_RESP, rsp, BLE_ETH_DATA_ACK_WINDOW_PAYLOAD_LEN);
-    if (tx_queue_push_front(buf, len)) {
+    if (ack_queue_push(buf, (uint8_t)len)) {
         g_reliability_stats.tx_ack_sent++;
+
+        if (status == BLE_ETH_STATUS_SUCCESS) {
+            if (!g_ack_hold_active) {
+                g_ack_hold_active = true;
+                g_ack_hold_deadline_ms = 0;
+            }
+        } else {
+            /* An error ACK carries the fragment the host has to retransmit;
+             * holding it would stall recovery for up to the full hold time. */
+            g_ack_hold_active = false;
+        }
     }
 }
 
@@ -443,6 +576,8 @@ static void dispatch_frame(const ble_eth_frame_t *frame)
 {
     uint8_t addr = frame->addr;
     uint8_t cmd = frame->cmd;
+
+    g_dbg_frames_parsed++;
 
     /* Check if this is a response from device (cmd >= 0x80) -
      * these are normally handled by the host side, but on device
@@ -635,7 +770,10 @@ static void dispatch_frame(const ble_eth_frame_t *frame)
         uint8_t buf[8 + BLE_ETH_MAX_PAYLOAD_LEN];
         uint16_t len = build_frame(buf, addr, BLE_ETH_CMD_PONG,
                                    frame->payload, frame->payload_len);
-        tx_queue_push_front(buf, len);
+        g_dbg_cmd_ping++;
+        if (tx_queue_push_front(buf, len)) {
+            g_dbg_pong_queued++;
+        }
         break;
     }
 
@@ -927,6 +1065,9 @@ static void dispatch_frame(const ble_eth_frame_t *frame)
 
 void BLE_Eth_Parse(const uint8_t *data, uint16_t len)
 {
+    g_dbg_rx_evt_count++;
+    g_dbg_rx_bytes = (uint16_t)(g_dbg_rx_bytes + len);
+
     for (uint16_t i = 0; i < len; i++) {
         uint8_t byte = data[i];
 
@@ -1049,6 +1190,46 @@ void BLE_Eth_GetReliabilityStats(ble_eth_reliability_stats_t *out_stats)
 void BLE_Eth_ResetReliabilityStats(void)
 {
     memset(&g_reliability_stats, 0, sizeof(g_reliability_stats));
+}
+
+/* Debug snapshot for the 0x33/0x10 diagnostics frame: TX queue state,
+ * push/pump counters, notify success/failure counts. */
+void BLE_Eth_GetDebugStats(uint8_t *out, uint16_t max_len, uint16_t *out_len)
+{
+    uint16_t i = 0;
+#define DPUT8(v)  do { if (i < max_len) out[i] = (uint8_t)(v); i++; } while (0)
+#define DPUT16(v) do { if ((i + 1) < max_len) { out[i] = (uint8_t)(v); \
+                          out[i + 1] = (uint8_t)((v) >> 8); } i += 2; } while (0)
+
+    DPUT16(g_dbg_tx_push_ok);
+    DPUT16(g_dbg_tx_push_drop);
+    DPUT16(g_dbg_push_front_fallback);
+    DPUT16(g_dbg_frames_parsed);
+    DPUT16(g_dbg_cmd_ping);
+    DPUT16(g_dbg_pong_queued);
+    DPUT16(g_dbg_rx_evt_count);
+    DPUT16(g_dbg_rx_bytes);
+    DPUT16(g_ble_notify_ok_cum);
+    DPUT16(g_ble_notify_fail_cum);
+    DPUT8(g_parser.state);
+    DPUT8(g_parser.rx_index & 0xFF);
+    DPUT8((g_parser.rx_index >> 8) & 0xFF);
+    DPUT8(g_parser.frame.payload_len);
+    DPUT8(g_parser.checksum);
+    DPUT8(g_tx_queue.count);
+    DPUT8(g_tx_queue.rd);
+    DPUT8(g_tx_queue.wr);
+    DPUT8(g_tx_head_partial ? 1u : 0u);
+    DPUT8(g_ack_queue.count);
+    DPUT8(g_ack_hold_active ? 1u : 0u);
+    DPUT16(g_reliability_stats.tx_queue_full_drop);
+    DPUT16(g_reliability_stats.tx_ack_sent);
+    DPUT16(g_reliability_stats.tx_ack_queue_drop);
+
+    if (i > max_len) i = max_len;
+    *out_len = i;
+#undef DPUT8
+#undef DPUT16
 }
 
 uint16_t BLE_Eth_BuildConnect(uint8_t *buf, const uint8_t remote_ip[4], uint16_t remote_port)
@@ -1256,19 +1437,28 @@ bool BLE_Eth_PushTargetData(uint8_t conn_id, const uint8_t *data, uint16_t len)
 {
     if (!data || len == 0) return false;
 
-    /* Calculate fragmentation */
-    uint16_t max_frag_data = BLE_ETH_MAX_PAYLOAD_LEN - BLE_ETH_FRAG_HEADER_LEN;
+    /* Calculate fragmentation.  Keep every DATA_PUSH frame within one TX
+     * chunk (244 B): 6 frame bytes + 3 fragment header + data.  This matches
+     * the 7 x 235-byte reassembly buffer sizing on the receive side. */
+    uint16_t max_frag_data = BLE_ETH_TX_CHUNK_SIZE - BLE_ETH_FRAME_MIN_LEN - BLE_ETH_FRAG_HEADER_LEN;
+    if (max_frag_data > BLE_ETH_MAX_PAYLOAD_LEN - BLE_ETH_FRAG_HEADER_LEN) {
+        max_frag_data = BLE_ETH_MAX_PAYLOAD_LEN - BLE_ETH_FRAG_HEADER_LEN;
+    }
     uint8_t total_frags = (uint8_t)((len + max_frag_data - 1U) / max_frag_data);
     if (total_frags == 0) total_frags = 1;
-    if (total_frags > 6U) return false; /* Too large (fits one full-size TCP segment) */
+    /* A full TCP segment (MSS 1460) needs 7 fragments of 235 bytes now that a
+     * frame has to fit one BLE notification. This only bounds what the target
+     * side may hand us for transmission; the receive path is bounded by its
+     * reassembly buffer instead. */
+    if (total_frags > 7U) return false;
 
     /* Enqueue fragments atomically. If we enqueue only a prefix of a TCP segment
      * but still ACK it at the TCP layer, the byte stream becomes corrupted.
      */
     uint32_t irq = txq_lock();
     uint8_t depth_for_data = BLE_ETH_TX_QUEUE_DEPTH;
-    if (depth_for_data > BLE_ETH_TX_QUEUE_CTRL_RESERVE) {
-        depth_for_data = (uint8_t)(depth_for_data - BLE_ETH_TX_QUEUE_CTRL_RESERVE);
+    if (depth_for_data > BLE_ETH_TX_ACK_RESERVE) {
+        depth_for_data = (uint8_t)(depth_for_data - BLE_ETH_TX_ACK_RESERVE);
     }
     if ((uint16_t)(g_tx_queue.count + total_frags) > depth_for_data) {
         g_reliability_stats.tx_queue_full_drop++;
@@ -1302,7 +1492,10 @@ bool BLE_Eth_PushTargetData(uint8_t conn_id, const uint8_t *data, uint16_t len)
         off += 3;
         memcpy(&full_buf[off], &data[offset], chunk_len);
         off += chunk_len;
-        full_buf[off++] = calc_checksum(full_buf, off);
+        {
+            uint8_t checksum = calc_checksum(full_buf, off);
+            full_buf[off++] = checksum;
+        }
 
         memcpy(g_tx_queue.chunks[g_tx_queue.wr].data, full_buf, off);
         normalize_frame_checksum(g_tx_queue.chunks[g_tx_queue.wr].data, off);
@@ -1319,11 +1512,50 @@ bool BLE_Eth_PushTargetData(uint8_t conn_id, const uint8_t *data, uint16_t len)
     return true;
 }
 
+void BLE_Eth_PumpTick(uint32_t now_ms)
+{
+    if (!g_ack_hold_active) return;
+
+    if (!g_reassembly.in_progress || g_ack_queue.count == 0) {
+        /* Message finished (or nothing left to deliver): send now. */
+        g_ack_hold_active = false;
+        return;
+    }
+
+    if (g_ack_hold_deadline_ms == 0) {
+        g_ack_hold_deadline_ms = now_ms + BLE_ETH_ACK_HOLD_MS;
+    } else if ((int32_t)(now_ms - g_ack_hold_deadline_ms) >= 0) {
+        g_ack_hold_active = false;
+    }
+}
+
+bool BLE_Eth_AckHeld(void)
+{
+    return g_ack_hold_active && g_ack_queue.count > 0;
+}
+
 uint16_t BLE_Eth_GetNextTxChunk(uint8_t *buf, uint16_t max_len)
 {
     if (max_len == 0) return 0;
 
     uint32_t irq = txq_lock();
+
+    /* ACK frames may only jump ahead of data at a frame boundary. While the
+     * data head is partially transmitted, splicing an ACK in would land inside
+     * another frame and desynchronise the host's byte-stream parser.
+     */
+    if (g_ack_queue.count > 0 && !g_ack_hold_active &&
+        (!g_tx_head_partial || g_tx_queue.count == 0)) {
+        ble_eth_ack_chunk_t *ack = &g_ack_queue.chunks[g_ack_queue.rd];
+        uint16_t len = ack->len;
+        if (len > max_len) len = max_len;
+        memcpy(buf, ack->data, len);
+        g_ack_get_pending = true;
+        txq_unlock(irq);
+        return len;
+    }
+
+    g_ack_get_pending = false;
 
     if (g_tx_queue.count == 0) {
         txq_unlock(irq);
@@ -1343,6 +1575,29 @@ uint16_t BLE_Eth_GetNextTxChunk(uint8_t *buf, uint16_t max_len)
 void BLE_Eth_ConsumeTxChunk(uint16_t len)
 {
     uint32_t irq = txq_lock();
+
+    if (g_ack_get_pending) {
+        g_ack_get_pending = false;
+        while (len > 0 && g_ack_queue.count > 0) {
+            ble_eth_ack_chunk_t *ack = &g_ack_queue.chunks[g_ack_queue.rd];
+
+            if (len < ack->len) {
+                memmove(ack->data, ack->data + len, (size_t)(ack->len - len));
+                ack->len = (uint8_t)(ack->len - len);
+                txq_unlock(irq);
+                return;
+            }
+
+            len = (uint16_t)(len - ack->len);
+
+            g_ack_queue.rd++;
+            if (g_ack_queue.rd >= BLE_ETH_ACK_QUEUE_DEPTH) g_ack_queue.rd = 0;
+            g_ack_queue.count--;
+        }
+
+        txq_unlock(irq);
+        return;
+    }
 
     while (len > 0 && g_tx_queue.count > 0) {
         ble_eth_tx_chunk_t *chunk = &g_tx_queue.chunks[g_tx_queue.rd];
@@ -1962,4 +2217,4 @@ bool BLE_Eth_AutoConnect(void)
     return true;
 }
 
-#endif /* USB_WORK_MODE_BRIDGE_ECM */
+#endif /* USB_WORK_MODE_BRIDGE_TUNNEL */

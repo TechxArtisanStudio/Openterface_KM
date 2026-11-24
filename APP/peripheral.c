@@ -30,6 +30,7 @@
 #include "include/ble_pair_config.h"
 #include "usbd_composite_km.h"
 #include "include/ecm_bridge.h"
+#include "include/ncm_bridge.h"
 #include "RGB.h"
 
 /*********************************************************************
@@ -44,7 +45,7 @@
 #define SBP_PERIODIC_EVT_PERIOD              1600
 
 // Keep BLE-Eth notifications below large ATT payload sizes that corrupt on some hosts.
-#define BLE_ETH_SAFE_NOTIFY_LEN              180
+#define BLE_ETH_SAFE_NOTIFY_LEN              244
 
 // How often to perform read rssi event
 #define SBP_READ_RSSI_EVT_PERIOD             3200
@@ -65,7 +66,9 @@
 // Minimum connection interval (units of 1.25ms, 6=7.5ms)
 // iOS rejects anything below 15ms for non-HID app accessories, so asking for
 // 12.5ms meant the interval request was refused and the link stayed at the
-// 30ms default — half the connection events, double the cursor lag.
+// 30ms default — half the connection events, double the cursor lag. A
+// 12.5-15ms range was measured too: macOS did not shorten the interval, so
+// keep the single 15ms value both hosts accept.
 #define DEFAULT_DESIRED_MIN_CONN_INTERVAL    12
 
 // Maximum connection interval (units of 1.25ms, 100=125ms)
@@ -145,10 +148,18 @@ static uint16_t peripheralMTU = ATT_MTU_SIZE;
 /* BLE-Eth notification retry backoff. app_usb_notify() fails when the BLE
  * stack has no free TX buffer; retrying immediately just spins the task.
  * Values are TMOS ticks (0.625 ms each). */
-#define BLE_ETH_NOTIFY_RETRY_MS   20
+/* The pool frees a slot roughly once per connection event (15 ms), so retry
+ * well inside that so the next slot is used as soon as it opens. The slower
+ * fallback only exists to stop a stuck pool from spinning the task. */
+#define BLE_ETH_NOTIFY_RETRY_MS   8   /* 5 ms */
 #define BLE_ETH_NOTIFY_MAX_FAILS  3
-#define BLE_ETH_NOTIFY_SLOW_TICKS 80  /* 50 ms, used once the pool looks stuck */
+#define BLE_ETH_NOTIFY_SLOW_TICKS 24  /* 15 ms, one connection interval */
+#define BLE_ETH_ACK_HOLD_POLL_TICKS 16  /* 10 ms, re-check a held DATA ACK */
 static uint8_t g_ble_eth_notify_fails;
+
+/* Cumulative notify counters for the 0x33/0x10 diagnostics frame. */
+volatile uint16_t g_ble_notify_ok_cum;
+volatile uint16_t g_ble_notify_fail_cum;
 
 RingMemParm_t RingMemUSB;
 uint8_t       RingMemUSBBuf[512];
@@ -181,7 +192,12 @@ void        ble_usb_ServiceEvt(uint16_t connection_handle, ble_usb_evt_t *p_evt)
 int         RingMem_Protection(uint8_t enable);
 static void ble_eth_event_handler(ble_eth_evt_t *evt);
 static void ble_eth_tx_event_trigger(void);
+#if USB_WORK_MODE_BRIDGE_ECM
 static uint8_t ecm_bridge_tx_handler(const uint8_t *data, uint16_t len);
+#endif
+#if USB_WORK_MODE_BRIDGE_NCM
+static uint8_t ncm_bridge_tx_handler(const uint8_t *data, uint16_t len);
+#endif
 
 static uint8_t Peripheral_IsCh9329ModeCommandFrame(const uint8_t *buf, uint16_t len)
 {
@@ -636,13 +652,23 @@ void Peripheral_Init()
     /* Initialize BLE-Eth tunneling protocol */
     BLE_Eth_Init(ble_eth_event_handler);
 
+    #if USB_WORK_MODE_BRIDGE_ECM
     /* Hook ECM bridge target frames into BLE-Eth reverse path */
     ECM_Bridge_SetBleTxCallback(ble_eth_tx_event_trigger);
 
     /* Route BLE-Eth TCP frames through ECM bridge */
     BLE_Eth_SetEcmtxCb(ecm_bridge_tx_handler);
+#endif
+
+#if USB_WORK_MODE_BRIDGE_NCM
+    /* Hook the target-facing NCM link into the BLE-Eth tunnel: replies come
+     * back through the NCM bridge, and outbound frames leave on that link. */
+    NCM_Bridge_SetBleTxCallback(ble_eth_tx_event_trigger);
+    BLE_Eth_SetEcmtxCb(ncm_bridge_tx_handler);
+#endif
 }
 
+#if USB_WORK_MODE_BRIDGE_ECM
 /* Send Ethernet frame from BLE-Eth to ECM bridge (host side). Returns the
  * bridge queue result so the tunnel can avoid advancing TCP sequence numbers
  * for frames that were dropped. */
@@ -650,6 +676,16 @@ static uint8_t ecm_bridge_tx_handler(const uint8_t *data, uint16_t len)
 {
     return ECM_Bridge_SendRawFrame(data, len);
 }
+#endif /* USB_WORK_MODE_BRIDGE_ECM */
+
+#if USB_WORK_MODE_BRIDGE_NCM
+/* Send Ethernet frame from BLE-Eth to the target-facing NCM link. Returns 1
+ * when the bridge accepted the frame, 0 when it was dropped. */
+static uint8_t ncm_bridge_tx_handler(const uint8_t *data, uint16_t len)
+{
+    return NCM_Bridge_SendRawFrame(data, len);
+}
+#endif /* USB_WORK_MODE_BRIDGE_NCM */
 
 /* Trigger BLE-Eth TX event when target frame data is pushed via BLE */
 static void ble_eth_tx_event_trigger(void)
@@ -818,6 +854,8 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
             max_notify_len = BLE_ETH_SAFE_NOTIFY_LEN;
         }
 
+        BLE_Eth_PumpTick(TMOS_GetSystemClock());
+
         while ((len = BLE_Eth_GetNextTxChunk(tx_buf, max_notify_len)) > 0) {
             if (app_usb_notify(tx_buf, (uint8_t)len) != SUCCESS) {
                 /* The chunk is not consumed, so the queue still holds it. This
@@ -826,6 +864,7 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
                  * other event source would ever flush it and the tunnel
                  * deadlocks. Back off rather than give up. */
                 g_ble_eth_notify_fails++;
+                g_ble_notify_fail_cum++;
                 tmos_start_task(Peripheral_TaskID, SBP_PROCESS_BLEETH_TX_EVT,
                                 g_ble_eth_notify_fails < BLE_ETH_NOTIFY_MAX_FAILS
                                     ? BLE_ETH_NOTIFY_RETRY_MS
@@ -833,7 +872,16 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
                 break;
             }
             g_ble_eth_notify_fails = 0;
+            g_ble_notify_ok_cum++;
             BLE_Eth_ConsumeTxChunk(len);
+        }
+
+        if (BLE_Eth_AckHeld()) {
+            /* A success ACK is waiting for the rest of its message so it can
+             * be merged into one notification; poll again shortly. Data
+             * chunks are unaffected and were served above. */
+            tmos_start_task(Peripheral_TaskID, SBP_PROCESS_BLEETH_TX_EVT,
+                            BLE_ETH_ACK_HOLD_POLL_TICKS);
         }
         return (events ^ SBP_PROCESS_BLEETH_TX_EVT);
     }

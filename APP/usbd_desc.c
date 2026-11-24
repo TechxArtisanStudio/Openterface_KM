@@ -38,7 +38,9 @@ const uint8_t MyDevDescr[ ] =
     DEF_USBD_UEP0_SIZE,                                     // bMaxPacketSize0
     (uint8_t)DEF_USB_VID, (uint8_t)( DEF_USB_VID >> 8 ),    // idVendor
     (uint8_t)DEF_USB_PID, (uint8_t)( DEF_USB_PID >> 8 ),    // idProduct
-    0x00, DEF_IC_PRG_VER,                                   // bcdDevice
+    0x02, DEF_IC_PRG_VER,                                   // bcdDevice (bumped to bust Windows descriptor cache)
+                                                            // Windows invalidates its cached Microsoft
+                                                            // OS descriptor lookup for this VID/PID)
     0x01,                                                   // iManufacturer
     0x02,                                                   // iProduct
     0x03,                                                   // iSerialNumber
@@ -58,7 +60,8 @@ const uint8_t MyCfgDescr[ ] =
     0x0D, 0x01,                                             // wTotalLength: 269 = 0x010D (9 cfg + 50 HID + 66 ACM + 72 Host ECM + 72 Target ECM)
     0x08,                                                   // bNumInterfaces: 2 HID + 2 ACM + 2 Host ECM + 2 Target ECM = 8
 #elif USB_WORK_MODE_HAS_HOST_CDC_NCM
-    0xCA, 0x00,                                             // wTotalLength: 202 = 0x00CA (9 cfg + 4*25 HID + 93 NCM)
+    0xC2, 0x00,                                             // wTotalLength: 194 = 0x00C2 (9 cfg + 4*25 HID + 85 NCM:
+                                                            // NCM functional descriptor is 6 bytes per NCM 1.0 spec)
     0x06,                                                   // bNumInterfaces: 4 HID + 2 CDC NCM = 6
 #elif USB_WORK_MODE_HAS_TARGET_CDC_ACM
     0xAF, 0x00,                                             // wTotalLength: 175 = 0x00AF (100 HID + 9 cfg + 66 CDC ACM)
@@ -443,13 +446,13 @@ const uint8_t MyCfgDescr[ ] =
     0xEA, 0x05,                                             // wMaxSegmentSize: 1514
     0x00, 0x00,                                             // wNumberMCFilters: none
     0x00,                                                   // bNumberPowerFilters
-    /* NCM Functional Descriptor: 14 bytes (subtype 0x1A) */
-    0x0E, 0x24, 0x1A,                                       // NCM Functional (subtype 0x1A)
+    /* NCM Functional Descriptor (NCM 1.0 spec 5.2): exactly 6 bytes.
+     * Windows' UsbNcm.sys validates bFunctionLength == 6 — the trailing
+     * wMaxSegmentSize/MC-filter fields belong in the ECM (0x0F) descriptor
+     * only, and a wrong length makes the driver fail device start (Code 10). */
+    0x06, 0x24, 0x1A,                                       // NCM Functional (subtype 0x1A)
     0x00, 0x01,                                             // bcdNCMVersion: 1.00
-    0x01, 0x00, 0x00, 0x00,                                 // bmNetworkCapabilities: NET_ADDRESS
-    0xEA, 0x05,                                             // wMaxSegmentSize: 1514
-    0x00, 0x00,                                             // wNumberMCFilters
-    0x00,                                                   // bNumberPowerFilters
+    0x02,                                                   // bmNetworkCapabilities: NET_ADDRESS
 
     /* Endpoint Descriptor: CDC NCM notification EP6 IN */
     0x07,                                                   // bLength
@@ -467,7 +470,7 @@ const uint8_t MyCfgDescr[ ] =
     0x00,                                                   // bNumEndpoints
     0x0A,                                                   // bInterfaceClass: Data
     0x00,                                                   // bInterfaceSubClass
-    0x00,                                                   // bInterfaceProtocol
+    0x01,                                                   // bInterfaceProtocol: NCM (Windows UsbNcm requires 0x01)
     0x00,                                                   // iInterface
 
     /* Interface Descriptor: CDC NCM Data (IF5 alt 1, active) */
@@ -478,7 +481,7 @@ const uint8_t MyCfgDescr[ ] =
     0x02,                                                   // bNumEndpoints
     0x0A,                                                   // bInterfaceClass: Data
     0x00,                                                   // bInterfaceSubClass
-    0x00,                                                   // bInterfaceProtocol
+    0x01,                                                   // bInterfaceProtocol: NCM (Windows UsbNcm requires 0x01)
     0x00,                                                   // iInterface
 
     /* Endpoint Descriptor: CDC NCM data OUT EP5 */
@@ -850,7 +853,7 @@ typedef char MyCfgDescr_SizeCheck[(sizeof(MyCfgDescr) == 274) ? 1 : -1];
 #elif USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
 typedef char MyCfgDescr_SizeCheck[(sizeof(MyCfgDescr) == 269) ? 1 : -1];
 #elif USB_WORK_MODE_HAS_HOST_CDC_NCM
-typedef char MyCfgDescr_SizeCheck[(sizeof(MyCfgDescr) == 202) ? 1 : -1];
+typedef char MyCfgDescr_SizeCheck[(sizeof(MyCfgDescr) == 194) ? 1 : -1];
 #elif USB_WORK_MODE_HAS_TARGET_CDC_ACM
 typedef char MyCfgDescr_SizeCheck[(sizeof(MyCfgDescr) == 175) ? 1 : -1];
 #elif USB_WORK_MODE_HAS_TARGET_CDC_ECM
@@ -930,13 +933,13 @@ static const uint8_t USBFS_RuntimeNcmBlock[USBFS_RUNTIME_NCM_BLOCK_SIZE] = {
     0xEA, 0x05,                                             // wMaxSegmentSize: 1514
     0x00, 0x00,                                             // wNumberMCFilters: none
     0x00,                                                   // bNumberPowerFilters
-    /* NCM Functional Descriptor: 14 bytes (subtype 0x1A) */
-    0x0E, 0x24, 0x1A,                                       // NCM Functional (subtype 0x1A)
+    /* NCM Functional Descriptor (NCM 1.0 spec 5.2): exactly 6 bytes.
+     * Windows' UsbNcm.sys validates bFunctionLength == 6 — the trailing
+     * wMaxSegmentSize/MC-filter fields belong in the ECM (0x0F) descriptor
+     * only, and a wrong length makes the driver fail device start (Code 10). */
+    0x06, 0x24, 0x1A,                                       // NCM Functional (subtype 0x1A)
     0x00, 0x01,                                             // bcdNCMVersion: 1.00
-    0x01, 0x00, 0x00, 0x00,                                 // bmNetworkCapabilities: NET_ADDRESS
-    0xEA, 0x05,                                             // wMaxSegmentSize: 1514
-    0x00, 0x00,                                             // wNumberMCFilters
-    0x00,                                                   // bNumberPowerFilters
+    0x02,                                                   // bmNetworkCapabilities: NET_ADDRESS
     /* Endpoint Descriptor: CDC NCM notification EP6 IN */
     0x07, 0x05, 0x86, 0x03, 0x10, 0x00, 0x10,
     /* Interface Descriptor: CDC NCM Data (IF5 alt 0, idle) */

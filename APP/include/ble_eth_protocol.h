@@ -38,7 +38,11 @@ extern "C" {
 #define BLE_ETH_FRAME_HEAD2       0xABU
 #define BLE_ETH_FRAME_MIN_LEN     6U    /* head1+head2+addr+cmd+len+csum */
 #define BLE_ETH_FRAME_HEAD_LEN    5U    /* bytes before payload */
-#define BLE_ETH_MAX_PAYLOAD_LEN   249U  /* max payload in one 255-byte notification */
+/* Max payload of one frame. Keeping the whole frame (payload + 6 bytes of
+ * header/checksum) inside one notification is what makes the difference: a
+ * 255-byte frame had to be split into 244 + 11 bytes, so every 246-byte
+ * fragment cost two BLE connection events in each direction. */
+#define BLE_ETH_MAX_PAYLOAD_LEN   249U  /* protocol limit; TX is chunked at 244 B by the notify pump */
 
 /* ======================== Status Codes =================================== */
 
@@ -313,7 +317,7 @@ typedef struct {
 /* ======================== Reassembly Context ============================= */
 
 typedef struct {
-    uint8_t  data[1536];                 /* max reassembled buffer (~6 x 247) */
+    uint8_t  data[1664];                 /* 7 x 235-byte fragments (one MSS 1460 segment) */
     uint16_t total_len;
     uint16_t received_len;
     uint8_t  conn_id;
@@ -334,6 +338,7 @@ typedef struct {
     uint32_t frag_reassembly_bytes;
     uint32_t tx_ack_sent;
     uint32_t tx_queue_full_drop;
+    uint32_t tx_ack_queue_drop;
 
     /* Frame-level integrity / parser diagnostics */
     uint32_t frame_rx_total;
@@ -378,7 +383,7 @@ typedef void (*ble_eth_event_cb_t)(ble_eth_evt_t *evt);
 
 /* ======================== API ============================================ */
 
-#if USB_WORK_MODE_BRIDGE_ECM
+#if USB_WORK_MODE_BRIDGE_TUNNEL
 
 /**
  * @brief Initialize the BLE-Eth protocol parser and connection table.
@@ -486,6 +491,19 @@ bool BLE_Eth_PushTargetData(uint8_t conn_id, const uint8_t *data, uint16_t len);
  * @return Number of bytes to send, 0 if nothing pending.
  */
 uint16_t BLE_Eth_GetNextTxChunk(uint8_t *buf, uint16_t max_len);
+
+/**
+ * @brief Advance the delayed-ACK state machine. Call once per TX pump pass.
+ *        Releases a held ACK when its message completed or the hold expired.
+ * @param now_ms Monotonic time in milliseconds.
+ */
+void BLE_Eth_PumpTick(uint32_t now_ms);
+
+/**
+ * @brief True while a success ACK is held to let later fragments merge into it.
+ *        The pump should arm itself to run again after a short delay.
+ */
+bool BLE_Eth_AckHeld(void);
 
 /**
  * @brief Consume bytes returned by BLE_Eth_GetNextTxChunk after notify success.
@@ -596,13 +614,14 @@ bool BLE_Eth_PeriodicTick(void);
  * @brief Read a snapshot of protocol reliability counters.
  */
 void BLE_Eth_GetReliabilityStats(ble_eth_reliability_stats_t *out_stats);
+void BLE_Eth_GetDebugStats(uint8_t *out, uint16_t max_len, uint16_t *out_len);
 
 /**
  * @brief Reset protocol reliability counters.
  */
 void BLE_Eth_ResetReliabilityStats(void);
 
-#else /* !USB_WORK_MODE_BRIDGE_ECM — stub out all BLE-Eth API as no-ops */
+#else /* !USB_WORK_MODE_BRIDGE_TUNNEL — stub out all BLE-Eth API as no-ops */
 
 #define BLE_Eth_Init(cb)                            ((void)0)
 #define BLE_Eth_UpdateIPConfig()                    ((void)0)
@@ -617,6 +636,8 @@ void BLE_Eth_ResetReliabilityStats(void);
 #define BLE_Eth_FreeConnection(id)                  ((void)0)
 #define BLE_Eth_PushTargetData(id, data, len)       (false)
 #define BLE_Eth_GetNextTxChunk(buf, max)            (0U)
+#define BLE_Eth_PumpTick(now_ms)                    ((void)0)
+#define BLE_Eth_AckHeld()                           (false)
 #define BLE_Eth_ConsumeTxChunk(len)                 ((void)0)
 #define BLE_Eth_ResetParser()                       ((void)0)
 #define BLE_Eth_OnLinkLost()                        ((void)0)
@@ -632,8 +653,9 @@ void BLE_Eth_ResetReliabilityStats(void);
 #define BLE_Eth_PeriodicTick()                      (false)
 #define BLE_Eth_GetReliabilityStats(out)            ((void)0)
 #define BLE_Eth_ResetReliabilityStats()             ((void)0)
+#define BLE_Eth_GetDebugStats(out, max, len)        ((void)0)
 
-#endif /* USB_WORK_MODE_BRIDGE_ECM */
+#endif /* USB_WORK_MODE_BRIDGE_TUNNEL */
 
 #ifdef __cplusplus
 }

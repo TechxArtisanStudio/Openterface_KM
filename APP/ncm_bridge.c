@@ -48,6 +48,8 @@ volatile uint32_t g_ncm_init_target_count = 0;
 #define NCM_BRIDGE_MTU_FRAME_SIZE       1514u
 #define NCM_BRIDGE_QUEUE_DEPTH          2u
 #define NCM_BRIDGE_USBFS_PACKET_SIZE    64u
+/* Host-facing (USBLIB) bulk packet size — PMA buffers are 64 bytes. */
+#define NCM_BRIDGE_HOST_PACKET_SIZE     64u
 #define NCM_BRIDGE_USBD_PACKET_SIZE     64u
 #define NCM_BRIDGE_HOST_COMM_IF         0u
 #define NCM_BRIDGE_LINK_SPEED_BPS       12000000u
@@ -103,6 +105,30 @@ volatile uint8_t g_ncm_ntb_sequence = 0;
 /* USB endpoint busy flags (external) */
 extern uint8_t USBD_Endp4_Busy;
 extern uint8_t USBD_Endp5_Busy;
+
+/*******************************************************************************
+ * Host-Side Diagnostics (memory instrumentation, no printf).
+ * Counters are incremented at key points of the host-facing NCM data path
+ * and read out over the serial API via CMD_ISP_DEBUG sub_cmd 0x10.
+ ******************************************************************************/
+typedef struct {
+    volatile uint16_t ep3_rx_pkts;   /* EP3 OUT CTR packets received        */
+    volatile uint16_t ntb_sig_ok;    /* packets starting with "NCMH"        */
+    volatile uint16_t ntb_sig_bad;   /* bad signature / bad wBlockLength    */
+    volatile uint16_t ntb_parsed;    /* completed NTBs handed to parser     */
+    volatile uint16_t host_frames;   /* Ethernet frames delivered           */
+    volatile uint16_t arp_req;       /* ARP requests seen                   */
+    volatile uint16_t arp_match;     /* ARP requests for our device IP      */
+    volatile uint16_t arp_reply;     /* ARP replies queued                  */
+    volatile uint16_t icmp_echo;     /* ICMP echo replies queued            */
+    volatile uint16_t dhcp_offer;    /* DHCP OFFERs queued                  */
+    volatile uint16_t tx_sent;       /* NTBs completed on EP4               */
+    volatile uint16_t zlp_sent;      /* terminating ZLPs sent               */
+    volatile uint16_t rx_oflow;      /* packets dropped (oversize)          */
+    volatile uint16_t poll_calls;    /* NCM_Bridge_Poll invocations (hi 8)  */
+} NCM_HostDiag_t;
+
+static NCM_HostDiag_t g_host_diag;
 
 /*******************************************************************************
  * Runtime Network Parameters
@@ -496,12 +522,16 @@ static uint8_t handle_arp_frame(const uint8_t *frame, uint16_t frame_len)
 
     /* Handle ARP requests for our device IP */
     if (arp_op == 1) {  /* ARP request */
-        uint8_t is_dev_ip = (frame[38] == ncm_dev_ip[0] && frame[39] == ncm_dev_ip[1] &&
-                             frame[40] == ncm_dev_ip[2] && frame[41] == ncm_dev_ip[3]);
+        uint8_t is_dev_ip;
+
+        g_host_diag.arp_req++;
+        is_dev_ip = (frame[38] == ncm_dev_ip[0] && frame[39] == ncm_dev_ip[1] &&
+                     frame[40] == ncm_dev_ip[2] && frame[41] == ncm_dev_ip[3]);
 
         if (!is_dev_ip) {
             return 0;
         }
+        g_host_diag.arp_match++;
 
         USB_DEBUG("NCM: ARP req matched, queuing reply\r\n");
 
@@ -520,6 +550,7 @@ static uint8_t handle_arp_frame(const uint8_t *frame, uint16_t frame_len)
         memcpy(&reply[38], &frame[28], 4);   /* target IP = requestor IP */
 
         queue_push(&g_host_tx_queue, reply, sizeof(reply));
+        g_host_diag.arp_reply++;
         return 1;
     }
 
@@ -1011,6 +1042,7 @@ static uint8_t handle_host_frame(const uint8_t *data, uint16_t len)
     if (len < NCM_ETH_HEADER_LEN) {
         return 0;
     }
+    g_host_diag.host_frames++;
 
     eth_type = (uint16_t)(data[12] << 8) | data[13];
 
@@ -1023,10 +1055,12 @@ static uint8_t handle_host_frame(const uint8_t *data, uint16_t len)
     if (eth_type == NCM_ETH_TYPE_IPV4) {
         /* Check for ICMP */
         if (handle_icmp_packet(data, len)) {
+            g_host_diag.icmp_echo++;
             return 1;
         }
         /* Check for DHCP */
         if (handle_dhcp_packet(data, len)) {
+            g_host_diag.dhcp_offer++;
             return 1;
         }
         /* TODO: Handle TCP, UDP */
@@ -1110,6 +1144,15 @@ static void poll_host_notification(void)
 /*******************************************************************************
  * Public API
  ******************************************************************************/
+/* Static NTB buffers and stream state for the host-facing (USBD) NCM path. */
+static uint8_t s_host_ntb_tx[NCM_NTB_MAX_SIZE];
+static uint16_t s_host_ntb_tx_len;   /* current host NTB length, 0 = idle */
+static uint16_t s_host_ntb_tx_off;   /* bytes already handed to the PMA */
+static uint8_t  s_host_ntb_zlp_pending;
+static uint8_t  s_host_rx_buf[NCM_NTB_MAX_SIZE];
+static uint16_t s_host_rx_len;
+static uint16_t s_host_rx_need;
+
 void NCM_Bridge_Init(void)
 {
     memset(&g_host_tx_queue, 0, sizeof(g_host_tx_queue));
@@ -1118,6 +1161,13 @@ void NCM_Bridge_Init(void)
     g_host_tx_gen = 0;
     g_host_zlp_pending = 0;
     g_ncm_ntb_sequence = 0;
+
+    /* Reset the host-facing (USBLIB) NTB stream and reassembly state. */
+    s_host_ntb_tx_len = 0;
+    s_host_ntb_tx_off = 0;
+    s_host_ntb_zlp_pending = 0;
+    s_host_rx_len = 0;
+    s_host_rx_need = 0;
 
     /* Start link notification sequence: DOWN -> UP -> SPEED -> BEACON */
     g_host_notify_state = NCM_NOTIFY_DOWN;
@@ -1147,45 +1197,214 @@ void NCM_Bridge_HostRxDone(const uint8_t *data, uint16_t len)
     NCM_ParseNtb(data, len, handle_host_frame);
 }
 
-/* Static NTB buffer for the host-facing (USBD) NCM path as well. */
-static uint8_t s_host_ntb_tx[NCM_NTB_MAX_SIZE];
+/* Serialize host-side NCM diagnostics into out[] (little-endian, versioned).
+ * Pure memory readout: no printf.  Returns bytes written, 0 on bad args.
+ *
+ * Layout (v1, 56 bytes):
+ *  [0]      version (0x01)
+ *  [1]      data_if_active      (g_host_ncm_data_if_active)
+ *  [2..4]   EPnR[EP3..EP5] low  (raw endpoint status registers)
+ *  [5]      ntb_sequence (low 8 bits)
+ *  [6..8]   host TX queue count / rd / wr
+ *  [9..10]  host TX queue overflow (u16)
+ *  [11..12] ntb_tx_len   (u16)
+ *  [13..14] ntb_tx_off   (u16)
+ *  [15]     ntb_zlp_pending
+ *  [16..17] rx_len  (u16)
+ *  [18..19] rx_need (u16)
+ *  [20..23] device IP (host link, e.g. 192.168.20.3)
+ *  [24..27] host IP   (host link, e.g. 192.168.20.1)
+ *  [28..55] counters u16: ep3_rx_pkts, ntb_sig_ok, ntb_sig_bad, ntb_parsed,
+ *           host_frames, arp_req, arp_match, arp_reply, icmp_echo,
+ *           dhcp_offer, tx_sent, zlp_sent, rx_oflow, poll_calls
+ */
+uint16_t NCM_Bridge_GetHostDiagnostics(uint8_t *out, uint16_t max_len)
+{
+    uint16_t i = 0;
+
+#define DIAG_PUT8(v)  do { if (i < max_len) { out[i] = (uint8_t)(v); } i++; } while (0)
+#define DIAG_PUT16(v) do { if ((i + 1) < max_len) {                         \
+                              out[i]     = (uint8_t)((v) & 0xFF);           \
+                              out[i + 1] = (uint8_t)(((v) >> 8) & 0xFF);    \
+                          }                                                 \
+                          i += 2; } while (0)
+
+    DIAG_PUT8(0x01);                                  /* version        */
+    DIAG_PUT8(g_host_ncm_data_if_active);
+    DIAG_PUT8(_GetENDPOINT(ENDP3) & 0xFF);            /* EP3 OUT status */
+    DIAG_PUT8(_GetENDPOINT(ENDP4) & 0xFF);            /* EP4 IN  status */
+    DIAG_PUT8(_GetENDPOINT(ENDP5) & 0xFF);            /* EP5 IN  status */
+    DIAG_PUT8(g_ncm_ntb_sequence);
+    DIAG_PUT8(g_host_tx_queue.count);
+    DIAG_PUT8(g_host_tx_queue.rd);
+    DIAG_PUT8(g_host_tx_queue.wr);
+    DIAG_PUT16(g_host_tx_queue.overflow);
+    DIAG_PUT16(s_host_ntb_tx_len);
+    DIAG_PUT16(s_host_ntb_tx_off);
+    DIAG_PUT8(s_host_ntb_zlp_pending);
+    DIAG_PUT16(s_host_rx_len);
+    DIAG_PUT16(s_host_rx_need);
+    DIAG_PUT8(ncm_dev_ip[0]); DIAG_PUT8(ncm_dev_ip[1]);
+    DIAG_PUT8(ncm_dev_ip[2]); DIAG_PUT8(ncm_dev_ip[3]);
+    DIAG_PUT8(ncm_host_ip[0]); DIAG_PUT8(ncm_host_ip[1]);
+    DIAG_PUT8(ncm_host_ip[2]); DIAG_PUT8(ncm_host_ip[3]);
+
+    DIAG_PUT16(g_host_diag.ep3_rx_pkts);
+    DIAG_PUT16(g_host_diag.ntb_sig_ok);
+    DIAG_PUT16(g_host_diag.ntb_sig_bad);
+    DIAG_PUT16(g_host_diag.ntb_parsed);
+    DIAG_PUT16(g_host_diag.host_frames);
+    DIAG_PUT16(g_host_diag.arp_req);
+    DIAG_PUT16(g_host_diag.arp_match);
+    DIAG_PUT16(g_host_diag.arp_reply);
+    DIAG_PUT16(g_host_diag.icmp_echo);
+    DIAG_PUT16(g_host_diag.dhcp_offer);
+    DIAG_PUT16(g_host_diag.tx_sent);
+    DIAG_PUT16(g_host_diag.zlp_sent);
+    DIAG_PUT16(g_host_diag.rx_oflow);
+    DIAG_PUT16(g_host_diag.poll_calls);
+
+    /* Append the BLE-Eth tunnel debug block (28 bytes). */
+    {
+        uint16_t dbg_len = 0;
+        uint8_t dbg[28];
+        BLE_Eth_GetDebugStats(dbg, sizeof(dbg), &dbg_len);
+        for (uint16_t k = 0; k < dbg_len; k++) {
+            DIAG_PUT8(dbg[k]);
+        }
+    }
+
+#undef DIAG_PUT8
+#undef DIAG_PUT16
+
+    return (i > max_len) ? max_len : i;
+}
+
+/* One bulk packet per CTR: feed the next 64-byte chunk of the pending NTB
+ * into the EP4 IN PMA buffer.  An NTB whose length is an exact multiple of
+ * the packet size is terminated with a ZLP. */
+static void host_tx_feed(void)
+{
+    if (USBD_Endp4_Busy || s_host_ntb_tx_len == 0) {
+        return;
+    }
+
+    if (s_host_ntb_tx_off < s_host_ntb_tx_len) {
+        uint16_t remain = (uint16_t)(s_host_ntb_tx_len - s_host_ntb_tx_off);
+        uint16_t chunk = (remain > NCM_BRIDGE_HOST_PACKET_SIZE)
+                             ? NCM_BRIDGE_HOST_PACKET_SIZE : remain;
+        extern uint8_t USBD_ENDPx_DataUp(uint8_t endp, uint8_t *pbuf, uint16_t len);
+        if (USBD_ENDPx_DataUp(ENDP4, &s_host_ntb_tx[s_host_ntb_tx_off], chunk) != USB_SUCCESS) {
+            return;
+        }
+        s_host_ntb_tx_off = (uint16_t)(s_host_ntb_tx_off + chunk);
+        if (s_host_ntb_tx_off >= s_host_ntb_tx_len &&
+            (s_host_ntb_tx_len % NCM_BRIDGE_HOST_PACKET_SIZE) == 0) {
+            s_host_ntb_zlp_pending = 1;
+        }
+        return;
+    }
+
+    /* Whole NTB handed off: send a terminating ZLP when the length is an
+     * exact multiple of the packet size, otherwise the transfer is done. */
+    if (s_host_ntb_zlp_pending) {
+        extern uint8_t USBD_ENDPx_DataUp(uint8_t endp, uint8_t *pbuf, uint16_t len);
+        if (USBD_ENDPx_DataUp(ENDP4, s_host_ntb_tx, 0) == USB_SUCCESS) {
+            s_host_ntb_zlp_pending = 0;
+            s_host_ntb_tx_len = 0;
+            g_host_diag.zlp_sent++;
+            g_host_diag.tx_sent++;
+        }
+    } else {
+        /* Non-multiple length: the last chunk already ended the transfer. */
+        s_host_ntb_tx_len = 0;
+        g_host_diag.tx_sent++;
+    }
+}
+
+/* Reassemble one 64-byte bulk OUT packet into the pending NTB; when the NTB
+ * announced by its header (NCH.. + wBlockLength) is complete, parse it. */
+void NCM_Bridge_HostRxPacket(const uint8_t *data, uint16_t len)
+{
+    g_host_diag.ep3_rx_pkts++;
+
+    if (s_host_rx_need == 0) {
+        if (data == NULL || len < NCM_NTB_HEADER_SIZE) {
+            g_host_diag.ntb_sig_bad++;
+            return;
+        }
+        if (data[0] != 'N' || data[1] != 'C' || data[2] != 'M' || data[3] != 'H') {
+            g_host_diag.ntb_sig_bad++;
+            return;
+        }
+        uint16_t block_len = (uint16_t)(data[8] | ((uint16_t)data[9] << 8));
+        if (block_len < NCM_NTB_HEADER_SIZE || block_len > sizeof(s_host_rx_buf)) {
+            g_host_diag.ntb_sig_bad++;
+            return;
+        }
+        g_host_diag.ntb_sig_ok++;
+        s_host_rx_need = block_len;
+        s_host_rx_len = 0;
+    }
+
+    if (len > (uint16_t)(sizeof(s_host_rx_buf) - s_host_rx_len)) {
+        g_host_diag.rx_oflow++;
+        s_host_rx_len = 0;
+        s_host_rx_need = 0;
+        return;
+    }
+
+    memcpy(&s_host_rx_buf[s_host_rx_len], data, len);
+    s_host_rx_len = (uint16_t)(s_host_rx_len + len);
+
+    if (s_host_rx_len >= s_host_rx_need) {
+        g_host_diag.ntb_parsed++;
+        NCM_ParseNtb(s_host_rx_buf, s_host_rx_need, handle_host_frame);
+        s_host_rx_len = 0;
+        s_host_rx_need = 0;
+    }
+}
 
 void NCM_Bridge_Poll(void)
 {
+    g_host_diag.poll_calls++;
     poll_host_notification();
     NCM_Bridge_Target_NotificationPoll();
 
-    /* Host-facing TX path (USBD controller) */
-    if (!USBD_Endp4_Busy && g_host_tx_queue.count > 0) {
+    /* Host-facing TX path (USBD controller).  PMA holds one 64-byte bulk
+     * packet at a time, so NTBs stream out in chunks. */
+    if (s_host_ntb_tx_len != 0) {
+        host_tx_feed();
+    }
+    else if (!USBD_Endp4_Busy && g_host_tx_queue.count > 0) {
         /* Build NTB from one frame (single-frame NTBs for Phase 1) */
-        const uint8_t *frame_ptrs[1];
-        uint16_t frame_lens[1];
-        uint8_t frame_count = 0;
-
-        /* Peek the head frame */
         NCM_Frame_t *frame = &g_host_tx_queue.frames[g_host_tx_queue.rd];
-        if (frame->len > 0) {
-            frame_ptrs[0] = frame->data;
-            frame_lens[0] = frame->len;
-            frame_count = 1;
-        }
+        uint8_t popped = 0;
 
-        if (frame_count > 0) {
+        if (frame->len > 0) {
+            const uint8_t *frame_ptrs[1] = { frame->data };
+            uint16_t frame_lens[1] = { frame->len };
             uint16_t ntb_len = NCM_BuildNtb(s_host_ntb_tx, sizeof(s_host_ntb_tx),
                                              frame_ptrs, frame_lens,
-                                             frame_count, g_ncm_ntb_sequence);
+                                             1, g_ncm_ntb_sequence);
             g_ncm_ntb_sequence++;
 
-            /* Send NTB via EP4 IN */
-            extern uint8_t USBD_ENDPx_DataUp(uint8_t endp, uint8_t *pbuf, uint16_t len);
-            if (ntb_len > 0 && USBD_ENDPx_DataUp(ENDP4, s_host_ntb_tx, ntb_len) == USB_SUCCESS) {
-                USBD_Endp4_Busy = 1;
-                /* Pop the frame from queue */
-                uint32_t csr = ncm_irq_save();
-                g_host_tx_queue.count--;
-                g_host_tx_queue.rd = (g_host_tx_queue.rd + 1) % NCM_BRIDGE_QUEUE_DEPTH;
-                ncm_irq_restore(csr);
+            if (ntb_len > 0) {
+                s_host_ntb_tx_len = ntb_len;
+                s_host_ntb_tx_off = 0;
+                popped = 1;
             }
+        } else {
+            /* Zero-length frame: nothing to send, just drop it. */
+            popped = 1;
+        }
+
+        if (popped) {
+            uint32_t csr = ncm_irq_save();
+            g_host_tx_queue.count--;
+            g_host_tx_queue.rd = (g_host_tx_queue.rd + 1) % NCM_BRIDGE_QUEUE_DEPTH;
+            ncm_irq_restore(csr);
+            host_tx_feed();
         }
     }
 
@@ -1897,6 +2116,13 @@ static uint8_t handle_target_frame(const uint8_t *data, uint16_t len)
 
     /* Handle IPv4 */
     if (eth_type == NCM_ETH_TYPE_IPV4) {
+        /* Feed the frame to an active BLE-Eth tunnel first: target TCP
+         * responses and ICMP echo replies terminate here, everything else
+         * (DHCP, pings for the device itself) falls through to the local
+         * handlers below. */
+        if (BLE_Eth_HandleTargetFrame(data, len) && g_ble_tx_event_cb) {
+            g_ble_tx_event_cb();
+        }
         if (handle_target_dhcp_packet(data, len)) {
             return 1;
         }

@@ -156,22 +156,25 @@ void EP3_IN_Callback (void)
  * @fn      EP3_OUT_Callback
  *
  * @brief  Endpoint 3 OUT — CDC NCM bulk data (host → device).
- *         Receives NTBs from the host and passes them to NCM_Bridge_HostRxDone.
+ *         Bulk OUT delivers one 64-byte packet per CTR interrupt while an
+ *         NTB is up to NCM_NTB_MAX_SIZE, so packets are accumulated by
+ *         NCM_Bridge_HostRxPacket and the completed NTB is parsed there
+ *         (mirrors the USBFS-side NCM_Bridge_TargetRxDone reassembly).
  *
  * @return  none
  */
 void EP3_OUT_Callback(void)
 {
     if (USB_ModeConfig_ActiveModeBridgeNcm()) {
-        uint8_t buf[NCM_NTB_MAX_SIZE];
+        uint8_t buf[64];            /* one bulk packet */
         uint32_t len;
         len = GetEPRxCount(ENDP3);
         if (len > sizeof(buf)) {
             len = sizeof(buf);
         }
         PMAToUserBufferCopy(buf, GetEPRxAddr(ENDP3), len);
-        NCM_Bridge_HostRxDone(buf, (uint16_t)len);
-        SetEPRxCount(ENDP3, NCM_NTB_MAX_SIZE);
+        NCM_Bridge_HostRxPacket(buf, (uint16_t)len);
+        SetEPRxCount(ENDP3, 64);
         SetEPRxValid(ENDP3);
     }
 }

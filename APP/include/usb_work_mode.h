@@ -58,6 +58,9 @@
                                             (USB_WORK_MODE == USB_WORK_MODE_HID_ACM_ECM) || \
                                             (USB_WORK_MODE == USB_WORK_MODE_HID_ACM_ECM_BRIDGE))
 #define USB_WORK_MODE_BRIDGE_NCM           (USB_WORK_MODE == USB_WORK_MODE_HID_NCM_BRIDGE)
+/* BLE-Eth tunneling needs an Ethernet-capable bridge on the target link; both
+ * the ECM and NCM target paths provide one. */
+#define USB_WORK_MODE_BRIDGE_TUNNEL        (USB_WORK_MODE_BRIDGE_ECM || USB_WORK_MODE_BRIDGE_NCM)
 
 #define USB_WORK_MODE_COMPILES_TARGET_UAC      (USB_WORK_MODE_HAS_TARGET_UAC || USB_WORK_MODE_RUNTIME_PROFILES)
 #define USB_WORK_MODE_COMPILES_HOST_UAC        (USB_WORK_MODE_HAS_HOST_UAC || USB_WORK_MODE_RUNTIME_PROFILES)

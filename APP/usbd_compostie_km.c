@@ -18,6 +18,7 @@
 #include "include/ecm_bridge.h"
 #include "include/acm_bridge.h"
 #include "include/flash_isp_debug.h"
+#include "include/ncm_bridge.h"
 
 #if USB_WORK_MODE_COMPILES_BRIDGE_ACM || USB_WORK_MODE_COMPILES_BRIDGE_ECM || USB_WORK_MODE_HAS_HOST_ACM_AND_ECM || USB_WORK_MODE_HAS_HOST_CDC_ACM
 /* External function from usb_endp.c - validates CH9329 command frames */
@@ -472,14 +473,44 @@ void CH9329_DispatchCommand(uint8_t addr, uint8_t cmd_code, uint8_t* pdata, uint
                     FLASH_ScanForBootModeRegister();
                     break;
 
+                case 0x10:  // NCM host-side diagnostics (memory readout, no printf)
+                {
+                    uint8_t diag[64];
+                    uint16_t diag_len = NCM_Bridge_GetHostDiagnostics(diag, sizeof(diag));
+
+                    if (diag_len == 0) {
+                        uint8_t err = STATUS_ERR_PARAM;
+                        CH9329_SendResponse(addr, cmd_code, &err, 1, 1);
+                    } else {
+                        CH9329_SendResponse(addr, cmd_code, diag, (uint8_t)diag_len, 1);
+                    }
+                }
+                break;
+
+                case 0x11:  // BLE-Eth tunnel debug stats (28 bytes, fits 58B limit)
+                {
+                    uint8_t dbg[58];
+                    uint16_t dbg_len = 0;
+                    BLE_Eth_GetDebugStats(dbg, sizeof(dbg), &dbg_len);
+
+                    if (dbg_len == 0) {
+                        uint8_t err = STATUS_ERR_PARAM;
+                        CH9329_SendResponse(addr, cmd_code, &err, 1, 1);
+                    } else {
+                        CH9329_SendResponse(addr, cmd_code, dbg, (uint8_t)dbg_len, 1);
+                    }
+                }
+                break;
+
                 default:
                     printf("Unknown ISP_DEBUG sub_cmd: 0x%02X\r\n", sub_cmd);
                     status = STATUS_ERR_PARAM;
                     break;
             }
 
-            // Send response (except for 0x01 which already sent it)
-            if (sub_cmd != 0x01) {
+            // Send response (except for 0x01 which already sent it
+            // and 0x10 which sends its own diagnostic payload)
+            if (sub_cmd != 0x01 && sub_cmd != 0x10) {
                 CH9329_SendResponse(addr, cmd_code, &status, 1, 1);
             }
         }
