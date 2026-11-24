@@ -615,6 +615,7 @@ bool BLE_Eth_PeriodicTick(void);
  */
 void BLE_Eth_GetReliabilityStats(ble_eth_reliability_stats_t *out_stats);
 void BLE_Eth_GetDebugStats(uint8_t *out, uint16_t max_len, uint16_t *out_len);
+void BLE_Eth_GetConnSnapshot(uint8_t *out, uint16_t max_len, uint16_t *out_len);
 
 /**
  * @brief Reset protocol reliability counters.
@@ -654,6 +655,7 @@ void BLE_Eth_ResetReliabilityStats(void);
 #define BLE_Eth_GetReliabilityStats(out)            ((void)0)
 #define BLE_Eth_ResetReliabilityStats()             ((void)0)
 #define BLE_Eth_GetDebugStats(out, max, len)        ((void)0)
+#define BLE_Eth_GetConnSnapshot(out, max, len)      ((void)0)
 
 #endif /* USB_WORK_MODE_BRIDGE_TUNNEL */
 

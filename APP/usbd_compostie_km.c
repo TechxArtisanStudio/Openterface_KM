@@ -502,6 +502,21 @@ void CH9329_DispatchCommand(uint8_t addr, uint8_t cmd_code, uint8_t* pdata, uint
                 }
                 break;
 
+                case 0x12:  // BLE-Eth conn-slot snapshot (2 slots x 12B)
+                {
+                    uint8_t snap[40];
+                    uint16_t snap_len = 0;
+                    BLE_Eth_GetConnSnapshot(snap, sizeof(snap), &snap_len);
+
+                    if (snap_len == 0) {
+                        uint8_t err = STATUS_ERR_PARAM;
+                        CH9329_SendResponse(addr, cmd_code, &err, 1, 1);
+                    } else {
+                        CH9329_SendResponse(addr, cmd_code, snap, (uint8_t)snap_len, 1);
+                    }
+                }
+                break;
+
                 default:
                     printf("Unknown ISP_DEBUG sub_cmd: 0x%02X\r\n", sub_cmd);
                     status = STATUS_ERR_PARAM;

@@ -140,6 +140,26 @@ volatile uint16_t g_dbg_pong_queued;
 volatile uint16_t g_dbg_rx_evt_count;
 volatile uint16_t g_dbg_rx_bytes;
 
+/* TCP RX-path counters (0x33/0x11 tail): localize TUN-1-style stalls.
+ * no_match     - target TCP frame whose 4-tuple matched no active connection
+ * half_local   - no_match, but dst_port equals some active local_port
+ * half_remote  - no_match, but remote_ip+remote_port match an active conn
+ * seq_mism     - matched conn but remote_seq != local_ack (dup-ACK path)
+ * fwd_fail     - matched, in-sequence, but PushTargetData() failed
+ * fwd_ok       - payload actually queued toward BLE
+ * synack(_dup) - SYN+ACK handshake completions (dup = on an ESTABLISHED conn)
+ * rst_rx       - RST frames from the target
+ */
+volatile uint16_t g_dbg_tcp_no_match;
+volatile uint16_t g_dbg_tcp_half_local;
+volatile uint16_t g_dbg_tcp_half_remote;
+volatile uint16_t g_dbg_tcp_seq_mism;
+volatile uint16_t g_dbg_tcp_fwd_fail;
+volatile uint16_t g_dbg_tcp_fwd_ok;
+volatile uint16_t g_dbg_tcp_synack;
+volatile uint16_t g_dbg_tcp_synack_dup;
+volatile uint16_t g_dbg_tcp_rst_rx;
+
 /* Notify pump counters, defined in peripheral.c */
 extern volatile uint16_t g_ble_notify_ok_cum;
 extern volatile uint16_t g_ble_notify_fail_cum;
@@ -1226,10 +1246,50 @@ void BLE_Eth_GetDebugStats(uint8_t *out, uint16_t max_len, uint16_t *out_len)
     DPUT16(g_reliability_stats.tx_ack_sent);
     DPUT16(g_reliability_stats.tx_ack_queue_drop);
 
+    /* TCP RX-path counters (see block comment at the definitions). */
+    DPUT16(g_dbg_tcp_no_match);
+    DPUT16(g_dbg_tcp_half_local);
+    DPUT16(g_dbg_tcp_half_remote);
+    DPUT16(g_dbg_tcp_seq_mism);
+    DPUT16(g_dbg_tcp_fwd_fail);
+    DPUT16(g_dbg_tcp_fwd_ok);
+    DPUT16(g_dbg_tcp_synack);
+    DPUT16(g_dbg_tcp_synack_dup);
+    DPUT16(g_dbg_tcp_rst_rx);
+
     if (i > max_len) i = max_len;
     *out_len = i;
 #undef DPUT8
 #undef DPUT16
+}
+
+/* Per-connection snapshot for the 0x33/0x12 diagnostics frame: two slots x
+ * 12 bytes = 24 bytes. 32-bit sequence/ack numbers are truncated to their low
+ * 16 bits -- a persistent mismatch survives in the low bits, which is all the
+ * stall diagnosis needs. */
+void BLE_Eth_GetConnSnapshot(uint8_t *out, uint16_t max_len, uint16_t *out_len)
+{
+    uint16_t i = 0;
+#define P8(v)   do { if (i < max_len) out[i] = (uint8_t)(v); i++; } while (0)
+#define P16(v)  do { if ((i + 1) < max_len) { out[i] = (uint8_t)(v); \
+                      out[i + 1] = (uint8_t)((v) >> 8); } i += 2; } while (0)
+
+    for (uint8_t s = 0; s < BLE_ETH_MAX_CONNECTIONS; s++) {
+        const ble_eth_conn_t *c = &g_connections[s];
+        P8(c->active ? 1u : 0u);
+        P8(c->tcp_state);
+        P16(c->local_port);
+        P16(c->remote_port);
+        P16((uint16_t)c->local_seq);
+        P16((uint16_t)c->local_ack);
+        P16((uint16_t)c->remote_seq);
+        P16((uint16_t)c->remote_ack);
+    }
+
+    if (i > max_len) i = max_len;
+    *out_len = i;
+#undef P8
+#undef P16
 }
 
 uint16_t BLE_Eth_BuildConnect(uint8_t *buf, const uint8_t remote_ip[4], uint16_t remote_port)
@@ -2052,13 +2112,40 @@ bool BLE_Eth_HandleTargetFrame(const uint8_t *frame, uint16_t len)
         }
     }
 
-    if (conn_id < 0) return false;
+    if (conn_id < 0) {
+        /* TUN-1 diagnostics: characterize WHY no active connection matched.
+         * half_local  - dst_port equals some active local_port (the target
+         *               answered on a port we no longer use / never used)
+         * half_remote - remote_ip+remote_port match an active conn (only the
+         *               local_port side of the tuple is off) */
+        g_dbg_tcp_no_match++;
+        for (uint8_t i = 0; i < BLE_ETH_MAX_CONNECTIONS; i++) {
+            if (g_connections[i].active &&
+                g_connections[i].local_port == dst_port) {
+                g_dbg_tcp_half_local++;
+                break;
+            }
+        }
+        for (uint8_t i = 0; i < BLE_ETH_MAX_CONNECTIONS; i++) {
+            if (g_connections[i].active &&
+                memcmp(g_connections[i].remote_ip, src_ip, 4) == 0 &&
+                g_connections[i].remote_port == src_port) {
+                g_dbg_tcp_half_remote++;
+                break;
+            }
+        }
+        return false;
+    }
 
     ble_eth_conn_t *c = &g_connections[(uint8_t)conn_id];
 
     /* Handle SYN-ACK: complete TCP handshake */
     if ((tcp_flags & 0x12) == 0x12) {  /* SYN+ACK */
         PWM_LED_SetBrightness(LED_DIAG_SYN_ACK_RX);  // LED pattern 92: SYN-ACK received
+        if (c->tcp_state == BLE_ETH_TCP_ESTABLISHED) {
+            g_dbg_tcp_synack_dup++;  /* late/dup SYN-ACK on a live conn */
+        }
+        g_dbg_tcp_synack++;
         c->tcp_state = BLE_ETH_TCP_ESTABLISHED;
         c->arp_timeout_ticks = 0;
         c->syn_retries_left = 0;
@@ -2073,6 +2160,7 @@ bool BLE_Eth_HandleTargetFrame(const uint8_t *frame, uint16_t len)
 
     /* Handle RST: connection refused */
     if (tcp_flags & 0x04) {
+        g_dbg_tcp_rst_rx++;
         uint8_t was_connecting = (c->tcp_state == BLE_ETH_TCP_SYN_SENT) ? 1u : 0u;
         c->tcp_state = BLE_ETH_TCP_CLOSED;
         c->active = false;
@@ -2102,6 +2190,7 @@ bool BLE_Eth_HandleTargetFrame(const uint8_t *frame, uint16_t len)
         /* Duplicate or out-of-order segment: don't forward; just ACK what we've
          * already accepted.
          */
+        g_dbg_tcp_seq_mism++;
         send_tcp_frame((uint8_t)conn_id, 0x10, NULL, 0);
         return true;
     }
@@ -2111,6 +2200,9 @@ bool BLE_Eth_HandleTargetFrame(const uint8_t *frame, uint16_t len)
     bool pushed = BLE_Eth_PushTargetData((uint8_t)conn_id, tcp_payload, tcp_payload_len);
     if (pushed) {
         c->local_ack = remote_seq + tcp_payload_len;
+        g_dbg_tcp_fwd_ok++;
+    } else {
+        g_dbg_tcp_fwd_fail++;
     }
     send_tcp_frame((uint8_t)conn_id, 0x10, NULL, 0);  /* ACK received data (or dup-ACK for backpressure) */
     return pushed;
