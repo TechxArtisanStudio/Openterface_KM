@@ -146,32 +146,66 @@ fragmentation (235 B), host reassembly, and DATA-ACK windowing.
   fedora host resets the control board. For flashing use
   `ctrl_board.py isp on` → `wchisp flash` → `isp off` when the target is on another machine.
 
-## 7. Known issue TUN-1: rapid close/reopen data race (device side)
+## 7. TUN-1 RESOLVED: root cause was the test environment, not the device
 
-`tests/test_tunnel_full.py` D/sequential_tunnels_x3 reproduces it: after a BLE
-DISCONNECT + immediate CONNECT (within ~2 s), the new tunnel's server→device→host
-data path can stop forwarding — the echo server's banner never reaches the host
-(3 attempts over ~30 s), while `NET_PING`/PING on the same BLE link keep working,
-and a fresh open after clearing slots recovers. The Windows echo log confirms the
-server accepted the connection and sent the banner, so the loss is device-side.
+The "rapid close/reopen data race" recorded earlier turned out to have a
+prosaic root cause. Instrumented reproduction (device-side counters plus a
+host-side TX/RX log) showed, at the moment of the stall:
 
-Suspect area: `BLE_Eth_FreeConnection`/new-connection setup race in the
-target→BLE data path (possibly the conn-slot reuse or the DATA-ACK state not
-reset for the reused slot). The suite recovers via `clear_conn_slots()` and
-reports WARN, so it is not blocking, but it should be fixed.
+- the conn-slot snapshot (`0x33/0x12`, added in d5b9ea1) had **two**
+  ESTABLISHED connections: the still-open D2 tunnel on slot0 and the new
+  D3 tunnel on slot1, with a consistent seq/ack pair and **zero data
+  accepted** on the new connection;
+- the echo-server log had **no** `CONNECT` line for the new connection
+  during the whole 24 s stall window, and only logged it (and sent its
+  banner) after the old connection was RST by the suite's recovery step.
+
+Root cause chain:
+
+1. `sequential_tunnels_x3` opened the D3 tunnel while the D2 tunnel was
+   still open (the firmware correctly allocated slot1 / conn=1).
+2. The reference echo server (`win_tcp_echo.ps1`) was **single-client**:
+   after accepting a connection it echoes forever and never returns to
+   `AcceptTcpClient()`, so the new connection sat in the accept backlog
+   forever. No banner, no data, no device involvement at any point.
+3. "Fresh open after clearing slots recovers" is explained by the same
+   chain: clearing slots RSTs the old connection, the server's echo loop
+   exits, and only then is the backloged connection accepted (with its
+   banner arriving far too late for the host's receive timeout).
+
+Fixes applied:
+
+- **Test suite**: each sequential cycle now closes the previous tunnel
+  before opening the next one, so the rapid close/reopen path is exercised
+  deterministically; a missing banner is a FAIL (the WARN path is gone).
+- **Echo server**: rewritten as multi-client (one runspace per accepted
+  connection), so overlapping tunnels -- which the firmware supports with
+  its two slots -- each get their banner, matching real SSH server
+  behavior.
+- **Firmware diagnostics** (kept, they were what localized the issue):
+  `0x33/0x11` now carries TCP RX-path counters (no_match / half_local /
+  half_remote / seq_mism / fwd_fail / fwd_ok / synack / synack_dup /
+  rst_rx) and a new `0x33/0x12` sub-command snapshots both conn slots
+  (state, ports, seq/ack numbers).
+
+Also fixed along the way: the Windows NCM NIC's connection profile flips
+to Public on re-enumeration, which silently drops inbound ICMPv4 echo
+requests and breaks `NET_PING`. A persistent allow rule
+(`BLE-ETH ICMPv4 echo-in`, profile any) is now installed on the target.
+
+Result: full suite **23 PASS / 0 WARN / 0 FAIL**, stable across repeated
+runs; the former cycle-0 stall no longer reproduces.
 
 ## 8. Open items
 
-- **TUN-1** (see §7): device-side data race on rapid close/reopen.
-- **`CH9329_SendResponse` 64 B cap**: consider raising it (or chunking) if richer
-  diagnostics over BLE are wanted.
-- **Throughput**: 2.4–3.3 KB/s round-trip is dominated by the DATA-ACK window and
-  notification pacing; worth profiling if higher rates are needed.
-- **`test_eth_bridge.py` SSH test**: gate it on `--port 22` or add a banner-prefix
-  check for non-SSH echo targets.
-- **Control board power GPIO reliability**: recurring failure (reboot/recovers) —
-  needs its own investigation in `Openterface_KM_control`.
-
+- **Throughput**: 2.4-3.9 KB/s round-trip is dominated by the DATA-ACK
+  window and notification pacing; worth profiling if higher rates are
+  needed.
+- **`test_eth_bridge.py` SSH test**: gate it on `--port 22` or add a
+  banner-prefix check for non-SSH echo targets.
+- **Control board power GPIO reliability**: recurring failure
+  (reboot/recovers) -- needs its own investigation in
+  `Openterface_KM_control`.
 ## 9. Complete test suite
 
 `tests/test_tunnel_full.py` (committed) runs 23 cases across 5 layers; final result:
