@@ -55,6 +55,7 @@ class Suite:
         self.results: list[tuple[str, str, str]] = []  # (layer, name, status)
         self.client: BleEthClient | None = None
         self.raw_responses: list[bytes] = []
+        self.tx_log: list = []
 
     def record(self, layer: str, name: str, ok: bool, detail: str = "") -> None:
         status = "PASS" if ok else "FAIL"
@@ -76,6 +77,87 @@ class Suite:
                 print(f"  connect attempt {attempt + 1}: {e}", flush=True)
                 await asyncio.sleep(self.args.retry_delay)
         raise ConnectionError(f"device never appeared: {last_err}")
+
+    def _ch9329_frame(self, cmd: int, data: bytes) -> bytes:
+        f = [0x57, 0xAB, 0, cmd, len(data)] + list(data)
+        f.append(sum(f) & 0xFF)
+        return bytes(f)
+
+    async def _query_diag(self, sub: int, wait_s: float = 1.2) -> bytes:
+        """Send CMD_ISP_DEBUG 0x33 sub over fff2, return 0xB3 payload."""
+        before = len(self.raw_responses)
+        async with self.client._tx_lock:
+            await self.client._bleak_client.write_gatt_char(
+                "0000fff2-0000-1000-8000-00805f9b34fb",
+                self._ch9329_frame(0x33, bytes([sub])), response=True)
+        await asyncio.sleep(wait_s)
+        stream = b"".join(d for t, d in list(self.raw_responses)[before:])
+        print(f"  [TUN1-DIAG] 0x{sub:02X} stream len={len(stream)} "
+              f"hex={stream[:96].hex()}", flush=True)
+        idx = stream.find(bytes([0x57, 0xAB]))
+        while idx >= 0:
+            if idx + 6 <= len(stream) and stream[idx + 3] == 0xB3:
+                plen = stream[idx + 4]
+                if idx + 5 + plen <= len(stream):
+                    return stream[idx + 5:idx + 5 + plen]
+            idx = stream.find(bytes([0x57, 0xAB]), idx + 1)
+        return b""
+
+    STATS16 = ["tx_push_ok", "tx_push_drop", "push_front_fb", "frames_parsed",
+               "cmd_ping", "pong_queued", "rx_evt", "rx_bytes",
+               "notify_ok", "notify_fail"]
+
+    def _fmt_stats11(self, d: bytes) -> str:
+        if len(d) < 31:
+            return f"short({len(d)}B)"
+        parts = [f"{n}={d[2*i] | (d[2*i+1] << 8)}"
+                 for i, n in enumerate(self.STATS16)]
+        parts.append(f"pstate=0x{d[20]:02X} rxidx={d[21] | (d[22] << 8)}")
+        parts.append(f"txq c/r/w={d[25]}/{d[26]}/{d[27]} partial={d[28]}")
+        parts.append(f"ackq={d[29]} hold={d[30]}")
+        if len(d) >= 37:
+            parts.append(f"qdrop={d[31] | (d[32] << 8)} "
+                         f"ack_sent={d[33] | (d[34] << 8)} "
+                         f"ack_qdrop={d[35] | (d[36] << 8)}")
+        return " ".join(parts)
+
+    CMD_NAMES = {0x21: "CONNECT", 0x22: "DISCONNECT", 0x91: "DATA", 0x11: "PING",
+                 0xA2: "CONNECT_RESP", 0xB2: "DISCONN_RESP", 0xB1: "DATA_RESP",
+                 0x11 + 0x80: "PONG", 0x12: "INFO", 0x92: "INFO_RESP"}
+
+    async def dump_tun1_diag(self, tag: str) -> None:
+        """Dump device-side diagnostics while a TUN-1 stall is live."""
+        try:
+            now = time.time()
+            from collections import Counter
+            hist = Counter(cmd for _, cmd, _, _ in self.tx_log)
+            print(f"  [TUN1-TX {tag}] tx_total={len(self.tx_log)} "
+                  f"hist={dict(sorted(hist.items()))}", flush=True)
+            for t, cmd, plen, head in self.tx_log:
+                if cmd in (0x10, 0x12):
+                    print(f"    -{now-t:7.2f}s {cmd:02X} len={plen} {head.hex()}", flush=True)
+            print(f"  [TUN1-RX {tag}] last 25 device notifications:", flush=True)
+            now2 = time.time()
+            for t, d in self.raw_responses[-25:]:
+                cmd = d[3] if len(d) >= 6 and d[0] == 0x57 else -1
+                print(f"    -{now2-t:7.2f}s len={len(d)} cmd={cmd:02X} {bytes(d[:20]).hex()}", flush=True)
+            print(f"  [TUN1-DIAG {tag}] 0x11: "
+                  f"{self._fmt_stats11(await self._query_diag(0x11))}", flush=True)
+            snap = await self._query_diag(0x12)
+            if len(snap) >= 28:
+                for si in range(2):
+                    b = snap[si*14:(si+1)*14]
+                    u16 = lambda i: b[i] | (b[i+1] << 8)
+                    st = {0: "CLOSED", 1: "ARP_PEND", 2: "SYN_SENT", 3: "ESTAB"}.get(b[1], b[1])
+                    print(f"  [TUN1-SNAP {tag}] slot{si}: {'ACTIVE' if b[0] else 'free'} "
+                          f"state={st} lport={u16(2)} rport={u16(4)} "
+                          f"lseq={u16(6):04x} lack={u16(8):04x} "
+                          f"rseq={u16(10):04x} rack={u16(12):04x}", flush=True)
+            else:
+                print(f"  [TUN1-SNAP {tag}] short: {snap.hex()}", flush=True)
+            print(f"  [TUN1-DIAG {tag}] raw_responses={len(self.raw_responses)}", flush=True)
+        except Exception as e:
+            print(f"  [TUN1-DIAG {tag}] failed: {type(e).__name__}: {e}", flush=True)
 
     async def recv_until(self, conn_id: int, size: int, timeout: float = 20.0) -> bytes:
         """recv_data() may return partial reassembled data; accumulate."""
@@ -129,9 +211,32 @@ class Suite:
 
         def capture(sender, data):
             orig(sender, data)
-            self.raw_responses.append(bytes(data))
+            self.raw_responses.append((time.time(), bytes(data)))
 
         self.client._notification_handler = capture
+
+        T0 = time.time()
+
+        # log host->device frames (cmd + length) for TUN-1 analysis
+        orig_open = self.client.open_tunnel
+        async def logging_open(ip, port, timeout=10.0):
+            print(f"  [OPEN-CALL] +{time.time()-T0:.2f}s", flush=True)
+            try:
+                r = await orig_open(ip, port, timeout)
+                print(f"  [OPEN-OK] conn={r} +{time.time()-T0:.2f}s", flush=True)
+                return r
+            except Exception as e:
+                print(f"  [OPEN-FAIL] {type(e).__name__} +{time.time()-T0:.2f}s", flush=True)
+                raise
+        self.client.open_tunnel = logging_open
+
+        orig_send = self.client._send_frame
+        async def logging_send(frame: bytes):
+            if len(frame) >= 6:
+                self.tx_log.append((time.time(), int(frame[3]), int(frame[4]),
+                                    bytes(frame[:24])))
+            await orig_send(frame)
+        self.client._send_frame = logging_send
 
         t0 = time.time()
         await self.robust_connect()
@@ -194,25 +299,32 @@ class Suite:
         del self.raw_responses[:]
         try:
             payload = list(bytes(map(int, self.args.target.split(".")))) + [3]
-            await self.client._bleak_client.write_gatt_char(
-                TX_CHAR_UUID, build_frame(0x24, bytes(payload)), response=True)
+            await self.client._send_frame(build_frame(0x24, bytes(payload)))
         except Exception as e:
             self.record("C", "net_ping_icmp", False, f"{type(e).__name__}: {e}")
             return
 
+        import time as _t
         resp = None
         deadline = time.time() + 20
         while time.time() < deadline and resp is None:
-            for data in self.raw_responses:
-                if data[:2] == FRAME_HEAD and data[3] == 0xA4:
-                    resp = data
+            for d in self.raw_responses:
+                dd = d[1] if isinstance(d, tuple) else d
+                if dd[:2] == FRAME_HEAD and dd[3] == 0xA4:
+                    resp = d
                     break
             await asyncio.sleep(0.2)
 
         if resp is None:
-            self.record("C", "net_ping_icmp", False, "no 0xA4 response in 20s")
+            # NET_PING frames (cmd 0x24) are sent via _send_frame (write without
+            # response); a silent timeout means the ICMP path or the notify
+            # pump dropped everything -- dump device diagnostics on failure.
+            stats = await self._query_diag(0x11)
+            self.record("C", "net_ping_icmp", False,
+                        f"no 0xA4 response in 20s (stats={self._fmt_stats11(stats)})")
             return
-        p = resp[5:5 + resp[4]]
+        rd = resp[1] if isinstance(resp, tuple) else resp
+        p = rd[5:5 + rd[4]]
         if len(p) >= 5:
             status, sent, recv = p[0], p[1], p[2]
             rtt = p[3] | (p[4] << 8)
@@ -246,9 +358,17 @@ class Suite:
                 self.record("D", f"echo_{size}B", False, f"{type(e).__name__}: {e}")
                 break
 
-        # D3 sequential open/close cycles
+        # D3 sequential open/close cycles. Close the still-open D2 tunnel
+        # first. The original TUN-1 "device race" was exactly this: the new
+        # connection completed at the TCP level but the (single-client) echo
+        # server never returned to accept(), so the banner never arrived.
+        # Closing first keeps the sequential test deterministic, and the echo
+        # server is multi-client now anyway.
+        try:
+            await self.client.close_tunnel(conn)
+        except Exception:
+            pass
         ok = True
-        known_issue = False
         detail = ""
         try:
             for cycle in range(3):
@@ -275,12 +395,12 @@ class Suite:
                     except Exception:
                         continue
                 if banner is None:
-                    # KNOWN ISSUE TUN-1: after a rapid close/reopen the device
-                    # sometimes stops forwarding target->BLE data for the new
-                    # connection (banner lost 3x in 30s) and the conn slot can
-                    # stay stuck. Force-reset slots so later tests survive.
-                    detail += f" {tag}:no-banner [KNOWN-ISSUE TUN-1]"
-                    known_issue = True
+                    # A missing banner is a real failure (was TUN-1: caused by
+                    # the single-client echo server + the previous tunnel left
+                    # open, NOT by a device-side race).
+                    await self.dump_tun1_diag(tag)
+                    detail += f" {tag}:no-banner"
+                    ok = False
                     await self.clear_conn_slots()
                     await asyncio.sleep(2.0)
                     break
@@ -328,12 +448,7 @@ class Suite:
             detail += f" {type(e).__name__}: {e}"
             self.record("D", "sequential_tunnels_x3", False, detail)
             return
-        if ok and known_issue:
-            # recovered, but the device-side race is real: report as WARN
-            self.record("D", "sequential_tunnels_x3", True,
-                        "WARN " + detail + " - see report section TUN-1")
-        else:
-            self.record("D", "sequential_tunnels_x3", ok, detail)
+        self.record("D", "sequential_tunnels_x3", ok, detail)
 
         # D4 data after DISCONNECT must not crash the link
         try:
