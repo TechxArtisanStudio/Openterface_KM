@@ -146,10 +146,23 @@ fragmentation (235 B), host reassembly, and DATA-ACK windowing.
   fedora host resets the control board. For flashing use
   `ctrl_board.py isp on` → `wchisp flash` → `isp off` when the target is on another machine.
 
-## 7. Open items
+## 7. Known issue TUN-1: rapid close/reopen data race (device side)
 
-- **Commit the fixes**: Fix 1 + Fix 2 + diagnostics are uncommitted on the fedora box,
-  mixed with the user's in-flight BLE-Eth optimisation work — split into separate commits.
+`tests/test_tunnel_full.py` D/sequential_tunnels_x3 reproduces it: after a BLE
+DISCONNECT + immediate CONNECT (within ~2 s), the new tunnel's server→device→host
+data path can stop forwarding — the echo server's banner never reaches the host
+(3 attempts over ~30 s), while `NET_PING`/PING on the same BLE link keep working,
+and a fresh open after clearing slots recovers. The Windows echo log confirms the
+server accepted the connection and sent the banner, so the loss is device-side.
+
+Suspect area: `BLE_Eth_FreeConnection`/new-connection setup race in the
+target→BLE data path (possibly the conn-slot reuse or the DATA-ACK state not
+reset for the reused slot). The suite recovers via `clear_conn_slots()` and
+reports WARN, so it is not blocking, but it should be fixed.
+
+## 8. Open items
+
+- **TUN-1** (see §7): device-side data race on rapid close/reopen.
 - **`CH9329_SendResponse` 64 B cap**: consider raising it (or chunking) if richer
   diagnostics over BLE are wanted.
 - **Throughput**: 2.4–3.3 KB/s round-trip is dominated by the DATA-ACK window and
@@ -159,7 +172,18 @@ fragmentation (235 B), host reassembly, and DATA-ACK windowing.
 - **Control board power GPIO reliability**: recurring failure (reboot/recovers) —
   needs its own investigation in `Openterface_KM_control`.
 
-## 8. Reproducing the tests
+## 9. Complete test suite
+
+`tests/test_tunnel_full.py` (committed) runs 23 cases across 5 layers; final result:
+**23 PASS (1 WARN = TUN-1 recovery), 0 FAIL**. PING/PONG boundary sweep includes
+238/239 as a regression guard for Fix 1; echo sizes include 234/235/236 as a
+regression guard for Fix 2.
+
+```bash
+python3 tests/test_tunnel_full.py --ble-addr <addr> --target 192.168.20.2 --port 9000
+```
+
+## 10. Reproducing the tests
 
 ```bash
 # on the Mac (bleak venv with Bluetooth permission)
