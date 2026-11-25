@@ -78,7 +78,7 @@
  *   EP3 OUT bulk RX 64B           -> EP3 TX slot (EP3 is OUT-only in mode 8)
  *   EP4 IN  bulk TX 64B           -> UAC ISO IN slot
  * NTBs are streamed in 64-byte packets; PMA cannot hold a whole NTB. */
-#if USB_WORK_MODE_BRIDGE_NCM
+#if USB_WORK_MODE_COMPILES_BRIDGE_NCM
 #define ENDP5_NCM_TXADDR    (0xC0)                          /* 16B, NCM notification IN */
 #define ENDP3_NCM_RXADDR    (0x110)                         /* 64B, NCM bulk OUT */
 #define ENDP4_NCM_TXADDR    (0x150)                         /* 64B, NCM bulk IN */

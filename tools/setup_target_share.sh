@@ -66,6 +66,9 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart=/usr/sbin/wsdd -i ${IFACE} -4 -n ${NETBIOS_NAME} -w ${WORKGROUP}
+# wsdd 0.8 misses the initial netlink address dump on some boots, so poke an
+# address event after startup; wsdd then binds 3702 to the interface address.
+ExecStartPost=/usr/sbin/ip addr change 192.168.20.1/24 dev ${IFACE}
 Restart=on-failure
 RestartSec=5
 

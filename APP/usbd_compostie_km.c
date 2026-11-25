@@ -524,15 +524,29 @@ void CH9329_DispatchCommand(uint8_t addr, uint8_t cmd_code, uint8_t* pdata, uint
                 }
                 break;
 
+                case 0x13:  // NCM bridge/target-RX diagnostics (15 bytes)
+                {
+                    uint8_t bdiag[64];
+                    uint16_t bdiag_len = NCM_Bridge_GetBridgeDiagnostics(bdiag, sizeof(bdiag));
+
+                    if (bdiag_len == 0) {
+                        uint8_t err = STATUS_ERR_PARAM;
+                        CH9329_SendResponse(addr, cmd_code, &err, 1, 1);
+                    } else {
+                        CH9329_SendResponse(addr, cmd_code, bdiag, (uint8_t)bdiag_len, 1);
+                    }
+                }
+                break;
+
                 default:
                     printf("Unknown ISP_DEBUG sub_cmd: 0x%02X\r\n", sub_cmd);
                     status = STATUS_ERR_PARAM;
                     break;
             }
 
-            // Send response (except for 0x01 which already sent it
-            // and 0x10 which sends its own diagnostic payload)
-            if (sub_cmd != 0x01 && sub_cmd != 0x10) {
+            // Send response (except for the sub-commands that already sent
+            // their own diagnostic payload)
+            if (sub_cmd != 0x01 && sub_cmd != 0x10 && sub_cmd != 0x13) {
                 CH9329_SendResponse(addr, cmd_code, &status, 1, 1);
             }
         }

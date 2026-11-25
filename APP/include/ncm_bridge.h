@@ -36,6 +36,9 @@ void NCM_Bridge_Target_NotificationPoll(void);  /* USBFS-side link notification 
  * Consumed by the CMD_ISP_DEBUG dispatcher in usbd_compostie_km.c. */
 uint16_t NCM_Bridge_GetHostDiagnostics(uint8_t *out, uint16_t max_len);
 
+/* 0x33/0x13 diagnostics: compact target-RX / bridge readout (15 bytes). */
+uint16_t NCM_Bridge_GetBridgeDiagnostics(uint8_t *out, uint16_t max_len);
+
 /* NTB builder/parser functions (exposed for testing) */
 uint16_t NCM_BuildNtb(uint8_t *ntb_buf, uint16_t max_size,
                        const uint8_t **frames, const uint16_t *frame_lens,
@@ -55,6 +58,7 @@ uint8_t NCM_ParseNtb(const uint8_t *ntb_buf, uint16_t ntb_len,
 #define NCM_Bridge_Target_SetDataAlt(alt)   ((void)0)
 #define NCM_Bridge_Target_NotificationPoll() ((void)0)
 #define NCM_Bridge_GetHostDiagnostics(out, max) ((uint16_t)0)
+#define NCM_Bridge_GetBridgeDiagnostics(out, max) ((uint16_t)0)
 #endif
 
 /* --- Diagnostic variables (always defined) ------------------------------- */

@@ -59,6 +59,10 @@ volatile uint32_t g_ncm_init_target_count = 0;
 #define NCM_ETH_TYPE_IPV4               0x0800u
 #define NCM_ETH_TYPE_IPV6               0x86DDu
 #define NCM_ETH_TYPE_VLAN               0x8100u
+/* IPv4 destination address = IP header + 16 (frame offset 30). */
+#define NCM_IPV4_DST_OFFSET             16u
+/* IPv6 destination address = IPv6 fixed header(8) + src(16) (frame offset 38). */
+#define NCM_IPV6_DST_OFFSET             24u
 #define NCM_ETH_TYPE_QINQ               0x88A8u
 #define NCM_IPV4_PROTO_TCP              0x06u
 #define NCM_IPV4_PROTO_UDP              0x11u
@@ -503,6 +507,10 @@ static uint8_t s_bridge_enabled = 1u;
 volatile uint16_t g_bridge_host_to_target;
 volatile uint16_t g_bridge_target_to_host;
 volatile uint16_t g_bridge_arp_proxy;
+/* Target-RX instrumentation (readable via diag sub 0x13): every frame handed
+ * to handle_target_frame, and how many of them were discovery forwards. */
+volatile uint16_t g_target_diag_frames;
+volatile uint16_t g_target_diag_discovery;
 
 static uint8_t queue_push_bridge(NCM_FrameQueue_t *queue, const uint8_t *data,
                                  uint16_t len, const uint8_t *dst_mac,
@@ -538,14 +546,14 @@ static uint8_t queue_push_bridge(NCM_FrameQueue_t *queue, const uint8_t *data,
  * worked. Forward broadcast/multicast frames at L2 with proper multicast MAC
  * translation; unicast forwarding behaviour stays unchanged.
  ******************************************************************************/
-static uint8_t bridge_ipv4_is_broadcast(const uint8_t *ip)
+static uint8_t bridge_ipv4_is_broadcast(const uint8_t *dst)
 {
-    if (ip[0] == 0xFFu && ip[1] == 0xFFu && ip[2] == 0xFFu && ip[3] == 0xFFu) {
+    if (dst[0] == 0xFFu && dst[1] == 0xFFu && dst[2] == 0xFFu && dst[3] == 0xFFu) {
         return 1u;
     }
     /* Directed broadcast for the shared /24 subnet. */
-    if (ip[0] == ncm_host_ip[0] && ip[1] == ncm_host_ip[1] &&
-        ip[2] == ncm_host_ip[2] && ip[3] == 0xFFu) {
+    if (dst[0] == ncm_host_ip[0] && dst[1] == ncm_host_ip[1] &&
+        dst[2] == ncm_host_ip[2] && dst[3] == 0xFFu) {
         return 1u;
     }
     return 0u;
@@ -555,25 +563,29 @@ static uint8_t bridge_frame_is_discovery(const uint8_t *frame, uint16_t len,
                                          uint8_t dst_mac[6])
 {
     uint16_t eth_type;
-    const uint8_t *ip;
+    const uint8_t *dst4;
 
     if (frame == NULL || len < (uint16_t)(NCM_ETH_HEADER_LEN + 20u)) {
         return 0u;
     }
 
     eth_type = (uint16_t)(frame[12] << 8) | frame[13];
-    ip = &frame[NCM_ETH_HEADER_LEN];
 
     if (eth_type == NCM_ETH_TYPE_IPV4) {
-        if (bridge_ipv4_is_broadcast(ip) || (ip[0] & 0xF0u) == 0xE0u) {
-            if (bridge_ipv4_is_broadcast(ip)) {
+        /* Frame must hold the full IP header before the dst address is read. */
+        if (len < (uint16_t)(NCM_ETH_HEADER_LEN + NCM_IPV4_DST_OFFSET + 4u)) {
+            return 0u;
+        }
+        dst4 = &frame[NCM_ETH_HEADER_LEN + NCM_IPV4_DST_OFFSET];
+        if (bridge_ipv4_is_broadcast(dst4) || (dst4[0] & 0xF0u) == 0xE0u) {
+            if (bridge_ipv4_is_broadcast(dst4)) {
                 memset(dst_mac, 0xFF, 6);
             } else {
                 /* IPv4 multicast MAC: 01:00:5e + low 23 bits of the group. */
                 dst_mac[0] = 0x01u; dst_mac[1] = 0x00u; dst_mac[2] = 0x5Eu;
-                dst_mac[3] = ip[1] & 0x7Fu;
-                dst_mac[4] = ip[2];
-                dst_mac[5] = ip[3];
+                dst_mac[3] = dst4[1] & 0x7Fu;
+                dst_mac[4] = dst4[2];
+                dst_mac[5] = dst4[3];
             }
             return 1u;
         }
@@ -581,12 +593,13 @@ static uint8_t bridge_frame_is_discovery(const uint8_t *frame, uint16_t len,
     }
 
     if (eth_type == NCM_ETH_TYPE_IPV6) {
-        /* Fixed IPv6 header is 40 bytes; destination starts at 14+8+16=38. */
+        /* Fixed IPv6 header is 40 bytes; the destination address starts at
+         * frame offset 14 + 24 = 38. */
         const uint8_t *dst6;
-        if (len < (uint16_t)(NCM_ETH_HEADER_LEN + 40u)) {
+        if (len < (uint16_t)(NCM_ETH_HEADER_LEN + NCM_IPV6_DST_OFFSET + 16u)) {
             return 0u;
         }
-        dst6 = &frame[NCM_ETH_HEADER_LEN + 38u];
+        dst6 = &frame[NCM_ETH_HEADER_LEN + NCM_IPV6_DST_OFFSET];
         if (dst6[0] != 0xFFu) {
             return 0u;
         }
@@ -1450,6 +1463,45 @@ uint16_t NCM_Bridge_GetHostDiagnostics(uint8_t *out, uint16_t max_len)
     return (i > max_len) ? max_len : i;
 }
 
+/* Compact target-RX diagnostics (15 bytes, fits the 58B response limit).
+ * Layout (v1):
+ *  [0]      version (0x01)
+ *  [1]      s_bridge_enabled
+ *  [2..3]   EP5 OUT status low (target RX endpoint)
+ *  [4..5]   target RX in-flight len (u16)
+ *  [6..7]   target RX expected NTB len (u16)
+ *  [8..9]   frames delivered to handle_target_frame (u16)
+ *  [10..11] discovery forwards (u16)
+ *  [12..13] bridge target->host forwards (u16)
+ *  [14]     target TX queue count
+ */
+uint16_t NCM_Bridge_GetBridgeDiagnostics(uint8_t *out, uint16_t max_len)
+{
+    uint16_t i = 0;
+
+#define BD_PUT8(v)  do { if (i < max_len) { out[i] = (uint8_t)(v); } i++; } while (0)
+#define BD_PUT16(v) do { if ((i + 1) < max_len) {                        \
+                             out[i]     = (uint8_t)((v) & 0xFF);         \
+                             out[i + 1] = (uint8_t)(((v) >> 8) & 0xFF);  \
+                         }                                               \
+                         i += 2; } while (0)
+
+    BD_PUT8(0x01);
+    BD_PUT8(s_bridge_enabled);
+    BD_PUT8(_GetENDPOINT(ENDP5) & 0xFF);
+    BD_PUT16(s_target_rx_len);
+    BD_PUT16(s_target_rx_need);
+    BD_PUT16(g_target_diag_frames);
+    BD_PUT16(g_target_diag_discovery);
+    BD_PUT16(g_bridge_target_to_host);
+    BD_PUT8(g_target_tx_queue.count);
+
+#undef BD_PUT8
+#undef BD_PUT16
+
+    return (i > max_len) ? max_len : i;
+}
+
 /* One bulk packet per CTR: feed the next 64-byte chunk of the pending NTB
  * into the EP4 IN PMA buffer.  An NTB whose length is an exact multiple of
  * the packet size is terminated with a ZLP. */
@@ -2296,6 +2348,7 @@ static uint8_t handle_target_frame(const uint8_t *data, uint16_t len)
     if (len < NCM_ETH_HEADER_LEN) {
         return 0;
     }
+    g_target_diag_frames++;
     if (s_bridge_enabled) memcpy(s_target_peer_mac, &data[6], 6);
 
     eth_type = (uint16_t)(data[12] << 8) | data[13];
@@ -2306,6 +2359,7 @@ static uint8_t handle_target_frame(const uint8_t *data, uint16_t len)
     if (bridge_forward_discovery(data, len, &g_host_tx_queue,
                                  NCM_DEV_MAC)) {
         g_bridge_target_to_host++;
+        g_target_diag_discovery++;
         return 1;
     }
 
