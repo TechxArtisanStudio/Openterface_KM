@@ -22,6 +22,7 @@ import argparse
 import datetime
 import email.utils
 import html
+import json
 import logging
 import mimetypes
 import os
@@ -105,17 +106,18 @@ class FileServerHandler(BaseHTTPRequestHandler):
   * { box-sizing:border-box }
   body { margin:0; font:14px/1.5 system-ui,"Segoe UI","Microsoft YaHei",sans-serif;
          color:var(--tx); background:#fafbfc; min-height:100vh }
-  header { display:flex; align-items:center; gap:12px; padding:10px 20px;
+  header { display:flex; align-items:center; gap:10px; padding:10px 20px;
            background:#fff; border-bottom:1px solid var(--bd); position:sticky; top:0; z-index:5 }
   header h1 { font-size:16px; margin:0; font-weight:600 }
-  header .crumb { margin-left:8px; color:var(--mut); flex:1; overflow:hidden;
+  header .crumb { margin-left:6px; color:var(--mut); flex:1; overflow:hidden;
                   text-overflow:ellipsis; white-space:nowrap }
   header .crumb a { color:var(--ac); text-decoration:none }
-  button, .btn { font:inherit; padding:6px 14px; border:1px solid var(--bd); border-radius:6px;
-                 background:#fff; cursor:pointer; color:var(--tx) }
-  button:hover, .btn:hover { background:var(--hd); border-color:#c9cfd6 }
-  button.primary { background:var(--ac); border-color:var(--ac); color:#fff }
-  button.primary:hover { background:#1d4ed8 }
+  .seg { display:flex; border:1px solid var(--bd); border-radius:6px; overflow:hidden }
+  .seg button { border:none; border-radius:0; padding:6px 12px; background:#fff; font-size:13px }
+  .seg button.on { background:var(--ac); color:#fff }
+  button { font:inherit; padding:6px 14px; border:1px solid var(--bd); border-radius:6px;
+           background:#fff; cursor:pointer; color:var(--tx) }
+  button:hover { background:var(--hd); border-color:#c9cfd6 }
   button.danger { color:#b91c1c; border-color:#f3c4c4 }
   button.danger:hover { background:#fef2f2 }
   main { max-width:960px; margin:18px auto; padding:0 16px }
@@ -126,13 +128,36 @@ class FileServerHandler(BaseHTTPRequestHandler):
   th { background:var(--hd); font-weight:600; font-size:13px; color:var(--mut) }
   tr:last-child td { border-bottom:none }
   tr:hover td { background:#f8fafc }
-  td.name a { color:var(--tx); text-decoration:none }
-  td.name a:hover { color:var(--ac); text-decoration:underline }
+  td.name a, td.nm a { color:var(--tx); text-decoration:none }
+  td.name a:hover, td.nm a:hover { color:var(--ac); text-decoration:underline }
   td.size, td.mtime { color:var(--mut); white-space:nowrap; font-size:13px }
   td.acts { white-space:nowrap; text-align:right }
   td.acts a { margin-right:10px; color:var(--ac); text-decoration:none; font-size:13px }
   td.acts a:hover { text-decoration:underline }
   td.acts button { padding:3px 10px; font-size:12.5px }
+  #iconview { display:none; grid-template-columns:repeat(auto-fill,minmax(108px,1fr));
+              gap:6px; background:#fff; border:1px solid var(--bd); border-radius:8px; padding:14px }
+  .tile { position:relative; text-align:center; padding:12px 4px 8px; border-radius:8px; cursor:pointer }
+  .tile:hover { background:var(--hd) }
+  .tile .ic { font-size:40px; line-height:1 }
+  .tile .nm { font-size:12.5px; margin-top:6px; word-break:break-all; color:var(--tx) }
+  .tile .nm a { color:inherit; text-decoration:none }
+  .tile .mini { position:absolute; top:2px; right:2px; display:none; gap:2px }
+  .tile:hover .mini { display:flex }
+  .mini a, .mini button { font-size:11.5px; padding:1px 5px; background:#fff;
+                          border:1px solid var(--bd); border-radius:4px; text-decoration:none; color:var(--ac) }
+  .mini button { color:#b91c1c }
+  #listview { display:none; background:#fff; border:1px solid var(--bd); border-radius:8px; overflow:hidden }
+  .lrow { display:flex; align-items:center; gap:10px; padding:7px 14px;
+          border-bottom:1px solid var(--bd); font-size:13.5px }
+  .lrow:last-child { border-bottom:none }
+  .lrow:hover { background:#f8fafc }
+  .lrow .nm { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+  .lrow .nm a { color:var(--tx); text-decoration:none }
+  .lrow .nm a:hover { color:var(--ac) }
+  .lrow .sz { color:var(--mut); font-size:12.5px; white-space:nowrap }
+  .lrow .del { visibility:hidden }
+  .lrow:hover .del { visibility:visible }
   #progress { margin-top:12px }
   .prow { display:flex; align-items:center; gap:10px; background:#fff; border:1px solid var(--bd);
           border-radius:6px; padding:6px 10px; margin-top:6px; font-size:13px }
@@ -150,21 +175,114 @@ class FileServerHandler(BaseHTTPRequestHandler):
 <header>
   <h1>&#128193; KeyMod 文件管理器</h1>
   <span class="crumb">__CRUMB__</span>
+  <div class="seg">
+    <button id="v-icon" onclick="setView('icon' )" title="图标视图">&#128444;&#65039; 图标</button>
+    <button id="v-list" onclick="setView('list' )" title="列表视图">&#9776; 列表</button>
+    <button id="v-detail" onclick="setView('detail')" title="详情视图">&#9883; 详情</button>
+  </div>
   <button onclick="mkdirPrompt()">新建文件夹</button>
   <button onclick="document.getElementById('f').click()">上传文件</button>
   <input id="f" type="file" multiple hidden>
 </header>
 <main>
-  <p class="tip">将文件拖入页面任意位置即可上传；点击文件名或"下载"保存到本地。</p>
-  <table>
+  <p class="tip">将文件拖入页面任意位置即可上传；点击文件名下载或进入文件夹。</p>
+  <div id="iconview"></div>
+  <div id="listview"></div>
+  <table id="detailview">
     <thead><tr><th>名称</th><th>大小</th><th>修改时间</th><th></th></tr></thead>
-    <tbody>__ROWS__</tbody>
+    <tbody id="detailbody"></tbody>
   </table>
   <div id="progress"></div>
 </main>
 <div id="overlay"><div class="box">&#11014;&#65039; 松开鼠标上传到当前目录</div></div>
+<script id="filedata" type="application/json">__FILEDATA__</script>
 <script>
 const CUR = "__CURDIR__";
+let FILES = JSON.parse(document.getElementById('filedata').textContent);
+FILES.unshift({n:"..", d:true, s:0, m:0, up:true});
+
+const ICONS = { dir:"\u{1F4C1}", img:"\u{1F5BC}\uFE0F", audio:"\u{1F3B5}", video:"\u{1F3AC}",
+                pdf:"\u{1F4D5}", zip:"\u{1F4E6}", code:"\u{1F4DC}", text:"\u{1F4C4}", file:"\u{1F4C4}" };
+function iconOf(f) {
+  if (f.d) return ICONS.dir;
+  const e = f.n.split('.').pop().toLowerCase();
+  if (['png','jpg','jpeg','gif','bmp','webp','svg','ico'].includes(e)) return ICONS.img;
+  if (['mp3','wav','flac','ogg','m4a'].includes(e)) return ICONS.audio;
+  if (['mp4','mkv','avi','mov','webm'].includes(e)) return ICONS.video;
+  if (e === 'pdf') return ICONS.pdf;
+  if (['zip','rar','7z','tar','gz','bz2','xz'].includes(e)) return ICONS.zip;
+  if (['c','h','py','js','ts','json','xml','html','css','sh','md'].includes(e)) return ICONS.code;
+  return ICONS.file;
+}
+function humanSize(n) {
+  if (!n) return '-';
+  const u = ['B','KB','MB','GB','TB']; let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return i ? n.toFixed(1) + ' ' + u[i] : n + ' ' + u[i];
+}
+function fmtTime(ts) {
+  if (!ts) return '';
+  const d = new Date(ts * 1000), p = x => String(x).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth()+1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+}
+function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+function hrefOf(f) { return f.up ? '../' : CUR + encodeURIComponent(f.n) + (f.d ? '/' : '?dl=1'); }
+function pathOf(f) { return CUR + encodeURIComponent(f.n); }
+
+function renderViews() {
+  const iv = document.getElementById('iconview');
+  const lv = document.getElementById('listview');
+  const tb = document.getElementById('detailbody');
+  iv.innerHTML = ''; lv.innerHTML = ''; tb.innerHTML = '';
+  FILES.forEach(f => {
+    const ic = iconOf(f), name = esc(f.n), href = hrefOf(f);
+    // icon view
+    const tile = document.createElement('div');
+    tile.className = 'tile';
+    tile.innerHTML = '<div class="ic">' + (f.up ? '&#128193;' : ic) + '</div>' +
+      '<div class="nm"><a href="' + href + '">' + name + '</a></div>';
+    if (!f.up) {
+      tile.innerHTML += '<div class="mini"><a href="' + href + '" download>&#11015;</a>' +
+        '<button onclick="delP(\'' + encodeURIComponent(f.n) + '\')">&#10005;</button></div>';
+    }
+    iv.appendChild(tile);
+    // list view
+    const row = document.createElement('div');
+    row.className = 'lrow';
+    row.innerHTML = '<span>' + (f.up ? '&#128193;' : ic) + '</span>' +
+      '<span class="nm"><a href="' + href + '">' + name + '</a></span>' +
+      '<span class="sz">' + (f.d ? '' : humanSize(f.s)) + '</span>';
+    if (!f.up) {
+      row.innerHTML += '<a class="del" href="' + href + '" download>下载</a>' +
+        '<button class="del danger" onclick="delP(\'' + encodeURIComponent(f.n) + '\')">删除</button>';
+    }
+    lv.appendChild(row);
+    // detail view
+    const tr = document.createElement('tr');
+    if (f.up) {
+      tr.innerHTML = '<td class="name"><a href="../">&#128193; ../</a></td>' +
+        '<td class="size"></td><td class="mtime"></td><td class="acts"></td>';
+    } else {
+      tr.innerHTML = '<td class="name"><a href="' + href + '">' + ic + ' ' + name + '</a></td>' +
+        '<td class="size">' + (f.d ? '-' : humanSize(f.s)) + '</td>' +
+        '<td class="mtime">' + fmtTime(f.m) + '</td>' +
+        '<td class="acts"><a href="' + href + '" download>下载</a>' +
+        '<button class="danger" onclick="delP(\'' + encodeURIComponent(f.n) + '\')">删除</button></td>';
+    }
+    tb.appendChild(tr);
+  });
+}
+function setView(v) {
+  localStorage.setItem('km_view', v);
+  document.getElementById('iconview').style.display  = v === 'icon'  ? 'grid' : 'none';
+  document.getElementById('listview').style.display  = v === 'list'  ? 'block' : 'none';
+  document.getElementById('detailview').style.display = v === 'detail' ? 'table' : 'none';
+  ['icon','list','detail'].forEach(x =>
+    document.getElementById('v-' + x).classList.toggle('on', x === v));
+}
+setView(localStorage.getItem('km_view') || 'detail');
+
+// drag & drop upload
 const overlay = document.getElementById('overlay');
 let dragDepth = 0;
 document.addEventListener('dragenter', e => { e.preventDefault(); dragDepth++; overlay.style.display = 'flex'; });
@@ -212,9 +330,9 @@ function mkdirPrompt() {
   fetch(CUR + encodeURIComponent(name), { method: 'MKCOL' })
     .then(r => { if (!r.ok) alert('创建失败 (HTTP ' + r.status + ')'); location.reload(); });
 }
-function del(path) {
-  if (!confirm('确定删除 ' + decodeURIComponent(path.split('/').pop()) + ' ？')) return;
-  fetch(path, { method: 'DELETE' })
+function delP(qname) {
+  if (!confirm('确定删除 ' + decodeURIComponent(qname) + ' ？')) return;
+  fetch(CUR + qname, { method: 'DELETE' })
     .then(r => { if (!r.ok) alert('删除失败 (HTTP ' + r.status + ')'); location.reload(); });
 }
 </script>
@@ -238,35 +356,19 @@ function del(path) {
             crumbs.append(f'<a href="{acc}/">{html.escape(part)}</a>')
         crumb = " / ".join(crumbs)
 
-        # rows
-        rows = ['<tr><td class="name"><a href="../">&#128193; ../</a></td>'
-                '<td class="size"></td><td class="mtime"></td><td class="acts"></td></tr>']
-        for entry in sorted(path.iterdir(), key=lambda p: (p.is_file(), p.name.lower())):
-            qname = urllib.parse.quote(entry.name)
-            href = qname + ("/" if entry.is_dir() else "?dl=1")
-            icon = "&#128193;" if entry.is_dir() else "&#128196;"
-            size = "-" if entry.is_dir() else self._human_size(entry.stat().st_size)
-            mtime = datetime.datetime.fromtimestamp(entry.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
-            rows.append(
-                f'<tr>'
-                f'<td class="name"><a href="{href}">{icon} {html.escape(entry.name)}</a></td>'
-                f'<td class="size">{size}</td>'
-                f'<td class="mtime">{mtime}</td>'
-                f'<td class="acts">'
-                f'<a href="{href}" download>下载</a>'
-                f'<button class="danger" onclick="del(\'{qname}\')">删除</button>'
-                f'</td></tr>')
-        rows_html = "".join(rows)
+        files = [{"n": e.name, "d": e.is_dir(), "s": 0 if e.is_dir() else e.stat().st_size,
+                  "m": int(e.stat().st_mtime)}
+                 for e in sorted(path.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))]
+        filedata = json.dumps(files, ensure_ascii=False).replace("</", "<\\/")
 
         cur_dir = "/".join(urllib.parse.quote(p) for p in rel_parts)
         cur_dir = (cur_dir + "/") if cur_dir else ""
 
         page = (self.PAGE_TMPL
                 .replace("__CRUMB__", crumb)
-                .replace("__ROWS__", rows_html)
+                .replace("__FILEDATA__", filedata)
                 .replace("__CURDIR__", cur_dir))
         return page.encode()
-
     # ---------- WebDAV PROPFIND ----------
     def _propfind_body(self, path: Path, href: str, depth: str) -> bytes:
         root = ET.Element(dav_tag("multistatus"))
