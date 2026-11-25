@@ -95,6 +95,19 @@ guest share is intended for this isolated USB link only.
 
 ## Verified on Windows target (2026-11-25)
 
+**Windows Network discovery** (after firmware `d98b484` + `a751e2a`):
+- `net view \\FEDORA` lists `SharedWithTarget` as a Disk resource.
+- `Get-SmbConnection` shows `FEDORA\SharedWithTarget` at SMB 3.1.1.
+- Share listing, file read and a test write from the Windows target into
+  `\\FEDORA\SharedWithTarget` all succeeded. Run
+  `powershell -ExecutionPolicy Bypass -File tools\verify_windows_discovery.ps1`
+  to repeat the check.
+- Full BLE-ETH tunnel regression after flashing: **25 PASS / 0 FAIL**.
+
+**Firmware flashing note:** the dev-kit control board listens at **460800**
+baud; `tools/ctrl_board.py` was corrected from 115200, which silently
+dropped every BOOT/power command.
+
 **Working over the mapped WebDAV drive:**
 - `net use Z: http://192.168.20.1:8080/` maps successfully (WebClient
   service must be running: `Start-Service WebClient`).

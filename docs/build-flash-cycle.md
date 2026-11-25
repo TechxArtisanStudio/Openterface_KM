@@ -224,7 +224,7 @@ Multiple devices share VID:PID `1a86:fe0c`. The control board is the one that re
 The target CH32V208GBU6's **BOOT pin** and **power pin** are controlled by the control CH32 via USB serial commands. No manual button-pressing is needed.
 
 **Serial Port Settings:**
-- **Baud Rate**: 115200 (NOT 9600)
+- **Baud Rate**: 460800 (the control board ignores frames at 115200 and 9600)
 - **Data Bits**: 8
 - **Stop Bits**: 1
 - **Parity**: None
@@ -356,7 +356,7 @@ The following parameters were verified on actual hardware:
 
 | Parameter | Value | Notes |
 |-----------|-------|-------|
-| **Baud Rate** | **115200** | NOT 9600 — 9600 produces no response |
+| **Baud Rate** | **460800** | Verified 2026-11-25: 115200/9600 produce no response; 921600 also works |
 | **Port** | `/dev/ttyACM0` | Shows as "USB Serial" (VID:PID 1a86:fe0c) |
 | **Model** | `USB_Serial` | Use `udevadm info -n /dev/ttyACM0` to identify |
 
@@ -443,7 +443,7 @@ lsusb | grep "1a86:fe00"
 
 | Original Doc | Actual Verified |
 |--------------|-----------------|
-| Baud 9600 | **Baud 115200** |
+| Baud 9600 / 115200 | **Baud 460800** |
 | PORT=/dev/ttyACM2 | **PORT=/dev/ttyACM0** (varies, must identify) |
 | sleep 0.5 | **sleep 1-3s** (longer delays needed) |
 | printf to port | **Python serial** (reliable binary write) |

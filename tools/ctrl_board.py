@@ -35,7 +35,10 @@ CMD_BOOT_LOW   = bytes.fromhex("57AB001901001C")
 CMD_POWER_ON   = bytes.fromhex("57AB001A01011E")
 CMD_POWER_OFF  = bytes.fromhex("57AB001A01001D")
 
-BAUD = 115200
+# The dev-kit control board firmware listens at 460800, not 115200.
+# At 115200 it silently ignores frames, so power/BOOT commands appear to
+# succeed (the tool prints the label) but never take effect.
+BAUD = 460800
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
