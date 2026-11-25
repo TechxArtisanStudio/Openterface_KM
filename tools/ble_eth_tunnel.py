@@ -108,7 +108,11 @@ MAX_REASSEMBLED = MAX_FRAG_DATA * 6  # fits one full-size TCP segment in firmwar
 # Per-message cap used when splitting outbound data. Must stay below the
 # firmware TCP MSS (1460): the firmware forwards one reassembled message as
 # one TCP segment, and a segment beyond MTU 1500 gets dropped on the wire.
-MAX_MESSAGE_LEN = 240 * 6  # 1440 bytes, still exactly 6 fragments
+# The device reassembles into a 1664 B buffer (6 x 246 B fragments), so a
+# message of up to MAX_REASSEMBLED bytes arrives as ONE message. Splitting at
+# 1440 used to leave a 20 B second message behind, paying an extra ACK round
+# trip on every 1441-1476 byte transfer.
+MAX_MESSAGE_LEN = MAX_REASSEMBLED  # 1476 bytes
 
 # BLE GATT UUIDs (16-bit, used with Nordic UUID base)
 SERVICE_UUID = "0000fff0-0000-1000-8000-00805f9b34fb"
@@ -679,12 +683,21 @@ class BleEthClient:
         self._data_ack_retries = 2
         self._data_ack_window_size = 1
         self._data_ack_window_limit: Optional[int] = None
+        # When the device advertises FEAT_DATA_ACK_WINDOW, the in-flight
+        # fragment cap follows the rx_window the device reports in each ACK
+        # (it already accounts for reassembly buffer space and ACK-queue
+        # headroom) instead of staying at the configured stop-and-wait-ish 2.
+        self._use_device_rx_window = False
+        self._device_rx_window: Optional[int] = None
         self._strict_ack_timeout_s = 1.0
         self._strict_ack_retries = 4
         if not (1 <= int(strict_data_ack_window_size) <= 15):
             raise ValueError("strict_data_ack_window_size must be in [1, 15]")
         self._strict_data_ack_window_size = int(strict_data_ack_window_size)
-        self._strict_data_frame_gap_s = 0.005
+        # With windowed sends the in-flight cap already paces the stream;
+        # a 5 ms sleep per frame just stretched every fragment past the
+        # device's idle-release threshold. Keep a token 1 ms for queue safety.
+        self._strict_data_frame_gap_s = 0.001
         if self._data_ack_policy == "meta":
             self._ack_mode = "meta"
             self._ack_strict = True
@@ -1103,7 +1116,7 @@ class BleEthClient:
             frames = build_data_fragmented(conn_id, data)
             if self.trace_frames:
                 logger.info("TRACE TX fragmented conn=%d bytes=%d frames=%d", conn_id, len(data), len(frames))
-            if self._ack_mode != "legacy" and self._data_ack_window_size > 1:
+            if self._ack_mode != "legacy" and self._effective_data_ack_window() > 1:
                 await self._send_data_frames_windowed(frames)
             else:
                 for frame in frames:
@@ -1170,7 +1183,7 @@ class BleEthClient:
             self._data_ack_window_size = self._strict_data_ack_window_size
             self._data_frame_gap_s = self._strict_data_frame_gap_s
             if features & FEAT_DATA_ACK_WINDOW:
-                self._data_ack_window_limit = self._strict_data_ack_window_size
+                self._use_device_rx_window = True
             self._write_response_supported = False
             logger.info(
                 "DATA ACK policy=feature; metadata ACK feature detected (features=0x%02X), strict mode enabled",
@@ -1191,6 +1204,13 @@ class BleEthClient:
 
     def _effective_data_ack_window(self) -> int:
         window = self._data_ack_window_size
+        if self._use_device_rx_window and self._device_rx_window:
+            # The device's rx_window is computed from its own buffer space and
+            # ACK-queue headroom; adopting it lets a multi-fragment message
+            # pipeline instead of paying a round trip per fragment. The last
+            # ACK may temporarily shrink it (remaining fragments of the
+            # current message), which correctly throttles the tail.
+            window = max(window, self._device_rx_window)
         if self._data_ack_window_limit is not None:
             window = min(window, self._data_ack_window_limit)
         return max(1, window)
@@ -1460,6 +1480,7 @@ class BleEthClient:
                     if len(payload) >= 5:
                         ack_rx_window = max(1, min(int(payload[4]), 15))
                         self._data_ack_window_limit = ack_rx_window
+                        self._device_rx_window = ack_rx_window
 
                     self._reliability_stats["data_resp_with_meta"] += 1
                     self._reliability_stats["last_data_resp_conn_id"] = ack_conn_id
@@ -1606,6 +1627,10 @@ class BleEthClient:
                     "raw": payload,
                 }
                 self._info_response = info
+                # Apply device-advertised features (ACK mode, window support)
+                # now, so the first fragmented send already uses the right
+                # mode instead of waiting for the first meta ACK to upgrade.
+                self.apply_device_features(info["features"])
                 if self._info_event:
                     self._info_event.set()
             logger.info(f"Info response: {payload.hex(' ')}")
