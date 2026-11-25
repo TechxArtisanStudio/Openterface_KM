@@ -57,6 +57,7 @@ volatile uint32_t g_ncm_init_target_count = 0;
 
 /* Ethernet protocol types */
 #define NCM_ETH_TYPE_IPV4               0x0800u
+#define NCM_ETH_TYPE_IPV6               0x86DDu
 #define NCM_ETH_TYPE_VLAN               0x8100u
 #define NCM_ETH_TYPE_QINQ               0x88A8u
 #define NCM_IPV4_PROTO_TCP              0x06u
@@ -522,6 +523,100 @@ static uint8_t queue_push_bridge(NCM_FrameQueue_t *queue, const uint8_t *data,
     queue->count++;
     ncm_irq_restore(irq_state);
     return 1;
+}
+
+/*******************************************************************************
+ * Discovery frame forwarding
+ *
+ * Windows Network discovery relies on broadcast/multicast traffic:
+ *   NetBIOS name service 255.255.255.255 / UDP 137-138
+ *   LLMNR                224.0.0.252
+ *   WS-Discovery / SSDP  239.255.255.250 / UDP 3702,1900
+ *   IPv6 equivalent      ff02::c
+ * The unicast-only L2 bridge never saw these frames, so the Host with the
+ * file share was invisible in "Network" even though http://192.168.20.1:8080
+ * worked. Forward broadcast/multicast frames at L2 with proper multicast MAC
+ * translation; unicast forwarding behaviour stays unchanged.
+ ******************************************************************************/
+static uint8_t bridge_ipv4_is_broadcast(const uint8_t *ip)
+{
+    if (ip[0] == 0xFFu && ip[1] == 0xFFu && ip[2] == 0xFFu && ip[3] == 0xFFu) {
+        return 1u;
+    }
+    /* Directed broadcast for the shared /24 subnet. */
+    if (ip[0] == ncm_host_ip[0] && ip[1] == ncm_host_ip[1] &&
+        ip[2] == ncm_host_ip[2] && ip[3] == 0xFFu) {
+        return 1u;
+    }
+    return 0u;
+}
+
+static uint8_t bridge_frame_is_discovery(const uint8_t *frame, uint16_t len,
+                                         uint8_t dst_mac[6])
+{
+    uint16_t eth_type;
+    const uint8_t *ip;
+
+    if (frame == NULL || len < (uint16_t)(NCM_ETH_HEADER_LEN + 20u)) {
+        return 0u;
+    }
+
+    eth_type = (uint16_t)(frame[12] << 8) | frame[13];
+    ip = &frame[NCM_ETH_HEADER_LEN];
+
+    if (eth_type == NCM_ETH_TYPE_IPV4) {
+        if (bridge_ipv4_is_broadcast(ip) || (ip[0] & 0xF0u) == 0xE0u) {
+            if (bridge_ipv4_is_broadcast(ip)) {
+                memset(dst_mac, 0xFF, 6);
+            } else {
+                /* IPv4 multicast MAC: 01:00:5e + low 23 bits of the group. */
+                dst_mac[0] = 0x01u; dst_mac[1] = 0x00u; dst_mac[2] = 0x5Eu;
+                dst_mac[3] = ip[1] & 0x7Fu;
+                dst_mac[4] = ip[2];
+                dst_mac[5] = ip[3];
+            }
+            return 1u;
+        }
+        return 0u;
+    }
+
+    if (eth_type == NCM_ETH_TYPE_IPV6) {
+        /* Fixed IPv6 header is 40 bytes; destination starts at 14+8+16=38. */
+        const uint8_t *dst6;
+        if (len < (uint16_t)(NCM_ETH_HEADER_LEN + 40u)) {
+            return 0u;
+        }
+        dst6 = &frame[NCM_ETH_HEADER_LEN + 38u];
+        if (dst6[0] != 0xFFu) {
+            return 0u;
+        }
+        /* IPv6 multicast MAC: 33:33 + low 32 bits of the group address. */
+        dst_mac[0] = 0x33u; dst_mac[1] = 0x33u;
+        dst_mac[2] = dst6[12]; dst_mac[3] = dst6[13];
+        dst_mac[4] = dst6[14]; dst_mac[5] = dst6[15];
+        return 1u;
+    }
+
+    return 0u;
+}
+
+static uint8_t bridge_forward_discovery(const uint8_t *frame, uint16_t len,
+                                        NCM_FrameQueue_t *queue,
+                                        const uint8_t *src_mac)
+{
+    uint8_t dst_mac[6];
+
+    if (!s_bridge_enabled || !bridge_frame_is_discovery(frame, len, dst_mac)) {
+        return 0u;
+    }
+
+    /* Never echo a frame that came from one of our own NCM ports. */
+    if (memcmp(&frame[6], NCM_DEV_MAC, 6) == 0 ||
+        memcmp(&frame[6], NCM_TARGET_DEV_MAC, 6) == 0) {
+        return 0u;
+    }
+
+    return queue_push_bridge(queue, frame, len, dst_mac, src_mac);
 }
 
 static void queue_clear(NCM_FrameQueue_t *queue)
@@ -1098,6 +1193,15 @@ static uint8_t handle_host_frame(const uint8_t *data, uint16_t len)
     if (s_bridge_enabled) memcpy(s_host_peer_mac, &data[6], 6);
 
     eth_type = (uint16_t)(data[12] << 8) | data[13];
+
+    /* Discovery broadcasts/multicasts (wsdd, NetBIOS, LLMNR) are not
+     * addressed to a unicast peer IP, so the regular bridge check below
+     * cannot see them. Forward them before the local protocol handlers. */
+    if (bridge_forward_discovery(data, len, &g_target_tx_queue,
+                                 NCM_TARGET_DEV_MAC)) {
+        g_bridge_host_to_target++;
+        return 1;
+    }
 
     /* Handle ARP */
     if (eth_type == 0x0806) {
@@ -2195,6 +2299,15 @@ static uint8_t handle_target_frame(const uint8_t *data, uint16_t len)
     if (s_bridge_enabled) memcpy(s_target_peer_mac, &data[6], 6);
 
     eth_type = (uint16_t)(data[12] << 8) | data[13];
+
+    /* Windows sends WS-Discovery probes to 239.255.255.250 (and ff02::c)
+     * and NetBIOS name queries to the broadcast address. These must reach
+     * the Host before it can appear in the Windows Network view. */
+    if (bridge_forward_discovery(data, len, &g_host_tx_queue,
+                                 NCM_DEV_MAC)) {
+        g_bridge_target_to_host++;
+        return 1;
+    }
 
     /* Handle ARP */
     if (eth_type == 0x0806) {

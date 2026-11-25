@@ -51,6 +51,48 @@ The server implements the WebDAV methods Windows needs: `OPTIONS`
 | Move / copy | MOVE / COPY | 204 / 201 |
 | WebDAV discovery | PROPFIND / OPTIONS | 207 / 200 |
 
+## Discovering the Host in Windows "Network"
+
+Direct `http://192.168.20.1:8080/` works without discovery, but the Host
+does not appear in the Windows Network view unless the discovery protocols
+can cross the NCM bridge. Three pieces are needed:
+
+1. **Firmware**: `APP/ncm_bridge.c` forwards IPv4 broadcast/multicast
+   (NetBIOS, LLMNR, WS-Discovery, SSDP) and IPv6 multicast between the Host
+   and Target NCM ports, with correct multicast MAC translation. Earlier
+   firmware only forwarded unicast frames addressed to a peer IP, so
+   discovery never reached the Host.
+2. **Host services**: on Fedora run the idempotent setup script:
+
+   ```bash
+   sudo tools/setup_target_share.sh enp0s21f0u1u2
+   ```
+
+   It enables a guest-accessible SMB share named `SharedWithTarget` pointing
+   at `~/SharedWithTarget`, starts `smb`, `nmb` and `wsdd` on the NCM
+   interface, opens the firewall for SMB/WS-Discovery and allows Samba to
+   read the Home directory under SELinux.
+3. **Windows target**: run the companion script in an elevated PowerShell:
+
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File tools\enable_windows_discovery.ps1
+   ```
+
+   It sets the NCM adapter to **Private**, starts `fdPHost` and `FDResPub`,
+   and enables the Network Discovery and File/Printer Sharing firewall
+   groups. Windows defaults unknown networks to Public, which disables
+   discovery even when the Host is answering correctly.
+
+After a Target reboot that still has the NCM adapter connected, the Host
+should appear as `FEDORA` in File Explorer -> Network. Open the share with
+`\\FEDORA\SharedWithTarget` (guest, no credentials). This SMB path is the
+reliable read/write path; the WebDAV mapped drive remains available but
+keeps the write limitation documented below.
+
+If the Host is missing: re-run both scripts, verify `wsdd-ncm.service` is
+active on Fedora, and check that the Windows NCM adapter is Private. The
+guest share is intended for this isolated USB link only.
+
 ## Verified on Windows target (2026-11-25)
 
 **Working over the mapped WebDAV drive:**
