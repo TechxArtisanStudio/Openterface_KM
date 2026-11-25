@@ -70,6 +70,26 @@ Direct `http://192.168.20.1:8080/` works without discovery, but the Host
 does not appear in the Windows Network view unless the discovery protocols
 can cross the NCM bridge. Three pieces are needed:
 
+**Verified working (2026-11-25, firmware `c08fa46`):** WS-Discovery is
+end-to-end functional over the bridge — wsdd's multicast Hello reaches the
+target, Windows's Function Discovery service performs the HTTP metadata
+exchange with wsdd (HTTP 200 in the wsdd log) and sends Resolve messages.
+The Host appears in File Explorer -> Network as `FEDORA` with the
+`SharedWithTarget` share.
+
+Two firmware/host bugs had to be fixed along the way:
+
+1. `bridge_frame_is_discovery` tested the IPv4 version/IHL byte as if it
+   were the destination address, so multicast/broadcast forwarding never
+   fired. The destination address lives at IP-header offset 16 (IPv6: 24);
+   fixed in `c08fa46`. New diag sub-command `0x33/0x13` exposes the
+   target-RX and discovery-forward counters used to find this.
+2. `wsdd` 0.8 sometimes misses the initial netlink address dump, then binds
+   no UDP socket at all. The `wsdd-ncm` unit now runs
+   `ExecStartPost=ip addr change 192.168.20.1/24 ...` which emits a netlink
+   address event that makes wsdd bind UDP 3702 reliably.
+
+
 1. **Firmware**: `APP/ncm_bridge.c` forwards IPv4 broadcast/multicast
    (NetBIOS, LLMNR, WS-Discovery, SSDP) and IPv6 multicast between the Host
    and Target NCM ports, with correct multicast MAC translation. Earlier
