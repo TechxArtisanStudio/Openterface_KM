@@ -264,3 +264,40 @@ Measured with the full suite (same run also exercises TUN-1 regression):
 | 232-236 B | ~7.5 KB/s | ~7.5 KB/s | ~7.5 KB/s |
 
 Suite: 23 PASS / 0 WARN / 0 FAIL across repeated runs.
+## 10. Windowed host sender (2026-11-25, follow-up)
+
+The idle-ACK-release firmware still capped at ~6-7 KB/s because the HOST
+library was the bottleneck: fragmented sends ran stop-and-wait (window 1-2),
+so every fragment paid a round trip no matter what the device did. The host
+library now:
+
+- adopts the device-advertised `rx_window` (from ACK frames) as its in-flight
+  cap when the device announces the window feature -- the device already
+  sizes that window from its reassembly buffer and ACK-queue headroom;
+- applies device features from the INFO response at connect time (the
+  `apply_device_features` hook existed but was never called, so the first
+  send per connection silently ran fire-and-forget in legacy mode);
+- raises `MAX_MESSAGE_LEN` to 1476 B (6 x 246) so a 1460 B message is one
+  message instead of 1440 B + a 20 B leftover paying an extra ACK round trip.
+
+Device side had to catch up in two places (ca881f1): `compute_rx_window`
+reports true capacity using the observed fragment size (9 fragments of the
+host's 180 B chunks fit the 1664 B buffer, not the worst-case 6) and no
+longer clamps to the current message's remaining fragment count -- that
+clamp leaked into windowed hosts as their in-flight cap. The idle-release
+detector now uses a monotonic push counter (merges overwrite the queued ACK
+without growing the queue, so the queue length cannot signal progress) with
+a 4-poll (~40 ms) threshold covering the host's write pacing.
+
+Measured with the full suite, 23 PASS / 0 WARN / 0 FAIL across repeated runs:
+
+| echo size | stop-and-wait | idle release only | windowed host |
+|---|---|---|---|
+| 470 B  | 5.1 KB/s | 6.7-7.6 KB/s | 8.9-10.1 KB/s |
+| 1000 B | 3.4 KB/s | 5.9-6.5 KB/s | **14.4-15.6 KB/s** |
+| 1460 B | 3.8 KB/s | 6.3-6.6 KB/s | **11.3-17.5 KB/s** |
+| 2000 B | 3.8 KB/s | 6.1-7.0 KB/s | **10.4 KB/s** |
+
+Remaining ceiling: 2000 B still splits at MAX_MESSAGE_LEN into two messages
+(one extra ACK round trip), and the echo download direction is notification
+pacing bound (~7 x 244 B frames per connection-event stream).
