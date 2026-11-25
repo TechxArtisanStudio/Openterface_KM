@@ -132,6 +132,7 @@ extern "C" {
 
 #define BLE_ETH_FRAG_MORE        0x80U  /* bit 7: more fragments follow */
 #define BLE_ETH_FRAG_FIRST       0x40U  /* bit 6: this is the first fragment */
+#define BLE_ETH_FRAG_RETRANS     0x20U  /* bit 5: host retransmission marker */
 #define BLE_ETH_FRAG_COUNT_MASK  0x0FU  /* bits 3-0: total fragment count */
 
 #define BLE_ETH_FRAG_HEADER_LEN  3U     /* frag_flags + seq + conn_id */

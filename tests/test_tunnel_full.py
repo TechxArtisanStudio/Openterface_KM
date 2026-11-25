@@ -119,6 +119,10 @@ class Suite:
             parts.append(f"qdrop={d[31] | (d[32] << 8)} "
                          f"ack_sent={d[33] | (d[34] << 8)} "
                          f"ack_qdrop={d[35] | (d[36] << 8)}")
+        if len(d) >= 57:
+            # TCP RX-path tail: 9 counters from offset 37, then win_update
+            parts.append("tcp:" + ",".join(
+                f"{d[37+2*i] | (d[38+2*i] << 8)}" for i in range(10)))
         return " ".join(parts)
 
     CMD_NAMES = {0x21: "CONNECT", 0x22: "DISCONNECT", 0x91: "DATA", 0x11: "PING",
@@ -350,7 +354,7 @@ class Suite:
         self.record("D", "connect_banner", True, f"conn={conn} banner={banner[:24]!r}")
 
         # D2 echo sizes incl. fragmentation boundaries
-        for size in (1, 100, 232, 233, 234, 235, 236, 470, 1000, 1460, 2000):
+        for size in (1, 100, 232, 233, 234, 235, 236, 470, 1000, 1460, 2000, 4000, 6000):
             try:
                 ok, detail = await self.echo_roundtrip(conn, size)
                 self.record("D", f"echo_{size}B", ok, detail)

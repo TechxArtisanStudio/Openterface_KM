@@ -99,6 +99,7 @@ FEAT_DATA_ACK_WINDOW = 0x08
 
 FRAG_MORE = 0x80
 FRAG_FIRST = 0x40
+FRAG_RETRANS = 0x20  # host marks retransmitted fragments; device replays/dup-ACKs
 FRAG_COUNT_MASK = 0x0F
 FRAG_HEADER_LEN = 3
 SAFE_BLE_STREAM_CHUNK = 180
@@ -1104,8 +1105,23 @@ class BleEthClient:
                 _short_hex(data),
             )
         if len(data) > MAX_MESSAGE_LEN:
+            # Split into reassembly-sized messages but keep the whole payload
+            # in ONE windowed pass: awaiting each sub-message separately costs
+            # a full ACK round trip at every chunk boundary (2000 B paid an
+            # extra RTT for nothing). Safe because the device finishes
+            # reassembling message N before message N+1's FIRST frame arrives
+            # (writes are processed serially), and the per-fragment rx_window
+            # advertised in the ACKs still throttles the stream.
+            groups: list[list[bytes]] = []
             for offset in range(0, len(data), MAX_MESSAGE_LEN):
-                await self.send_data(conn_id, data[offset:offset + MAX_MESSAGE_LEN])
+                groups.append(
+                    build_data_fragmented(conn_id, data[offset:offset + MAX_MESSAGE_LEN])
+                )
+            if self._ack_mode != "legacy" and self._effective_data_ack_window() > 1:
+                await self._send_data_frames_windowed(groups)
+            else:
+                for frame in [f for g in groups for f in g]:
+                    await self._send_data_frame_with_ack(frame)
             return
 
         if len(data) <= MAX_FRAG_DATA:
@@ -1117,7 +1133,7 @@ class BleEthClient:
             if self.trace_frames:
                 logger.info("TRACE TX fragmented conn=%d bytes=%d frames=%d", conn_id, len(data), len(frames))
             if self._ack_mode != "legacy" and self._effective_data_ack_window() > 1:
-                await self._send_data_frames_windowed(frames)
+                await self._send_data_frames_windowed([frames])
             else:
                 for frame in frames:
                     await self._send_data_frame_with_ack(frame)
@@ -1220,13 +1236,30 @@ class BleEthClient:
         await self._send_frame(pending.frame)
         self._reliability_stats["tx_data_ack_wait"] += 1
 
-    async def _await_pending_data_ack(self, pending: PendingDataAck) -> None:
+    async def _await_pending_data_ack(self, pending: PendingDataAck, strict: bool = False) -> None:
+        """Wait for one fragment's ACK.
+
+        strict=True raises instead of falling back to legacy mode; the windowed
+        sender uses it so a failed message group can be restarted from seq 0
+        (with the RETRANS marker) instead of silently degrading the tunnel to
+        unacked sends.
+        """
         key = (pending.conn_id, pending.seq)
         for attempt in range(1, pending.attempts + 1):
             try:
                 ack = await asyncio.wait_for(pending.waiter, timeout=self._data_ack_timeout_s)
                 if isinstance(ack, dict) and int(ack.get("status", STATUS_SUCCESS)) != STATUS_SUCCESS:
                     self._reliability_stats["tx_data_ack_non_success"] += 1
+                    if strict:
+                        # The device reports a seq mismatch (usually a dropped
+                        # write aborted the reassembly). Retrying the same
+                        # frame cannot succeed; the caller restarts the whole
+                        # message group.
+                        raise TimeoutError(
+                            f"DATA ACK non-success conn={pending.conn_id} seq={pending.seq} "
+                            f"status=0x{int(ack.get('status', STATUS_SUCCESS)):02X} "
+                            f"expected={ack.get('expected_seq')}"
+                        )
                     if attempt < pending.attempts:
                         self._reliability_stats["tx_data_retransmit"] += 1
                         logger.warning(
@@ -1239,6 +1272,7 @@ class BleEthClient:
                             pending.attempts,
                         )
                         pending.waiter = asyncio.get_event_loop().create_future()
+                        pending.frame = self._mark_retransmit(pending.frame)
                         await self._register_and_send_data_ack_frame(pending)
                         continue
                     if self._ack_strict:
@@ -1269,10 +1303,11 @@ class BleEthClient:
                         pending.attempts,
                     )
                     pending.waiter = asyncio.get_event_loop().create_future()
+                    pending.frame = self._mark_retransmit(pending.frame)
                     await self._register_and_send_data_ack_frame(pending)
                     continue
 
-                if self._ack_strict:
+                if self._ack_strict or strict:
                     raise TimeoutError(
                         f"DATA ACK timeout conn={pending.conn_id} seq={pending.seq} after {pending.attempts} attempts"
                     )
@@ -1287,33 +1322,110 @@ class BleEthClient:
                 )
                 return
 
-    async def _send_data_frames_windowed(self, frames: list[bytes]) -> None:
+    @staticmethod
+    def _mark_retransmit(frame: bytes) -> bytes:
+        """Set the RETRANS bit in the fragment flags and refresh the checksum.
+
+        The device uses this marker to make retransmissions idempotent: a
+        retransmitted FIRST fragment while the reassembly is idle is treated
+        as a duplicate of the last completed message (final ACK replayed)
+        instead of a new message (which would forward the payload twice).
+        """
+        if len(frame) < 7:
+            return frame
+        buf = bytearray(frame)
+        buf[5] |= FRAG_RETRANS
+        buf[-1] = _checksum(bytes(buf[:-1]))
+        return bytes(buf)
+
+    async def _send_data_frames_windowed(self, groups: list[list[bytes]]) -> None:
+        """Send fragment groups (one group per reassembly-sized message) with
+        a shared in-flight window across group boundaries, so multi-message
+        payloads (e.g. a 4000 B send split at MAX_MESSAGE_LEN) pipeline
+        without paying an ACK round trip per boundary. A group whose ACKs
+        fail (dropped BLE write or lost ACK) is restarted from seq 0 with
+        the RETRANS marker instead of degrading the tunnel to legacy mode."""
         pending_queue: list[PendingDataAck] = []
 
-        for frame in frames:
-            while len(pending_queue) >= self._effective_data_ack_window():
-                await self._await_pending_data_ack(pending_queue.pop(0))
-
-            payload_len = frame[4] if len(frame) >= FRAME_HEAD_LEN else 0
-            payload = frame[5:5 + payload_len] if len(frame) >= FRAME_HEAD_LEN else b""
-            header = self._extract_data_header(payload)
-            if header is None:
-                await self._send_frame(frame)
-                continue
-
-            conn_id, seq = header
-            pending = PendingDataAck(
-                conn_id=conn_id,
-                seq=seq,
-                frame=frame,
-                waiter=asyncio.get_event_loop().create_future(),
-                attempts=self._data_ack_retries + 1,
-            )
-            await self._register_and_send_data_ack_frame(pending)
-            pending_queue.append(pending)
+        for group in groups:
+            await self._send_message_group(group, pending_queue)
 
         while pending_queue:
             await self._await_pending_data_ack(pending_queue.pop(0))
+
+    def _drop_pendings(self, pending_queue: list["PendingDataAck"],
+                       dropped: list["PendingDataAck"]) -> None:
+        """Remove abandoned pendings (failed attempt) and their waiters."""
+        ids = {id(p) for p in dropped}
+        pending_queue[:] = [p for p in pending_queue if id(p) not in ids]
+        for p in dropped:
+            self._data_ack_waiters.pop((p.conn_id, p.seq), None)
+            if not p.waiter.done():
+                p.waiter.cancel()
+
+    async def _send_message_group(self, frames: list[bytes],
+                                  pending_queue: list["PendingDataAck"]) -> None:
+        last_failure: Exception | None = None
+        for attempt in range(3):
+            if attempt:
+                # Restart the message from seq 0, marked as retransmission.
+                # The device treats a RETRANS FIRST fragment as a duplicate
+                # (replays the final ACK) if the message already completed,
+                # reports progress if still reassembling, or accepts a fresh
+                # start after an abort.
+                await asyncio.sleep(0.03)
+                frames = [self._mark_retransmit(f) for f in frames]
+            group_pending: list[PendingDataAck] = []
+            failure: Exception | None = None
+            for frame in frames:
+                while len(pending_queue) >= self._effective_data_ack_window():
+                    await self._await_pending_data_ack(pending_queue.pop(0))
+
+                payload_len = frame[4] if len(frame) >= FRAME_HEAD_LEN else 0
+                payload = frame[5:5 + payload_len] if len(frame) >= FRAME_HEAD_LEN else b""
+                header = self._extract_data_header(payload)
+                if header is None:
+                    await self._send_frame(frame)
+                    continue
+
+                conn_id, seq = header
+                pending = PendingDataAck(
+                    conn_id=conn_id,
+                    seq=seq,
+                    frame=frame,
+                    waiter=asyncio.get_event_loop().create_future(),
+                    attempts=self._data_ack_retries + 1,
+                )
+                await self._register_and_send_data_ack_frame(pending)
+                pending_queue.append(pending)
+                group_pending.append(pending)
+
+            # Wait for this group's fragments to be acknowledged. A hopeless
+            # failure (write dropped -> device aborts with FRAME_ERR, or ACK
+            # lost) triggers a restart of the whole message.
+            for pending in group_pending:
+                if pending.waiter.done():
+                    exc = pending.waiter.exception()
+                    if exc is not None:
+                        failure = exc
+                        break
+                    continue
+                try:
+                    await self._await_pending_data_ack(pending, strict=True)
+                except Exception as e:
+                    failure = e
+                    break
+            if failure is None:
+                return
+            last_failure = failure
+            logger.warning(
+                "message group failed (%s); restart attempt %d/3 (%d frames)",
+                failure,
+                attempt + 1,
+                len(frames),
+            )
+            self._drop_pendings(pending_queue, group_pending)
+        raise TimeoutError(f"message group failed after 3 attempts: {last_failure}")
 
     @staticmethod
     def _extract_data_header(payload: bytes) -> tuple[int, int] | None:

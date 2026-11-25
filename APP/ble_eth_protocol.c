@@ -41,6 +41,11 @@ static ble_eth_event_cb_t   g_event_cb;
  * disconnect); DATA ACKs have their own queue below. */
 #define BLE_ETH_TX_ACK_RESERVE  2U
 
+/* Full TCP segment we will send toward the target (1514 - 14 Eth - 20 IPv4
+ * - 20 TCP). Also floors the advertised receive window so the target always
+ * keeps at least one segment in flight. */
+#define BLE_ETH_TCP_MSS         1460U
+
 /* ACK queue: DATA ACKs bypass the data ring. Queued behind a DATA_PUSH
  * backlog, ACKs arrive too late and the host's flow window collapses, so the
  * TX pump drains this queue first (only at a frame boundary, so the host's
@@ -182,6 +187,17 @@ volatile uint16_t g_dbg_tcp_fwd_ok;
 volatile uint16_t g_dbg_tcp_synack;
 volatile uint16_t g_dbg_tcp_synack_dup;
 volatile uint16_t g_dbg_tcp_rst_rx;
+
+/* Download flow control: the target may only have as many bytes in flight
+ * as the BLE TX queue can absorb, otherwise PushTargetData() fails, the
+ * target sees a dup-ACK, and the lost segment is retransmitted only after
+ * the RTO (300 ms+ on Windows). We advertise a receive window that tracks
+ * the free TX queue space instead of a fixed 0xFFFF, and queue a pure
+ * window-update ACK here when a throttle happened, so a target that has
+ * gone quiet learns about the drained queue from PumpTick instead of its
+ * own RTO timer. -1 = no update pending. */
+volatile int8_t g_tcp_win_update_conn = -1;
+volatile uint16_t g_dbg_tcp_win_update;
 
 /* Notify pump counters, defined in peripheral.c */
 extern volatile uint16_t g_ble_notify_ok_cum;
@@ -395,6 +411,7 @@ static void tx_queue_clear(void)
     g_ack_hold_deadline_ms = 0;
     g_ack_idle_polls = 0;
     g_ack_push_snapshot = g_ack_push_total;
+    g_tcp_win_update_conn = -1;
     txq_unlock(irq);
 }
 
@@ -736,18 +753,58 @@ static void dispatch_frame(const ble_eth_frame_t *frame)
 
         if (total_frags == 0) total_frags = 1;
 
-        /* Start new reassembly on first fragment */
+        /* Start new reassembly on first fragment. A retransmission marker
+         * (host restarts a message whose ACK never arrived) must NOT go
+         * through the normal start path: depending on what happened, the
+         * message is either still being reassembled, already completed and
+         * forwarded (a restart here would forward the payload twice), or
+         * aborted mid-way (fresh start is then the only recovery). */
         if (frag_flags & BLE_ETH_FRAG_FIRST) {
-            reassembly_clear();
-            g_reassembly.conn_id = conn_id;
-            g_reassembly.total_frags = total_frags;
-            g_reassembly.next_seq = 0;
-            g_reassembly.in_progress = true;
-            g_reliability_stats.frag_reassembly_start++;
-            g_last_data_ack.valid = false;
+            if (frag_flags & BLE_ETH_FRAG_RETRANS) {
+                if (g_reassembly.in_progress) {
+                    /* Same message still being reassembled; just report
+                     * progress so the host's cumulative ACK handling can
+                     * resolve its waiters. */
+                    g_reliability_stats.frag_rx_duplicate++;
+                    queue_data_ack(addr, BLE_ETH_STATUS_SUCCESS, conn_id, seq,
+                                   g_reassembly.next_seq);
+                    break;
+                }
+                if (g_last_data_ack.valid && g_last_data_ack.conn_id == conn_id &&
+                    g_last_data_ack.expected_seq == total_frags) {
+                    /* The previous message completed and was forwarded, and
+                     * its fragment count matches this retransmission: this is
+                     * a full duplicate. Replay the final ACK. (A count
+                     * mismatch means this is some other message - treat it
+                     * as a fresh start below rather than risking a replay
+                     * that would swallow real data.) */
+                    g_reliability_stats.frag_rx_duplicate++;
+                    queue_data_ack(addr, BLE_ETH_STATUS_SUCCESS, conn_id,
+                                   g_last_data_ack.seq, g_last_data_ack.expected_seq);
+                    break;
+                }
+                /* Previous attempt aborted mid-message (out-of-order drop):
+                 * the only recovery is a fresh start. */
+                reassembly_clear();
+                g_reassembly.conn_id = conn_id;
+                g_reassembly.total_frags = total_frags;
+                g_reassembly.next_seq = 0;
+                g_reassembly.in_progress = true;
+                g_reliability_stats.frag_reassembly_start++;
+                g_last_data_ack.valid = false;
+                g_reassembly.total_len = 0;
+            } else {
+                reassembly_clear();
+                g_reassembly.conn_id = conn_id;
+                g_reassembly.total_frags = total_frags;
+                g_reassembly.next_seq = 0;
+                g_reassembly.in_progress = true;
+                g_reliability_stats.frag_reassembly_start++;
+                g_last_data_ack.valid = false;
 
-            /* Pre-allocate buffer size estimate */
-            g_reassembly.total_len = 0; /* will be set as we go */
+                /* Pre-allocate buffer size estimate */
+                g_reassembly.total_len = 0; /* will be set as we go */
+            }
         }
 
         if (!g_reassembly.in_progress) {
@@ -1297,6 +1354,7 @@ void BLE_Eth_GetDebugStats(uint8_t *out, uint16_t max_len, uint16_t *out_len)
     DPUT16(g_dbg_tcp_synack);
     DPUT16(g_dbg_tcp_synack_dup);
     DPUT16(g_dbg_tcp_rst_rx);
+    DPUT16(g_dbg_tcp_win_update);
 
     if (i > max_len) i = max_len;
     *out_len = i;
@@ -1616,6 +1674,27 @@ bool BLE_Eth_PushTargetData(uint8_t conn_id, const uint8_t *data, uint16_t len)
 
 void BLE_Eth_PumpTick(uint32_t now_ms)
 {
+    /* Window update for a throttled download: once a full MSS segment fits
+     * the TX queue again, tell the target with a pure ACK. Without this the
+     * target stays silent until its own RTO timer fires (300 ms+ on
+     * Windows), pacing the download direction at retransmission speed. */
+    if (g_tcp_win_update_conn >= 0 && g_tcp_win_update_conn < BLE_ETH_MAX_CONNECTIONS) {
+        uint8_t conn = (uint8_t)g_tcp_win_update_conn;
+        ble_eth_conn_t *c = &g_connections[conn];
+        bool drained = false;
+        uint32_t irq = txq_lock();
+        uint16_t free_chunks = (uint16_t)(BLE_ETH_TX_QUEUE_DEPTH - BLE_ETH_TX_ACK_RESERVE)
+                               - g_tx_queue.count;
+        drained = ((uint32_t)free_chunks * BLE_ETH_TX_CHUNK_SIZE) >= BLE_ETH_TCP_MSS;
+        txq_unlock(irq);
+
+        if (drained && c->active && c->tcp_state == BLE_ETH_TCP_ESTABLISHED) {
+            g_tcp_win_update_conn = -1;
+            send_tcp_frame(conn, 0x10, NULL, 0);
+            g_dbg_tcp_win_update++;
+        }
+    }
+
     if (!g_ack_hold_active) return;
 
     if (!g_reassembly.in_progress || g_ack_queue.count == 0) {
@@ -1852,7 +1931,25 @@ static uint8_t send_tcp_frame(uint8_t conn_id, uint16_t tcp_flags,
     ecm_put_be32(&buf[off + 8], c->local_ack);    /* ack */
     buf[off + 12] = 0x50;             /* data offset = 5 (20 bytes) */
     buf[off + 13] = tcp_flags;        /* flags */
-    ecm_put_be16(&buf[off + 14], 0xFFFF); /* window */
+    /* Advertised receive window = free TX queue space (this function runs
+     * inside the txq_lock critical section, so read the count directly).
+     * Scale: a full-MSS segment costs 7 TX chunks (235 B fragments), so 200 B
+     * of window per free chunk guarantees any mix of <=MSS segments fits
+     * without a PushTargetData failure (a failed push dup-ACKs the segment
+     * and the target would sit on its RTO timer for ~300 ms). Floored at one
+     * chunk: the device never emits unsolicited window updates for a
+     * zero-window target (pure-ACK probes go unanswered), so a 0 window could
+     * deadlock the flow; with >=1 chunk always advertised the target keeps
+     * exactly one small segment in flight and every received segment refreshes
+     * the window via its ACK. The pump-driven update (g_tcp_win_update_conn)
+     * reopens the flow once a full segment fits again. */
+    {
+        uint16_t free_chunks = (uint16_t)(BLE_ETH_TX_QUEUE_DEPTH - BLE_ETH_TX_ACK_RESERVE)
+                               - g_tx_queue.count;
+        uint16_t win = (uint16_t)(free_chunks * 200U);
+        if (win < BLE_ETH_TX_CHUNK_SIZE) win = BLE_ETH_TX_CHUNK_SIZE;
+        ecm_put_be16(&buf[off + 14], win); /* window */
+    }
     ecm_put_be16(&buf[off + 16], 0);      /* checksum placeholder */
     buf[off + 18] = 0; buf[off + 19] = 0; /* urgent pointer */
 
@@ -2067,8 +2164,8 @@ static bool handle_icmp_target_frame(const uint8_t *ip, const uint8_t *icmp,
 /* Send TCP data through tunnel. Wraps in Ethernet/IPv4/TCP.
  * Payloads larger than the TCP MSS are split into multiple segments:
  * a single oversized frame would exceed the 1514-byte Ethernet MTU and
- * be dropped silently by send_tcp_frame(), stalling the tunnel. */
-#define BLE_ETH_TCP_MSS  1460U  /* 1514 - 14 Eth - 20 IPv4 - 20 TCP */
+ * be dropped silently by send_tcp_frame(), stalling the tunnel.
+ * (BLE_ETH_TCP_MSS is defined next to the TX queue constants above.) */
 
 void BLE_Eth_SendDataToEth(uint8_t conn_id, const uint8_t *data, uint16_t len)
 {
@@ -2256,8 +2353,13 @@ bool BLE_Eth_HandleTargetFrame(const uint8_t *frame, uint16_t len)
     if (pushed) {
         c->local_ack = remote_seq + tcp_payload_len;
         g_dbg_tcp_fwd_ok++;
+        g_tcp_win_update_conn = -1;  /* this ACK already carries a fresh window */
     } else {
         g_dbg_tcp_fwd_fail++;
+        /* Throttled: the dup-ACK below advertises the tight window. Ask
+         * PumpTick to send a pure window-update ACK once the queue has
+         * drained, so the target is not paced by its own RTO timer. */
+        g_tcp_win_update_conn = (int8_t)conn_id;
     }
     send_tcp_frame((uint8_t)conn_id, 0x10, NULL, 0);  /* ACK received data (or dup-ACK for backpressure) */
     return pushed;

@@ -327,8 +327,11 @@ CFLAGS += -DBLE_MEMHEAP_SIZE=$(BLE_MEMHEAP_SIZE)
 BLE_BUFF_MAX_LEN ?= 251
 CFLAGS += -DBLE_BUFF_MAX_LEN=$(BLE_BUFF_MAX_LEN)
 # Controller packet cache, shared by TX and RX (WCH default 5). Four TX
-# packets per event would leave the RX side a single buffer, so raise the pool.
-BLE_BUFF_NUM ?= 8
+# packets per event would leave the RX side a single buffer, so raise the
+# pool. 12 covers 4 in-flight TX notifies plus bidirectional tunnel traffic;
+# with 8 the RX side dropped write-without-response frames under load
+# (observed as one host DATA-ACK timeout per session on large echoes).
+BLE_BUFF_NUM ?= 12
 CFLAGS += -DBLE_BUFF_NUM=$(BLE_BUFF_NUM)
 # Max TX packets per connection event. One is enough for HID reports, but it
 # also caps every notification stream (BLE-Eth, CH9329 replies) to one packet
