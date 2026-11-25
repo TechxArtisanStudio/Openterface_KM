@@ -171,4 +171,35 @@ void HIDLauncher_Poll(void)
     }
 }
 
+#else  /* !USB_WORK_MODE_COMPILES_BRIDGE_NCM */
+
+/* The BLE portal command is parsed in every build, but only NCM-bridge
+ * products can inject the URL into the target. Keep the API linkable for
+ * the other USB modes and report "not supported" to the Host. */
+void HIDLauncher_Init(void) {}
+void HIDLauncher_Poll(void) {}
+
+uint8_t HIDLauncher_SetUrl(const uint8_t *url, uint8_t len)
+{
+    (void)url;
+    (void)len;
+    return 0xE5u;  /* STATUS_ERR_NOT_SUPPORTED */
+}
+
+uint8_t HIDLauncher_SetEnabled(uint8_t enabled)
+{
+    (void)enabled;
+    return 0xE5u;
+}
+
+void HIDLauncher_GetStatus(uint8_t out[4])
+{
+    if (out) {
+        out[0] = 0u;
+        out[1] = 0u;
+        out[2] = 0u;
+        out[3] = 0u;
+    }
+}
+
 #endif /* USB_WORK_MODE_COMPILES_BRIDGE_NCM */
