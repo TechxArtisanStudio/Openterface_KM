@@ -1,5 +1,9 @@
 # Map the Host file service as a Windows network drive using the legal
 # WebDAV UNC path: \\192.168.20.1@8080\DavWWWRoot
+# Note: while this drive is mapped, Windows shows a "192.168.20.1@8080"
+# entry in the Network view (the redirector derives that name from the UNC
+# path and it cannot be renamed). If you want only clean names in Network,
+# unmap the drive instead and use tools\create_host_shortcut.ps1 (SMB).
 # Run from an elevated PowerShell on the Windows target:
 #   powershell -ExecutionPolicy Bypass -File tools\map_webdav_drive.ps1
 $ErrorActionPreference = 'Stop'

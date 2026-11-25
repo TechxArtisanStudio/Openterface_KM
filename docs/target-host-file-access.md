@@ -38,7 +38,13 @@ systemd unit with `WorkingDirectory` set to the repo root.
   and trailing `\DavWWWRoot` are both required. Run
   `powershell -ExecutionPolicy Bypass -File tools\map_webdav_drive.ps1` on
   the target to set the WebClient HTTP auth level, restart WebClient and map
-  `Z:` to that exact UNC path. Since the SMB share is discoverable, prefer
+  `Z:` to that exact UNC path.
+  **Note:** a mapped WebDAV drive makes Windows show a
+  `192.168.20.1@8080` entry in the Network view (the redirector derives the
+  name from the UNC path and it cannot be renamed). If you want only
+  clean names there, skip the WebDAV mapping and use the SMB shortcut
+  below; the WebDAV path stays available on demand by re-running the
+  helper script. Since the SMB share is discoverable, prefer
   `\\FEDORA\SharedWithTarget` for normal file access — it is writable and
   does not depend on the WebDAV client.
 
