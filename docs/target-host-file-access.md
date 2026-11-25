@@ -89,6 +89,24 @@ Two firmware/host bugs had to be fixed along the way:
    `ExecStartPost=ip addr change 192.168.20.1/24 ...` which emits a netlink
    address event that makes wsdd bind UDP 3702 reliably.
 
+**Name conflict fix (verified 2026-11-25):** after discovery worked,
+clicking `FEDORA` in the Network view still failed because Windows resolved
+the name through mDNS on the management LAN to a *different* machine
+(`fedora.local -> 192.168.100.76`). Two target-side fixes, applied and
+verified:
+
+1. Pin the name to the bridge address in `hosts` (takes priority over
+   mDNS/DNS): append `192.168.20.1 FEDORA` to
+   `%SystemRoot%\System32\drivers\etc\hosts`, then `ipconfig /flushdns`.
+2. Allow guest SMB logons (the share is guest-accessible):
+   `HKLM:\SYSTEM\CurrentControlSet\Services\LanmanWorkstation\Parameters`
+   `AllowInsecureGuestAuth = 1` (DWORD). Without it Windows blocks
+   passwordless shares.
+
+Verification: `Resolve-DnsName FEDORA` returns `192.168.20.1`,
+`net view \\FEDORA` lists `SharedWithTarget`, and directory listing plus
+write/read/delete of a test file succeed.
+
 
 1. **Firmware**: `APP/ncm_bridge.c` forwards IPv4 broadcast/multicast
    (NetBIOS, LLMNR, WS-Discovery, SSDP) and IPv6 multicast between the Host
