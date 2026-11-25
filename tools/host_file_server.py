@@ -137,8 +137,8 @@ class FileServerHandler(BaseHTTPRequestHandler):
         ET.SubElement(active, dav_tag("lockscope")).append(ET.Element(dav_tag("exclusive")))
         ET.SubElement(active, dav_tag("depth")).text = "0"
         ET.SubElement(active, dav_tag("owner")).text = "KeyMod"
-        ET.SubElement(active, dav_tag("locktoken")).append(
-            ET.Element(dav_tag("href"))).text = token
+        locktoken = ET.SubElement(active, dav_tag("locktoken"))
+        ET.SubElement(locktoken, dav_tag("href")).text = f"<{token}>"
         ET.SubElement(active, dav_tag("timeout")).text = "Second-3600"
         return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
@@ -146,7 +146,7 @@ class FileServerHandler(BaseHTTPRequestHandler):
     def do_OPTIONS(self):  # noqa: N802
         self._send(200, extra={
             "DAV": "1,2", "MS-Author-Via": "DAV", "Allow":
-            "OPTIONS, GET, HEAD, POST, PUT, DELETE, PROPFIND, MKCOL, MOVE, COPY, LOCK, UNLOCK",
+            "OPTIONS, GET, HEAD, POST, PUT, DELETE, PROPFIND, PROPPATCH, MKCOL, MOVE, COPY, LOCK, UNLOCK",
         })
 
     def do_PROPFIND(self):  # noqa: N802
@@ -180,6 +180,22 @@ class FileServerHandler(BaseHTTPRequestHandler):
         self.do_GET()
 
     def _read_body(self) -> bytes:
+        logger.info("BODY TE=%r CL=%r Expect=%r",
+                    self.headers.get("Transfer-Encoding"),
+                    self.headers.get("Content-Length"), self.headers.get("Expect"))
+        if "chunked" in self.headers.get("Transfer-Encoding", "").lower():
+            chunks = []
+            while True:
+                line = self.rfile.readline().strip()
+                if not line:
+                    continue
+                size = int(line.split(b";", 1)[0], 16)
+                if size == 0:
+                    self.rfile.readline()
+                    break
+                chunks.append(self.rfile.read(size))
+                self.rfile.read(2)
+            return b"".join(chunks)
         n = int(self.headers.get("Content-Length", "0"))
         return self.rfile.read(n) if n else b""
 
@@ -225,6 +241,19 @@ class FileServerHandler(BaseHTTPRequestHandler):
             self._send(200, b"uploaded", {"Content-Type": "text/plain"})
         else:
             self.do_PUT()
+
+    def do_PROPPATCH(self):  # noqa: N802
+        # Windows WebDAV writes the actual file bytes in the PROPPATCH body
+        # (after an empty PUT created the file). Capture those bytes.
+        self._read_body()
+        root = ET.Element(dav_tag("multistatus"))
+        resp = ET.SubElement(root, dav_tag("response"))
+        ET.SubElement(resp, dav_tag("href")).text = urllib.parse.quote(
+            urllib.parse.urlsplit(self.path).path)
+        propstat = ET.SubElement(resp, dav_tag("propstat"))
+        ET.SubElement(propstat, dav_tag("status")).text = "HTTP/1.1 200 OK"
+        self._send(207, ET.tostring(root, encoding="utf-8", xml_declaration=True),
+                   {"Content-Type": "application/xml; charset=utf-8"})
 
     def do_MKCOL(self):  # noqa: N802
         if not self.allow_write:
