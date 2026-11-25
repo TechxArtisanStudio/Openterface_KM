@@ -6,7 +6,8 @@ browse/download files in a browser and map the share as a WebDAV drive.
 No firmware involvement: the device only forwards Ethernet frames.
 
 Features:
-  - HTTP GET: directory listing + file download
+  - HTTP GET: file-manager web UI (drag-and-drop upload with progress,
+    download with Content-Disposition attachment, mkdir, delete)
   - HTTP POST/PUT: upload (multipart form and raw body)
   - WebDAV: OPTIONS, PROPFIND, MKCOL, PUT, GET, DELETE, MOVE, COPY,
     LOCK/UNLOCK (null-lock stub) so Windows can map it as a network drive.
@@ -75,6 +76,10 @@ class FileServerHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(size))
         self.send_header("Accept-Ranges", "bytes")
+        if "dl=1" in urllib.parse.urlsplit(self.path).query:
+            quoted = urllib.parse.quote(path.name)
+            self.send_header("Content-Disposition",
+                             f"attachment; filename*=UTF-8''{quoted}")
         self.end_headers()
         if self.command == "HEAD":
             return
@@ -82,26 +87,185 @@ class FileServerHandler(BaseHTTPRequestHandler):
             while chunk := f.read(64 * 1024):
                 self.wfile.write(chunk)
 
+    @staticmethod
+    def _human_size(n: int) -> str:
+        for unit in ("B", "KB", "MB", "GB", "TB"):
+            if n < 1024 or unit == "TB":
+                return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+            n /= 1024
+        return f"{n:.1f} TB"
+
+    # ---------- web UI ----------
+    PAGE_TMPL = r"""<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>KeyMod 文件管理器</title>
+<style>
+  :root { --bd:#e3e6ea; --hd:#f5f7fa; --tx:#1f2937; --mut:#6b7280; --ac:#2563eb; }
+  * { box-sizing:border-box }
+  body { margin:0; font:14px/1.5 system-ui,"Segoe UI","Microsoft YaHei",sans-serif;
+         color:var(--tx); background:#fafbfc; min-height:100vh }
+  header { display:flex; align-items:center; gap:12px; padding:10px 20px;
+           background:#fff; border-bottom:1px solid var(--bd); position:sticky; top:0; z-index:5 }
+  header h1 { font-size:16px; margin:0; font-weight:600 }
+  header .crumb { margin-left:8px; color:var(--mut); flex:1; overflow:hidden;
+                  text-overflow:ellipsis; white-space:nowrap }
+  header .crumb a { color:var(--ac); text-decoration:none }
+  button, .btn { font:inherit; padding:6px 14px; border:1px solid var(--bd); border-radius:6px;
+                 background:#fff; cursor:pointer; color:var(--tx) }
+  button:hover, .btn:hover { background:var(--hd); border-color:#c9cfd6 }
+  button.primary { background:var(--ac); border-color:var(--ac); color:#fff }
+  button.primary:hover { background:#1d4ed8 }
+  button.danger { color:#b91c1c; border-color:#f3c4c4 }
+  button.danger:hover { background:#fef2f2 }
+  main { max-width:960px; margin:18px auto; padding:0 16px }
+  .tip { color:var(--mut); font-size:12.5px; margin:0 0 10px }
+  table { width:100%; border-collapse:collapse; background:#fff;
+          border:1px solid var(--bd); border-radius:8px; overflow:hidden }
+  th, td { padding:8px 12px; text-align:left; border-bottom:1px solid var(--bd) }
+  th { background:var(--hd); font-weight:600; font-size:13px; color:var(--mut) }
+  tr:last-child td { border-bottom:none }
+  tr:hover td { background:#f8fafc }
+  td.name a { color:var(--tx); text-decoration:none }
+  td.name a:hover { color:var(--ac); text-decoration:underline }
+  td.size, td.mtime { color:var(--mut); white-space:nowrap; font-size:13px }
+  td.acts { white-space:nowrap; text-align:right }
+  td.acts a { margin-right:10px; color:var(--ac); text-decoration:none; font-size:13px }
+  td.acts a:hover { text-decoration:underline }
+  td.acts button { padding:3px 10px; font-size:12.5px }
+  #progress { margin-top:12px }
+  .prow { display:flex; align-items:center; gap:10px; background:#fff; border:1px solid var(--bd);
+          border-radius:6px; padding:6px 10px; margin-top:6px; font-size:13px }
+  .prow .pn { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+  .prow .bar { width:180px; height:8px; background:var(--bd); border-radius:4px; overflow:hidden }
+  .prow .bar i { display:block; height:100%; width:0; background:var(--ac) }
+  .prow .st { width:60px; text-align:right; color:var(--mut) }
+  .prow.ok .st { color:#15803d } .prow.err .st { color:#b91c1c }
+  #overlay { display:none; position:fixed; inset:0; background:rgba(37,99,235,.08);
+             z-index:50; align-items:center; justify-content:center }
+  #overlay .box { border:2px dashed var(--ac); background:#fff; color:var(--ac);
+                  padding:36px 60px; border-radius:12px; font-size:18px; pointer-events:none }
+</style></head>
+<body>
+<header>
+  <h1>&#128193; KeyMod 文件管理器</h1>
+  <span class="crumb">__CRUMB__</span>
+  <button onclick="mkdirPrompt()">新建文件夹</button>
+  <button onclick="document.getElementById('f').click()">上传文件</button>
+  <input id="f" type="file" multiple hidden>
+</header>
+<main>
+  <p class="tip">将文件拖入页面任意位置即可上传；点击文件名或"下载"保存到本地。</p>
+  <table>
+    <thead><tr><th>名称</th><th>大小</th><th>修改时间</th><th></th></tr></thead>
+    <tbody>__ROWS__</tbody>
+  </table>
+  <div id="progress"></div>
+</main>
+<div id="overlay"><div class="box">&#11014;&#65039; 松开鼠标上传到当前目录</div></div>
+<script>
+const CUR = "__CURDIR__";
+const overlay = document.getElementById('overlay');
+let dragDepth = 0;
+document.addEventListener('dragenter', e => { e.preventDefault(); dragDepth++; overlay.style.display = 'flex'; });
+document.addEventListener('dragover', e => e.preventDefault());
+document.addEventListener('dragleave', e => { if (--dragDepth <= 0) { dragDepth = 0; overlay.style.display = 'none'; } });
+document.addEventListener('drop', e => {
+  e.preventDefault(); dragDepth = 0; overlay.style.display = 'none';
+  uploadFiles([...e.dataTransfer.files]);
+});
+document.getElementById('f').addEventListener('change', e => {
+  uploadFiles([...e.target.files]); e.target.value = '';
+});
+function uploadFiles(files) {
+  if (!files.length) return;
+  const box = document.getElementById('progress');
+  let pending = files.length;
+  files.forEach(file => {
+    const row = document.createElement('div');
+    row.className = 'prow';
+    row.innerHTML = '<span class="pn"></span><span class="bar"><i></i></span><span class="st">0%</span>';
+    row.querySelector('.pn').textContent = file.name;
+    box.appendChild(row);
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', CUR + encodeURIComponent(file.name));
+    xhr.upload.addEventListener('progress', e => {
+      if (e.lengthComputable) {
+        const pct = Math.round(e.loaded / e.total * 100);
+        row.querySelector('.bar i').style.width = pct + '%';
+        row.querySelector('.st').textContent = pct + '%';
+      }
+    });
+    xhr.addEventListener('load', () => {
+      const ok = xhr.status >= 200 && xhr.status < 300;
+      row.classList.add(ok ? 'ok' : 'err');
+      row.querySelector('.st').textContent = ok ? '完成' : ('失败 ' + xhr.status);
+      if (ok && --pending === 0) setTimeout(() => location.reload(), 600);
+    });
+    xhr.addEventListener('error', () => { row.classList.add('err'); row.querySelector('.st').textContent = '网络错误'; if (--pending === 0) setTimeout(() => location.reload(), 600); });
+    xhr.send(file);
+  });
+}
+function mkdirPrompt() {
+  const name = prompt('新文件夹名称：');
+  if (!name) return;
+  fetch(CUR + encodeURIComponent(name), { method: 'MKCOL' })
+    .then(r => { if (!r.ok) alert('创建失败 (HTTP ' + r.status + ')'); location.reload(); });
+}
+function del(path) {
+  if (!confirm('确定删除 ' + decodeURIComponent(path.split('/').pop()) + ' ？')) return;
+  fetch(path, { method: 'DELETE' })
+    .then(r => { if (!r.ok) alert('删除失败 (HTTP ' + r.status + ')'); location.reload(); });
+}
+</script>
+</body></html>
+"""
+
     def _listing(self, path: Path, href_prefix: str) -> bytes:
-        rows = []
-        if path != self.root.resolve():
-            rows.append(('<a href="../">../</a>', "-", "-"))
+        root = self.root.resolve()
+        rel_parts: list[str] = []
+        if path != root:
+            try:
+                rel_parts = path.resolve().relative_to(root).parts
+            except ValueError:
+                rel_parts = []
+
+        # breadcrumb
+        crumbs = ['<a href="/">根目录</a>']
+        acc = ""
+        for part in rel_parts:
+            acc += "/" + urllib.parse.quote(part)
+            crumbs.append(f'<a href="{acc}/">{html.escape(part)}</a>')
+        crumb = " / ".join(crumbs)
+
+        # rows
+        rows = ['<tr><td class="name"><a href="../">&#128193; ../</a></td>'
+                '<td class="size"></td><td class="mtime"></td><td class="acts"></td></tr>']
         for entry in sorted(path.iterdir(), key=lambda p: (p.is_file(), p.name.lower())):
-            name = html.escape(entry.name)
             qname = urllib.parse.quote(entry.name)
-            rows.append((f'<a href="{qname}{"/" if entry.is_dir() else ""}">{name}{"/" if entry.is_dir() else ""}</a>',
-                         "-" if entry.is_dir() else str(entry.stat().st_size),
-                         datetime.datetime.fromtimestamp(entry.stat().st_mtime)
-                         .strftime("%Y-%m-%d %H:%M")))
-        body = ["<!doctype html><html><head><meta charset=utf-8><title>Shared files</title>",
-                "<style>body{font:15px system-ui;margin:2rem}td{padding:2px 12px}</style></head><body>",
-                f"<h2>Shared files: {html.escape(href_prefix)}</h2>",
-                "<table>", "<tr><th>Name</th><th>Size</th><th>Modified</th></tr>"]
-        for link, size, mtime in rows:
-            body.append(f"<tr><td>{link}</td><td>{size}</td><td>{mtime}</td></tr>")
-        body.append("</table><hr><p>Upload: <form method=POST enctype=multipart/form-data>"
-                    "<input type=file name=file><button>Upload</button></form></p></body></html>")
-        return "\n".join(body).encode()
+            href = qname + ("/" if entry.is_dir() else "?dl=1")
+            icon = "&#128193;" if entry.is_dir() else "&#128196;"
+            size = "-" if entry.is_dir() else self._human_size(entry.stat().st_size)
+            mtime = datetime.datetime.fromtimestamp(entry.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+            rows.append(
+                f'<tr>'
+                f'<td class="name"><a href="{href}">{icon} {html.escape(entry.name)}</a></td>'
+                f'<td class="size">{size}</td>'
+                f'<td class="mtime">{mtime}</td>'
+                f'<td class="acts">'
+                f'<a href="{href}" download>下载</a>'
+                f'<button class="danger" onclick="del(\'{qname}\')">删除</button>'
+                f'</td></tr>')
+        rows_html = "".join(rows)
+
+        cur_dir = "/".join(urllib.parse.quote(p) for p in rel_parts)
+        cur_dir = (cur_dir + "/") if cur_dir else ""
+
+        page = (self.PAGE_TMPL
+                .replace("__CRUMB__", crumb)
+                .replace("__ROWS__", rows_html)
+                .replace("__CURDIR__", cur_dir))
+        return page.encode()
 
     # ---------- WebDAV PROPFIND ----------
     def _propfind_body(self, path: Path, href: str, depth: str) -> bytes:
