@@ -35,9 +35,12 @@ systemd unit with `WorkingDirectory` set to the repo root.
   and enter `http://192.168.20.1:8080/`, or in the address bar use
   `\\192.168.20.1@8080\DavWWWRoot`.
   Typing only `192.168.20.1@8080` is **not** a valid path; the leading `\\`
-  and trailing `\DavWWWRoot` are both required. Since the SMB share is
-  discoverable, prefer `\\FEDORA\SharedWithTarget` for normal file access —
-  it is writable and does not depend on the WebDAV client.
+  and trailing `\DavWWWRoot` are both required. Run
+  `powershell -ExecutionPolicy Bypass -File tools\map_webdav_drive.ps1` on
+  the target to set the WebClient HTTP auth level, restart WebClient and map
+  `Z:` to that exact UNC path. Since the SMB share is discoverable, prefer
+  `\\FEDORA\SharedWithTarget` for normal file access — it is writable and
+  does not depend on the WebDAV client.
 
 The server implements the WebDAV methods Windows needs: `OPTIONS`
 (advertises `DAV: 1,2` and `MS-Author-Via: DAV`), `PROPFIND`, `MKCOL`,
