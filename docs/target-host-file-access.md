@@ -92,7 +92,11 @@ can cross the NCM bridge. Three pieces are needed:
 
 After a Target reboot that still has the NCM adapter connected, the Host
 should appear as `FEDORA` in File Explorer -> Network. Open the share with
-`\\FEDORA\SharedWithTarget` (guest, no credentials). This SMB path is the
+`\\FEDORA\SharedWithTarget` (guest, no credentials). For a click-friendly
+entry with only legal characters, run
+`powershell -ExecutionPolicy Bypass -File tools\create_host_shortcut.ps1`:
+it creates a `Host SharedWithTarget` shortcut in the Network view and on
+the Desktop that opens the SMB share directly. This SMB path is the
 reliable read/write path; the WebDAV mapped drive remains available but
 keeps the write limitation documented below.
 
