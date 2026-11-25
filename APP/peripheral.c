@@ -17,6 +17,12 @@
  * INCLUDES
  */
 #include "include/Version_selection.h"
+/* Cumulative notify counters for the 0x33/0x11 diagnostics frame. Defined
+ * unconditionally: BLE_Eth_GetDebugStats references them in every product
+ * (0 without BLE, where the increment sites below are compiled out). */
+volatile uint16_t g_ble_notify_ok_cum;
+volatile uint16_t g_ble_notify_fail_cum;
+
 #ifdef ENABLE_BLE
 #include <ch32v20x_usbfs_device.h>
 #include "config.h"
@@ -156,10 +162,6 @@ static uint16_t peripheralMTU = ATT_MTU_SIZE;
 #define BLE_ETH_NOTIFY_SLOW_TICKS 24  /* 15 ms, one connection interval */
 #define BLE_ETH_ACK_HOLD_POLL_TICKS 16  /* 10 ms, re-check a held DATA ACK */
 static uint8_t g_ble_eth_notify_fails;
-
-/* Cumulative notify counters for the 0x33/0x10 diagnostics frame. */
-volatile uint16_t g_ble_notify_ok_cum;
-volatile uint16_t g_ble_notify_fail_cum;
 
 RingMemParm_t RingMemUSB;
 uint8_t       RingMemUSBBuf[512];
