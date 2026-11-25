@@ -24,15 +24,17 @@ void NCM_Bridge_Init(void);
 void NCM_Bridge_InitTarget(void);      /* Target-facing USBFS (re-)enumeration only */
 void NCM_Bridge_UpdateIPConfig(void);  /* Update IP config immediately after modification */
 void NCM_Bridge_HostRxDone(const uint8_t *data, uint16_t len);
-void NCM_Bridge_HostRxPacket(const uint8_t *data, uint16_t len);  /* one 64B bulk packet */
 void NCM_Bridge_TargetRxDone(const uint8_t *data, uint16_t len);
-uint16_t NCM_Bridge_GetHostDiagnostics(uint8_t *out, uint16_t max_len);
 void NCM_Bridge_Poll(void);
 void NCM_Bridge_SetBleTxCallback(void (*cb)(void));
 uint8_t NCM_Bridge_SendRawFrame(const uint8_t *data, uint16_t len);
 void NCM_Bridge_Target_RearmLinkNotify(void);
 void NCM_Bridge_Target_SetDataAlt(uint8_t alt);  /* Reset RX state on SET_INTERFACE */
 void NCM_Bridge_Target_NotificationPoll(void);  /* USBFS-side link notification poll */
+
+/* 0x33/0x10 diagnostics: host-side NCM bridge memory readout (no printf).
+ * Consumed by the CMD_ISP_DEBUG dispatcher in usbd_compostie_km.c. */
+uint16_t NCM_Bridge_GetHostDiagnostics(uint8_t *out, uint16_t max_len);
 
 /* NTB builder/parser functions (exposed for testing) */
 uint16_t NCM_BuildNtb(uint8_t *ntb_buf, uint16_t max_size,
@@ -45,15 +47,14 @@ uint8_t NCM_ParseNtb(const uint8_t *ntb_buf, uint16_t ntb_len,
 #define NCM_Bridge_InitTarget()            ((void)0)
 #define NCM_Bridge_UpdateIPConfig()        ((void)0)
 #define NCM_Bridge_HostRxDone(data, len)   ((void)0)
-#define NCM_Bridge_HostRxPacket(data, len) ((void)0)
 #define NCM_Bridge_TargetRxDone(data, len) ((void)0)
-#define NCM_Bridge_GetHostDiagnostics(out, max_len) (0U)
 #define NCM_Bridge_Poll()                  ((void)0)
 #define NCM_Bridge_SetBleTxCallback(cb)    ((void)0)
 #define NCM_Bridge_SendRawFrame(data, len) ((uint8_t)0)
 #define NCM_Bridge_Target_RearmLinkNotify() ((void)0)
 #define NCM_Bridge_Target_SetDataAlt(alt)   ((void)0)
 #define NCM_Bridge_Target_NotificationPoll() ((void)0)
+#define NCM_Bridge_GetHostDiagnostics(out, max) ((uint16_t)0)
 #endif
 
 /* --- Diagnostic variables (always defined) ------------------------------- */

@@ -22,6 +22,7 @@
  */
 
 #include "ble_name_config.h"
+#include <string.h>
 #include "ch32v20x_flash.h"
 #include <string.h>
 

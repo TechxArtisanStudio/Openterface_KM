@@ -56,6 +56,9 @@ static ble_eth_event_cb_t   g_event_cb;
  * when the message completes, and expires after the deadline for hosts that
  * use a window smaller than a whole message. */
 #define BLE_ETH_ACK_HOLD_MS      100U
+/* Pump polls while no new fragment arrived before a held ACK is released
+ * anyway (BLE_ETH_ACK_HOLD_POLL_TICKS in peripheral.c = 10 ms per poll). */
+#define BLE_ETH_ACK_IDLE_RELEASE_POLLS 2U
 
 #define BLE_ETH_SYN_RETRY_TICKS 10U
 #define BLE_ETH_SYN_MAX_RETRIES 5U
@@ -103,9 +106,21 @@ static ble_eth_ack_queue_t g_ack_queue;
 static bool g_ack_get_pending;
 
 /* Delayed-ACK state: see BLE_ETH_ACK_HOLD_MS. deadline_ms == 0 means armed but
- * not yet started; BLE_Eth_PumpTick() starts the clock on its first poll. */
+ * not yet started; BLE_Eth_PumpTick() starts the clock on its first poll.
+ *
+ * Idle release: a held ACK must not wait the full hold when the host cannot
+ * send more fragments. A stop-and-wait (or window-2) host withholds the next
+ * fragment until it sees the ACK, so "reassembly still in progress" never
+ * becomes false on its own and a plain 100 ms hold would add the full hold
+ * time to EVERY fragment (~5x latency on a 7-fragment message). PumpTick
+ * therefore releases the hold once no new fragment has arrived for
+ * BLE_ETH_ACK_IDLE_RELEASE_POLLS polls. Pipelined hosts keep fragments
+ * arriving roughly once per connection event (~15 ms), below the idle
+ * threshold, so their merging still works. */
 static bool     g_ack_hold_active;
 static uint32_t g_ack_hold_deadline_ms;
+static uint8_t  g_ack_idle_polls;
+static uint8_t  g_ack_count_snapshot;
 
 /* WCH __disable_irq()/__enable_irq() act on CSR 0x800 bit 3 (MIE), not on
  * mstatus. Return the previous MIE so a critical section entered from an ISR
@@ -181,11 +196,14 @@ static uint8_t compute_rx_window(void)
      *
      * Notes:
      *  - Protocol defines rx_window as 1..15.
-     *  - Firmware reassembly buffer fits 7 full-size fragments (one MSS 1460
-     *    segment), which is what makes the host's window 7 useful.
+     *  - Worst-case bound: the host may send max-size fragments (246 B of
+     *    data each), of which the 1664 B reassembly buffer fits 6. The host
+     *    library actually chunks at 180 B (9 fit), so this is conservative.
+     *    The 7 x 235 sizing mentioned elsewhere refers to the device->host
+     *    direction, where PushTargetData fragments at 235 B.
      */
     const uint16_t max_frag_data = BLE_ETH_MAX_PAYLOAD_LEN - BLE_ETH_FRAG_HEADER_LEN;
-    const uint8_t  max_frags_fit = (uint8_t)(sizeof(g_reassembly.data) / max_frag_data); /* = 7 */
+    const uint8_t  max_frags_fit = (uint8_t)(sizeof(g_reassembly.data) / max_frag_data); /* = 6 */
 
     uint8_t window_by_buf = max_frags_fit;
     if (window_by_buf < 1U) window_by_buf = 1U;
@@ -357,6 +375,13 @@ static void tx_queue_clear(void)
     g_ack_queue.wr = 0;
     g_ack_queue.count = 0;
     g_ack_get_pending = false;
+    /* A hold left armed with an empty ACK queue cannot deadlock (AckHeld()
+     * requires count > 0 and PumpTick releases when reassembly is idle), but
+     * clearing it here keeps the reset paths and the 0x11 diagnostics honest. */
+    g_ack_hold_active = false;
+    g_ack_hold_deadline_ms = 0;
+    g_ack_idle_polls = 0;
+    g_ack_count_snapshot = 0;
     txq_unlock(irq);
 }
 
@@ -584,6 +609,8 @@ static void queue_data_ack(uint8_t addr, uint8_t status, uint8_t conn_id, uint8_
                 g_ack_hold_active = true;
                 g_ack_hold_deadline_ms = 0;
             }
+            g_ack_idle_polls = 0;
+            g_ack_count_snapshot = g_ack_queue.count;
         } else {
             /* An error ACK carries the fragment the host has to retransmit;
              * holding it would stall recovery for up to the full hold time. */
@@ -1264,7 +1291,7 @@ void BLE_Eth_GetDebugStats(uint8_t *out, uint16_t max_len, uint16_t *out_len)
 }
 
 /* Per-connection snapshot for the 0x33/0x12 diagnostics frame: two slots x
- * 12 bytes = 24 bytes. 32-bit sequence/ack numbers are truncated to their low
+ * 14 bytes = 28 bytes. 32-bit sequence/ack numbers are truncated to their low
  * 16 bits -- a persistent mismatch survives in the low bits, which is all the
  * stall diagnosis needs. */
 void BLE_Eth_GetConnSnapshot(uint8_t *out, uint16_t max_len, uint16_t *out_len)
@@ -1498,8 +1525,9 @@ bool BLE_Eth_PushTargetData(uint8_t conn_id, const uint8_t *data, uint16_t len)
     if (!data || len == 0) return false;
 
     /* Calculate fragmentation.  Keep every DATA_PUSH frame within one TX
-     * chunk (244 B): 6 frame bytes + 3 fragment header + data.  This matches
-     * the 7 x 235-byte reassembly buffer sizing on the receive side. */
+     * chunk (244 B): 6 frame bytes + 3 fragment header + data, so one frame
+     * == one notification and the host's 244 B reassembly line buffer never
+     * overflows. 235 B x 7 fragments covers a full MSS 1460 segment. */
     uint16_t max_frag_data = BLE_ETH_TX_CHUNK_SIZE - BLE_ETH_FRAME_MIN_LEN - BLE_ETH_FRAG_HEADER_LEN;
     if (max_frag_data > BLE_ETH_MAX_PAYLOAD_LEN - BLE_ETH_FRAG_HEADER_LEN) {
         max_frag_data = BLE_ETH_MAX_PAYLOAD_LEN - BLE_ETH_FRAG_HEADER_LEN;
@@ -1580,6 +1608,19 @@ void BLE_Eth_PumpTick(uint32_t now_ms)
         /* Message finished (or nothing left to deliver): send now. */
         g_ack_hold_active = false;
         return;
+    }
+
+    /* Idle release: no new fragment arrived since the previous poll, so the
+     * host is waiting for this ACK before it can send more. Sending now
+     * costs one notification but unblocks the host immediately. */
+    if (g_ack_queue.count == g_ack_count_snapshot) {
+        if (++g_ack_idle_polls >= BLE_ETH_ACK_IDLE_RELEASE_POLLS) {
+            g_ack_hold_active = false;
+            return;
+        }
+    } else {
+        g_ack_idle_polls = 0;
+        g_ack_count_snapshot = g_ack_queue.count;
     }
 
     if (g_ack_hold_deadline_ms == 0) {

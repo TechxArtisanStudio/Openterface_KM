@@ -19,6 +19,13 @@
 #include "include/acm_bridge.h"
 #include "include/flash_isp_debug.h"
 #include "include/ncm_bridge.h"
+/* 0x33/0x11 and 0x33/0x12 diagnostics call BLE_Eth_GetDebugStats /
+ * BLE_Eth_GetConnSnapshot. Without this include those were implicit
+ * declarations: the MRS GCC treats them as warnings so the build passed and
+ * linking succeeded (BRIDGE_TUNNEL keeps the symbols alive), but any GCC
+ * new enough to make implicit declarations an error breaks the build. The
+ * header stubs the API out itself when the tunnel is disabled. */
+#include "include/ble_eth_protocol.h"
 
 #if USB_WORK_MODE_COMPILES_BRIDGE_ACM || USB_WORK_MODE_COMPILES_BRIDGE_ECM || USB_WORK_MODE_HAS_HOST_ACM_AND_ECM || USB_WORK_MODE_HAS_HOST_CDC_ACM
 /* External function from usb_endp.c - validates CH9329 command frames */
@@ -502,7 +509,7 @@ void CH9329_DispatchCommand(uint8_t addr, uint8_t cmd_code, uint8_t* pdata, uint
                 }
                 break;
 
-                case 0x12:  // BLE-Eth conn-slot snapshot (2 slots x 12B)
+                case 0x12:  // BLE-Eth conn-slot snapshot (2 slots x 14B = 28B)
                 {
                     uint8_t snap[40];
                     uint16_t snap_len = 0;

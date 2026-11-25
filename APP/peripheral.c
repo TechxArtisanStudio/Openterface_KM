@@ -854,7 +854,12 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
             max_notify_len = BLE_ETH_SAFE_NOTIFY_LEN;
         }
 
-        BLE_Eth_PumpTick(TMOS_GetSystemClock());
+        /* PumpTick wants milliseconds; TMOS ticks are 625 us. The 64-bit
+         * intermediate matters: a 32-bit ticks*625 wraps every ~72 min of
+         * uptime and would poison the hold deadline (ACK could be held
+         * indefinitely -- a TUN-1-style stall). ms wraps every ~49.7 days,
+         * which PumpTick's signed wrap-safe comparison handles. */
+        BLE_Eth_PumpTick((uint32_t)((uint64_t)TMOS_GetSystemClock() * 625U / 1000U));
 
         while ((len = BLE_Eth_GetNextTxChunk(tx_buf, max_notify_len)) > 0) {
             if (app_usb_notify(tx_buf, (uint8_t)len) != SUCCESS) {
