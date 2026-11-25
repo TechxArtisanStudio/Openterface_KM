@@ -16,3 +16,7 @@ stdout
 CLAUDE.md
 .claude/
 output/
+tests/venv/
+tests/logs/
+tests/results.jsonl
+tests/stderr_tail.txt
