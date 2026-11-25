@@ -5,7 +5,7 @@
 #   powershell -ExecutionPolicy Bypass -File tools\create_host_shortcut.ps1
 $ErrorActionPreference = 'Stop'
 
-$target = '\\FEDORA\SharedWithTarget'
+$target = '\\KEYMOD-HOST\SharedWithTarget'
 $shortcutName = 'Host SharedWithTarget'
 
 $shell = New-Object -ComObject WScript.Shell

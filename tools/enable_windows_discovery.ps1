@@ -24,6 +24,12 @@ foreach ($svc in @('fdPHost', 'FDResPub')) {
     }
 }
 
+# Allow guest SMB logons — the Host share is guest-accessible (no
+# credentials). Windows blocks passwordless shares by default.
+$lanman = 'HKLM:\SYSTEM\CurrentControlSet\Services\LanmanWorkstation\Parameters'
+Set-ItemProperty -Path $lanman -Name AllowInsecureGuestAuth -Value 1 -Type DWord
+Write-Host 'AllowInsecureGuestAuth = 1 (guest share access enabled)'
+
 Get-NetFirewallRule |
     Where-Object { $_.DisplayGroup -match 'Discovery|发现|File and Printer Sharing|文件和打印机共享' } |
     Enable-NetFirewallRule

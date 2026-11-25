@@ -45,7 +45,7 @@ systemd unit with `WorkingDirectory` set to the repo root.
   clean names there, skip the WebDAV mapping and use the SMB shortcut
   below; the WebDAV path stays available on demand by re-running the
   helper script. Since the SMB share is discoverable, prefer
-  `\\FEDORA\SharedWithTarget` for normal file access — it is writable and
+  `\\KEYMOD-HOST\SharedWithTarget` for normal file access — it is writable and
   does not depend on the WebDAV client.
 
 The server implements the WebDAV methods Windows needs: `OPTIONS`
@@ -74,7 +74,7 @@ can cross the NCM bridge. Three pieces are needed:
 end-to-end functional over the bridge — wsdd's multicast Hello reaches the
 target, Windows's Function Discovery service performs the HTTP metadata
 exchange with wsdd (HTTP 200 in the wsdd log) and sends Resolve messages.
-The Host appears in File Explorer -> Network as `FEDORA` with the
+The Host appears in File Explorer -> Network as `KEYMOD-HOST` with the
 `SharedWithTarget` share.
 
 Two firmware/host bugs had to be fixed along the way:
@@ -89,23 +89,28 @@ Two firmware/host bugs had to be fixed along the way:
    `ExecStartPost=ip addr change 192.168.20.1/24 ...` which emits a netlink
    address event that makes wsdd bind UDP 3702 reliably.
 
-**Name conflict fix (verified 2026-11-25):** after discovery worked,
-clicking `FEDORA` in the Network view still failed because Windows resolved
-the name through mDNS on the management LAN to a *different* machine
-(`fedora.local -> 192.168.100.76`). Two target-side fixes, applied and
-verified:
+**Name collision and the unique host name (2026-11-25):** discovery first
+advertised the generic name `FEDORA`, and clicking it failed because
+Windows resolved that name through mDNS on the management LAN to a
+*different* machine (`fedora.local -> 192.168.100.76`). A temporary hosts
+pin fixed it locally, but the real fix is that the Host must advertise a
+**unique product name** so a newly connected target never needs manual
+name surgery:
 
-1. Pin the name to the bridge address in `hosts` (takes priority over
-   mDNS/DNS): append `192.168.20.1 FEDORA` to
-   `%SystemRoot%\System32\drivers\etc\hosts`, then `ipconfig /flushdns`.
-2. Allow guest SMB logons (the share is guest-accessible):
-   `HKLM:\SYSTEM\CurrentControlSet\Services\LanmanWorkstation\Parameters`
-   `AllowInsecureGuestAuth = 1` (DWORD). Without it Windows blocks
-   passwordless shares.
+- The Host now advertises **`KEYMOD-HOST`** (wsdd `-n` and Samba
+  `netbios name`, both set by `tools/setup_target_share.sh`).
+- The temporary hosts entry is removed; resolution works without it.
+- Guest SMB logons are no longer a manual step:
+  `tools/enable_windows_discovery.ps1` sets
+  `HKLM:\SYSTEM\...\LanmanWorkstation\Parameters\AllowInsecureGuestAuth=1`
+  along with the Private profile and discovery services, so a fresh target
+  is fully covered by running that one script.
 
-Verification: `Resolve-DnsName FEDORA` returns `192.168.20.1`,
-`net view \\FEDORA` lists `SharedWithTarget`, and directory listing plus
-write/read/delete of a test file succeed.
+Verification: `Resolve-DnsName KEYMOD-HOST` succeeds, the Network view
+shows `KEYMOD-HOST`, `net view \\KEYMOD-HOST` lists `SharedWithTarget`,
+and directory listing plus write/read/delete of a test file succeed.
+Never name the Host something generic (FEDORA, UBUNTU, ...) — any machine
+with the same hostname on an adjacent network steals the resolution.
 
 
 1. **Firmware**: `APP/ncm_bridge.c` forwards IPv4 broadcast/multicast
@@ -135,8 +140,8 @@ write/read/delete of a test file succeed.
    discovery even when the Host is answering correctly.
 
 After a Target reboot that still has the NCM adapter connected, the Host
-should appear as `FEDORA` in File Explorer -> Network. Open the share with
-`\\FEDORA\SharedWithTarget` (guest, no credentials). For a click-friendly
+should appear as `KEYMOD-HOST` in File Explorer -> Network. Open the share with
+`\\KEYMOD-HOST\SharedWithTarget` (guest, no credentials). For a click-friendly
 entry with only legal characters, run
 `powershell -ExecutionPolicy Bypass -File tools\create_host_shortcut.ps1`:
 it creates a `Host SharedWithTarget` shortcut in the Network view and on
@@ -151,10 +156,10 @@ guest share is intended for this isolated USB link only.
 ## Verified on Windows target (2026-11-25)
 
 **Windows Network discovery** (after firmware `d98b484` + `a751e2a`):
-- `net view \\FEDORA` lists `SharedWithTarget` as a Disk resource.
-- `Get-SmbConnection` shows `FEDORA\SharedWithTarget` at SMB 3.1.1.
+- `net view \\KEYMOD-HOST` lists `SharedWithTarget` as a Disk resource.
+- `Get-SmbConnection` shows `KEYMOD-HOST\SharedWithTarget` at SMB 3.1.1.
 - Share listing, file read and a test write from the Windows target into
-  `\\FEDORA\SharedWithTarget` all succeeded. Run
+  `\\KEYMOD-HOST\SharedWithTarget` all succeeded. Run
   `powershell -ExecutionPolicy Bypass -File tools\verify_windows_discovery.ps1`
   to repeat the check.
 - Full BLE-ETH tunnel regression after flashing: **25 PASS / 0 FAIL**.

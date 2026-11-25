@@ -11,7 +11,10 @@ set -euo pipefail
 
 IFACE="${1:-enp0s21f0u1u2}"
 SHARE_DIR="${SHARE_DIR:-/home/bbot/SharedWithTarget}"
-NETBIOS_NAME="${NETBIOS_NAME:-FEDORA}"
+# Unique product identity: never use a generic name (e.g. FEDORA) — any
+# machine with the same hostname on an adjacent network steals name
+# resolution and the Network-view entry stops working.
+NETBIOS_NAME="${NETBIOS_NAME:-KEYMOD-HOST}"
 WORKGROUP="${WORKGROUP:-WORKGROUP}"
 SMB_CONF="/etc/samba/smb.conf"
 WSDD_UNIT="/etc/systemd/system/wsdd-ncm.service"
