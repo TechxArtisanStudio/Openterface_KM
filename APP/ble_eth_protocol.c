@@ -57,8 +57,12 @@ static ble_eth_event_cb_t   g_event_cb;
  * use a window smaller than a whole message. */
 #define BLE_ETH_ACK_HOLD_MS      100U
 /* Pump polls while no new fragment arrived before a held ACK is released
- * anyway (BLE_ETH_ACK_HOLD_POLL_TICKS in peripheral.c = 10 ms per poll). */
-#define BLE_ETH_ACK_IDLE_RELEASE_POLLS 2U
+ * anyway (BLE_ETH_ACK_HOLD_POLL_TICKS in peripheral.c = 10 ms per poll).
+ * 4 polls (~40 ms) covers the host's write pacing: BLE write-without-response
+ * fragments arrive roughly one per connection event (~15-25 ms apart on
+ * macOS), and each release costs the host a full round trip, so the
+ * threshold must sit above the pipelined inter-fragment gap. */
+#define BLE_ETH_ACK_IDLE_RELEASE_POLLS 4U
 
 #define BLE_ETH_SYN_RETRY_TICKS 10U
 #define BLE_ETH_SYN_MAX_RETRIES 5U
@@ -120,7 +124,11 @@ static bool g_ack_get_pending;
 static bool     g_ack_hold_active;
 static uint32_t g_ack_hold_deadline_ms;
 static uint8_t  g_ack_idle_polls;
-static uint8_t  g_ack_count_snapshot;
+/* Monotonic count of ACK pushes (merges included: a collapse overwrites the
+ * queued tail without growing g_ack_queue.count, so the queue length cannot
+ * signal "a new fragment just arrived" -- only this counter can). */
+static uint16_t g_ack_push_total;
+static uint16_t g_ack_push_snapshot;
 
 /* WCH __disable_irq()/__enable_irq() act on CSR 0x800 bit 3 (MIE), not on
  * mstatus. Return the previous MIE so a critical section entered from an ISR
@@ -196,33 +204,38 @@ static uint8_t compute_rx_window(void)
      *
      * Notes:
      *  - Protocol defines rx_window as 1..15.
-     *  - Worst-case bound: the host may send max-size fragments (246 B of
-     *    data each), of which the 1664 B reassembly buffer fits 6. The host
-     *    library actually chunks at 180 B (9 fit), so this is conservative.
-     *    The 7 x 235 sizing mentioned elsewhere refers to the device->host
+     *  - Capacity is computed from the fragment size the host is actually
+     *    sending (observed per message); worst case 246 B of data, 6 fit in
+     *    the 1664 B reassembly buffer, the 180 B host chunks fit 9. The
+     *    7 x 235 sizing mentioned elsewhere refers to the device->host
      *    direction, where PushTargetData fragments at 235 B.
      */
-    const uint16_t max_frag_data = BLE_ETH_MAX_PAYLOAD_LEN - BLE_ETH_FRAG_HEADER_LEN;
-    const uint8_t  max_frags_fit = (uint8_t)(sizeof(g_reassembly.data) / max_frag_data); /* = 6 */
+    /* Fragment size actually observed for the current message (data bytes
+     * per landed fragment); before the first fragment lands assume the
+     * worst case (max-size fragments). */
+    uint16_t frag_sz = BLE_ETH_MAX_PAYLOAD_LEN - BLE_ETH_FRAG_HEADER_LEN;
+    if (g_reassembly.in_progress && g_reassembly.next_seq > 0) {
+        frag_sz = (uint16_t)(g_reassembly.received_len / g_reassembly.next_seq);
+        if (frag_sz < 1U) frag_sz = 1U;
+    }
 
-    uint8_t window_by_buf = max_frags_fit;
+    uint8_t window_by_buf = (uint8_t)(sizeof(g_reassembly.data) / frag_sz);
     if (window_by_buf < 1U) window_by_buf = 1U;
 
     if (g_reassembly.in_progress && g_reassembly.total_frags > g_reassembly.next_seq) {
-        /* Only shrink the window while fragments of the current message are
-         * still outstanding. Once the final fragment has landed the buffer is
-         * released as soon as this frame dispatches, so keep advertising the
-         * full window; otherwise the last ACK of every message would report
-         * zero free fragments and pin the host to a stop-and-wait window for
-         * the next message.
-         */
+        /* While fragments of the current message are outstanding, the
+         * remaining buffer space is the capacity. This is deliberately NOT
+         * clamped to the remaining fragment count of the current message:
+         * that number means nothing between messages and windowed hosts
+         * store the reported window as their in-flight cap, so tail ACKs
+         * reporting "1 more fragment fits" pinned them back to
+         * stop-and-wait. When the final fragment lands the buffer is
+         * released at dispatch and the full window returns automatically. */
         uint16_t remaining_bytes = (uint16_t)(sizeof(g_reassembly.data) - g_reassembly.received_len);
-        uint8_t remaining_by_buf = (uint8_t)(remaining_bytes / max_frag_data);
-        uint8_t remaining_by_msg = (uint8_t)(g_reassembly.total_frags - g_reassembly.next_seq);
+        uint8_t remaining_by_buf = (uint8_t)(remaining_bytes / frag_sz);
         if (remaining_by_buf < 1U) remaining_by_buf = 1U;
 
         window_by_buf = remaining_by_buf;
-        if (remaining_by_msg < window_by_buf) window_by_buf = remaining_by_msg;
     }
 
     /* Ensure ACK frames have room in their own queue; that queue is drained
@@ -381,7 +394,7 @@ static void tx_queue_clear(void)
     g_ack_hold_active = false;
     g_ack_hold_deadline_ms = 0;
     g_ack_idle_polls = 0;
-    g_ack_count_snapshot = 0;
+    g_ack_push_snapshot = g_ack_push_total;
     txq_unlock(irq);
 }
 
@@ -603,6 +616,7 @@ static void queue_data_ack(uint8_t addr, uint8_t status, uint8_t conn_id, uint8_
     uint16_t len = build_frame(buf, addr, BLE_ETH_CMD_DATA_RESP, rsp, BLE_ETH_DATA_ACK_WINDOW_PAYLOAD_LEN);
     if (ack_queue_push(buf, (uint8_t)len)) {
         g_reliability_stats.tx_ack_sent++;
+        g_ack_push_total++;
 
         if (status == BLE_ETH_STATUS_SUCCESS) {
             if (!g_ack_hold_active) {
@@ -610,7 +624,7 @@ static void queue_data_ack(uint8_t addr, uint8_t status, uint8_t conn_id, uint8_
                 g_ack_hold_deadline_ms = 0;
             }
             g_ack_idle_polls = 0;
-            g_ack_count_snapshot = g_ack_queue.count;
+            g_ack_push_snapshot = g_ack_push_total;
         } else {
             /* An error ACK carries the fragment the host has to retransmit;
              * holding it would stall recovery for up to the full hold time. */
@@ -1613,14 +1627,14 @@ void BLE_Eth_PumpTick(uint32_t now_ms)
     /* Idle release: no new fragment arrived since the previous poll, so the
      * host is waiting for this ACK before it can send more. Sending now
      * costs one notification but unblocks the host immediately. */
-    if (g_ack_queue.count == g_ack_count_snapshot) {
+    if (g_ack_push_total == g_ack_push_snapshot) {
         if (++g_ack_idle_polls >= BLE_ETH_ACK_IDLE_RELEASE_POLLS) {
             g_ack_hold_active = false;
             return;
         }
     } else {
         g_ack_idle_polls = 0;
-        g_ack_count_snapshot = g_ack_queue.count;
+        g_ack_push_snapshot = g_ack_push_total;
     }
 
     if (g_ack_hold_deadline_ms == 0) {
