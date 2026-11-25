@@ -51,9 +51,28 @@ The server implements the WebDAV methods Windows needs: `OPTIONS`
 | Move / copy | MOVE / COPY | 204 / 201 |
 | WebDAV discovery | PROPFIND / OPTIONS | 207 / 200 |
 
-## Verified
+## Verified on Windows target (2026-11-25)
 
-On 2026-11-25 against Fedora `192.168.20.1:8080`: browser GET 200,
-file download, PUT upload (201), WebDAV `OPTIONS` headers, `PROPFIND`
-207 XML, `MKCOL` 201, `DELETE` 204. The HID launcher was also used to
-open the page on the target automatically.
+**Working over the mapped WebDAV drive:**
+- `net use Z: http://192.168.20.1:8080/` maps successfully (WebClient
+  service must be running: `Start-Service WebClient`).
+- Directory listing and file download work: `Get-ChildItem Z:\` shows
+  files, `Get-Content Z:\README.txt` returns the exact Host content.
+- Folder creation works (`New-Item -ItemType Directory Z:\newdir`).
+
+**Reliable write path:** use the browser at `http://192.168.20.1:8080/`
+and the upload form on the page (POST multipart). Verified to transfer
+files intact. Raw `PUT` from curl also works (201 with full body).
+
+**Known limitation:** writing *through the mapped WebDAV drive* from
+Windows (e.g. `Out-File`/`Copy-Item` to `Z:\`) is not reliable with this
+minimal stdlib server. The Windows WebDAV client sends an empty `PUT`
+then a `LOCK` and stalls waiting for a write signal the minimal handler
+does not provide; files end up 0 bytes. The server implements `LOCK`,
+`UNLOCK` and `PROPPATCH`, but full Windows write semantics would require
+a mature WebDAV implementation. For editing Host files from the target,
+use the browser upload form instead.
+
+Raw HTTP verification on Fedora: browser GET 200, file download, PUT
+upload (201), WebDAV `OPTIONS` headers (`DAV: 1,2`, `MS-Author-Via: DAV`),
+`PROPFIND` 207 XML, `MKCOL` 201, `DELETE` 204.
