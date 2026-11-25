@@ -73,6 +73,7 @@ extern "C" {
 #define BLE_ETH_CMD_SET_ECM_IP    0x22U  /* Set ECM IP configuration */
 #define BLE_ETH_CMD_GET_ECM_IP    0x23U  /* Get ECM IP configuration */
 #define BLE_ETH_CMD_NET_PING      0x24U  /* ICMP echo to an IP over the ECM link */
+#define BLE_ETH_CMD_PORTAL        0x25U  /* HID portal launcher control */
 
 /* Response / push commands */
 #define BLE_ETH_CMD_CONNECT_RESP  0x90U  /* Connect response (0x10 | 0x80) */
@@ -87,6 +88,7 @@ extern "C" {
 #define BLE_ETH_CMD_SET_ECM_IP_RESP  0xA2U  /* Set ECM IP response */
 #define BLE_ETH_CMD_GET_ECM_IP_RESP  0xA3U  /* Get ECM IP response */
 #define BLE_ETH_CMD_NET_PING_RESP    0xA4U  /* ICMP ping summary (0x24 | 0x80) */
+#define BLE_ETH_CMD_PORTAL_RESP      0xA5U  /* Portal launcher response */
 #define BLE_ETH_CMD_ERROR         0xD0U  /* Generic error (cmd | 0xC0) */
 
 /* ======================== Default Target Configuration =================== */

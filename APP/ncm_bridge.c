@@ -28,6 +28,7 @@ extern volatile uint32_t systick_ms;
 #include "include/usbd_composite_km.h"
 #include "include/km_ring.h"
 #include "include/ble_eth_protocol.h"
+#include "include/hid_launcher.h"
 #include <string.h>
 
 /* Debug output macro */
@@ -491,6 +492,38 @@ static uint8_t queue_push(NCM_FrameQueue_t *queue, const uint8_t *data, uint16_t
     return 1;
 }
 
+/* L2 bridge: peer MACs learned from the first frames on each side, and a
+ * queue push that rewrites the Ethernet header for the destination link.
+ * The two NCM ports share an IP subnet but use different device MACs, so a
+ * transparent bridge has to swap the src/dst MAC on every forwarded frame. */
+static uint8_t s_host_peer_mac[6];
+static uint8_t s_target_peer_mac[6];
+static uint8_t s_bridge_enabled = 1u;
+volatile uint16_t g_bridge_host_to_target;
+volatile uint16_t g_bridge_target_to_host;
+volatile uint16_t g_bridge_arp_proxy;
+
+static uint8_t queue_push_bridge(NCM_FrameQueue_t *queue, const uint8_t *data,
+                                 uint16_t len, const uint8_t *dst_mac,
+                                 const uint8_t *src_mac)
+{
+    uint32_t irq_state = ncm_irq_save();
+    if (queue->count >= NCM_BRIDGE_QUEUE_DEPTH || len > NCM_BRIDGE_MTU_FRAME_SIZE) {
+        queue->overflow++;
+        ncm_irq_restore(irq_state);
+        return 0;
+    }
+    NCM_Frame_t *f = &queue->frames[queue->wr];
+    memcpy(f->data, data, len);
+    memcpy(&f->data[0], dst_mac, 6);
+    memcpy(&f->data[6], src_mac, 6);
+    f->len = len;
+    queue->wr = (queue->wr + 1u) % NCM_BRIDGE_QUEUE_DEPTH;
+    queue->count++;
+    ncm_irq_restore(irq_state);
+    return 1;
+}
+
 static void queue_clear(NCM_FrameQueue_t *queue)
 {
     uint32_t irq_state = ncm_irq_save();
@@ -529,6 +562,25 @@ static uint8_t handle_arp_frame(const uint8_t *frame, uint16_t frame_len)
                      frame[40] == ncm_dev_ip[2] && frame[41] == ncm_dev_ip[3]);
 
         if (!is_dev_ip) {
+            /* Proxy-ARP for the target PC: tell the Host we own its IP so its
+             * HTTP packets are sent to us for bridging. */
+            if (s_bridge_enabled && memcmp(&frame[38], ncm_target_host_ip, 4) == 0) {
+                uint8_t reply[42];
+                memcpy(&reply[0], &frame[6], 6);
+                memcpy(&reply[6], NCM_DEV_MAC, 6);
+                reply[12] = 0x08; reply[13] = 0x06;
+                reply[14] = 0x00; reply[15] = 0x01;
+                reply[16] = 0x08; reply[17] = 0x00;
+                reply[18] = 6; reply[19] = 4;
+                reply[20] = 0x00; reply[21] = 0x02;
+                memcpy(&reply[22], NCM_DEV_MAC, 6);
+                memcpy(&reply[28], ncm_target_host_ip, 4);
+                memcpy(&reply[32], &frame[22], 6);
+                memcpy(&reply[38], &frame[28], 4);
+                queue_push(&g_host_tx_queue, reply, sizeof(reply));
+                g_bridge_arp_proxy++;
+                return 1;
+            }
             return 0;
         }
         g_host_diag.arp_match++;
@@ -1043,6 +1095,7 @@ static uint8_t handle_host_frame(const uint8_t *data, uint16_t len)
         return 0;
     }
     g_host_diag.host_frames++;
+    if (s_bridge_enabled) memcpy(s_host_peer_mac, &data[6], 6);
 
     eth_type = (uint16_t)(data[12] << 8) | data[13];
 
@@ -1063,7 +1116,16 @@ static uint8_t handle_host_frame(const uint8_t *data, uint16_t len)
             g_host_diag.dhcp_offer++;
             return 1;
         }
-        /* TODO: Handle TCP, UDP */
+        /* L2 bridge: Host->Target frames (HTTP replies for the browser). */
+        if (s_bridge_enabled && len >= NCM_ETH_HEADER_LEN + NCM_IPV4_MIN_HEADER_LEN) {
+            const uint8_t *dst_ip = &data[NCM_ETH_HEADER_LEN + 16u];
+            if (memcmp(dst_ip, ncm_target_host_ip, 4) == 0) {
+                queue_push_bridge(&g_target_tx_queue, data, len,
+                                  s_target_peer_mac, NCM_TARGET_DEV_MAC);
+                g_bridge_host_to_target++;
+                return 1;
+            }
+        }
     }
 
     /* Frame not handled - could forward to target or BLE */
@@ -1263,6 +1325,10 @@ uint16_t NCM_Bridge_GetHostDiagnostics(uint8_t *out, uint16_t max_len)
     DIAG_PUT16(g_host_diag.zlp_sent);
     DIAG_PUT16(g_host_diag.rx_oflow);
     DIAG_PUT16(g_host_diag.poll_calls);
+    /* L2 bridge counters (proxy ARP + forwarded frames each direction). */
+    DIAG_PUT16(g_bridge_arp_proxy);
+    DIAG_PUT16(g_bridge_host_to_target);
+    DIAG_PUT16(g_bridge_target_to_host);
 
     /* Append the BLE-Eth tunnel debug block (28 bytes). */
     {
@@ -1367,6 +1433,7 @@ void NCM_Bridge_HostRxPacket(const uint8_t *data, uint16_t len)
 
 void NCM_Bridge_Poll(void)
 {
+    HIDLauncher_Poll();
     g_host_diag.poll_calls++;
     poll_host_notification();
     NCM_Bridge_Target_NotificationPoll();
@@ -1623,6 +1690,25 @@ static uint8_t handle_target_arp_frame(const uint8_t *frame, uint16_t frame_len)
                              frame[40] == ncm_target_dev_ip[2] && frame[41] == ncm_target_dev_ip[3]);
 
         if (!is_dev_ip) {
+            /* Proxy-ARP for the Host: tell the Target we own 192.168.20.1 so
+             * browser traffic is sent to us for bridging. */
+            if (s_bridge_enabled && memcmp(&frame[38], ncm_host_ip, 4) == 0) {
+                uint8_t reply[42];
+                memcpy(&reply[0], &frame[6], 6);
+                memcpy(&reply[6], NCM_TARGET_DEV_MAC, 6);
+                reply[12] = 0x08; reply[13] = 0x06;
+                reply[14] = 0x00; reply[15] = 0x01;
+                reply[16] = 0x08; reply[17] = 0x00;
+                reply[18] = 6; reply[19] = 4;
+                reply[20] = 0x00; reply[21] = 0x02;
+                memcpy(&reply[22], NCM_TARGET_DEV_MAC, 6);
+                memcpy(&reply[28], ncm_host_ip, 4);
+                memcpy(&reply[32], &frame[22], 6);
+                memcpy(&reply[38], &frame[28], 4);
+                queue_push(&g_target_tx_queue, reply, sizeof(reply));
+                g_bridge_arp_proxy++;
+                return 1;
+            }
             return 0;
         }
 
@@ -2106,6 +2192,7 @@ static uint8_t handle_target_frame(const uint8_t *data, uint16_t len)
     if (len < NCM_ETH_HEADER_LEN) {
         return 0;
     }
+    if (s_bridge_enabled) memcpy(s_target_peer_mac, &data[6], 6);
 
     eth_type = (uint16_t)(data[12] << 8) | data[13];
 
@@ -2128,6 +2215,16 @@ static uint8_t handle_target_frame(const uint8_t *data, uint16_t len)
         }
         if (handle_target_icmp_packet(data, len)) {
             return 1;
+        }
+        /* L2 bridge: Target->Host frames (browser HTTP requests) to Host. */
+        if (s_bridge_enabled && len >= NCM_ETH_HEADER_LEN + NCM_IPV4_MIN_HEADER_LEN) {
+            const uint8_t *dst_ip = &data[NCM_ETH_HEADER_LEN + 16u];
+            if (memcmp(dst_ip, ncm_host_ip, 4) == 0) {
+                queue_push_bridge(&g_host_tx_queue, data, len,
+                                  s_host_peer_mac, NCM_DEV_MAC);
+                g_bridge_target_to_host++;
+                return 1;
+            }
         }
     }
 

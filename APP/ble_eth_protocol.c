@@ -10,6 +10,7 @@
  * microcontroller manufactured by Nanjing Qinheng Microelectronics.
  *******************************************************************************/
 
+#include "include/hid_launcher.h"
 #include "include/ble_eth_protocol.h"
 #include "include/default_target_config.h"
 #include "include/ecm_ip_config.h"
@@ -926,6 +927,39 @@ static void dispatch_frame(const ble_eth_frame_t *frame)
 
         PWM_LED_SetBrightness(LED_DIAG_SYN_SENT);  /* ARP request sent */
         send_arp_request(conn_id);
+        break;
+    }
+
+    case BLE_ETH_CMD_PORTAL: {
+        /* HID portal launcher control.
+         * subcmd 1: set URL        [1][len][url bytes...]
+         * subcmd 2: launch         [2][0|1]
+         * subcmd 3: query status   [3]  -> 4-byte status in response
+         */
+        uint8_t rsp[4] = { BLE_ETH_STATUS_SUCCESS, 0, 0, 0 };
+        if (frame->payload_len < 1u) {
+            rsp[0] = BLE_ETH_STATUS_PARAM_ERR;
+        } else {
+            uint8_t sub = frame->payload[0];
+            if (sub == 1u && frame->payload_len >= 2u) {
+                uint8_t n = frame->payload[1];
+                if (n > HID_URL_MAX || (uint16_t)(n + 2u) > frame->payload_len) {
+                    rsp[0] = BLE_ETH_STATUS_PARAM_ERR;
+                } else {
+                    rsp[0] = HIDLauncher_SetUrl(frame->payload + 2, n);
+                }
+            } else if (sub == 2u && frame->payload_len >= 2u) {
+                rsp[0] = HIDLauncher_SetEnabled(frame->payload[1]);
+            } else if (sub == 3u) {
+                HIDLauncher_GetStatus(&rsp[1]);
+            } else {
+                rsp[0] = BLE_ETH_STATUS_PARAM_ERR;
+            }
+        }
+        uint8_t buf[16];
+        uint16_t len = build_frame(buf, addr, BLE_ETH_CMD_PORTAL_RESP, rsp,
+                                   (uint8_t)(frame->payload_len >= 1u && frame->payload[0] == 3u ? 4u : 1u));
+        tx_queue_push_front(buf, len);
         break;
     }
 

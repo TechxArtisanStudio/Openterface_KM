@@ -49,6 +49,7 @@ CMD_SET_DEFAULT = 0x20
 CMD_GET_DEFAULT = 0x21
 CMD_SET_ECM_IP = 0x22
 CMD_GET_ECM_IP = 0x23
+CMD_PORTAL = 0x25
 
 CMD_CONNECT_RESP = 0x90
 CMD_DATA_RESP = 0x91
@@ -62,6 +63,7 @@ CMD_SET_DEFAULT_RESP = 0xA0
 CMD_GET_DEFAULT_RESP = 0xA1
 CMD_SET_ECM_IP_RESP = 0xA2
 CMD_GET_ECM_IP_RESP = 0xA3
+CMD_PORTAL_RESP = 0xA5
 
 CMD_NAMES = {
     CMD_CONNECT: "CONNECT",
@@ -648,6 +650,7 @@ class BleEthClient:
 
         # ECM IP configuration futures ("get" / "set")
         self._ecm_ip_futures: dict[str, asyncio.Future] = {}
+        self._portal_future: asyncio.Future | None = None
 
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._disconnecting = False
@@ -1548,6 +1551,13 @@ class BleEthClient:
         """Process a parsed frame."""
         cmd = frame.cmd
         payload = frame.payload
+
+        if cmd == CMD_PORTAL_RESP:
+            fut = self._portal_future
+            self._portal_future = None
+            if fut is not None and not fut.done():
+                fut.set_result(bytes(payload))
+            return
 
         if cmd == CMD_CONNECT_RESP:
             # Connect response

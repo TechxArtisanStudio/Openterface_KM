@@ -24,6 +24,7 @@ C_SRCS += \
 ../APP/km_ring.c \
 ../APP/mouse_handler.c \
 ../APP/ncm_bridge.c \
+../APP/hid_launcher.c \
 ../APP/peripheral.c \
 ../APP/peripheral_main.c \
 ../APP/pwm_led.c \
@@ -55,6 +56,7 @@ C_DEPS += \
 ./APP/km_ring.d \
 ./APP/mouse_handler.d \
 ./APP/ncm_bridge.d \
+./APP/hid_launcher.d \
 ./APP/peripheral.d \
 ./APP/peripheral_main.d \
 ./APP/pwm_led.d \
@@ -86,6 +88,7 @@ OBJS += \
 ./APP/km_ring.o \
 ./APP/mouse_handler.o \
 ./APP/ncm_bridge.o \
+./APP/hid_launcher.o \
 ./APP/peripheral.o \
 ./APP/peripheral_main.o \
 ./APP/pwm_led.o \
