@@ -231,3 +231,36 @@ cd /tmp/bletest
 #   - wrap client._notification_handler BEFORE client.connect()
 #   - client.recv_data(conn_id) may return partial reassembled data — loop until len satisfied
 ```
+
+
+## 9. Throughput experiment: adaptive idle ACK release (2026-11-25)
+
+The delayed-ACK experiment (TX chunk 244 B, dedicated ACK queue, held
+success ACKs to merge per-message ACKs) shipped with two defects that
+cancelled most of its benefit:
+
+1. **Unit bug**: `peripheral.c` passed `TMOS_GetSystemClock()` (625 us
+   ticks) to `BLE_Eth_PumpTick()` as milliseconds -- the 100 ms hold was
+   really 62.5 ms, and a naive tick conversion would wrap every ~72 min.
+2. **Stop-and-wait penalty**: a held ACK waited the full hold while
+   reassembly was in progress. The host library is effectively stop-and-wait
+   for fragmented sends (window 1-2), so the next fragment cannot arrive
+   before the ACK is seen -- every fragment paid the full hold
+   (~140 ms/fragment measured). Holding made large transfers *slower*.
+
+Fix (dd8932b): `PumpTick` releases the hold after 2 polls (~20 ms) with no
+new fragment, while pipelined hosts (fragments arriving per connection
+event) keep merging into a single ACK per message. The tick unit is
+converted with a 64-bit intermediate.
+
+Measured with the full suite (same run also exercises TUN-1 regression):
+
+| echo size | before | hold fix only | idle release |
+|---|---|---|---|
+| 470 B  | 5.1 KB/s | 4.3 KB/s | 6.7-7.6 KB/s |
+| 1000 B | 3.4 KB/s | 2.8 KB/s | 5.9-6.5 KB/s |
+| 1460 B | 3.8 KB/s | 3.1 KB/s | 6.3-6.6 KB/s |
+| 2000 B | 3.8 KB/s | 3.3 KB/s | 6.1-7.0 KB/s |
+| 232-236 B | ~7.5 KB/s | ~7.5 KB/s | ~7.5 KB/s |
+
+Suite: 23 PASS / 0 WARN / 0 FAIL across repeated runs.
