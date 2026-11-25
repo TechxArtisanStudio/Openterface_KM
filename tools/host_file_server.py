@@ -280,6 +280,7 @@ function setView(v) {
   ['icon','list','detail'].forEach(x =>
     document.getElementById('v-' + x).classList.toggle('on', x === v));
 }
+renderViews();
 setView(localStorage.getItem('km_view') || 'detail');
 
 // drag & drop upload
