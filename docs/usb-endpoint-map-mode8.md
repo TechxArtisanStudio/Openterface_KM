@@ -45,7 +45,8 @@ Three consequences that surprise people:
   keys exist only on the target port. Input reaches those endpoints over the BLE
   link, not over the host port.
 
-Verified deployment: Fedora on the host port, Windows 11 on the target port.
+Verified deployments: Fedora and macOS 26.5 on the host port, Windows 11 on the
+target port.
 
 ---
 
@@ -167,12 +168,19 @@ Windows needs **Microsoft OS 1.0 descriptors** before it will start this NIC:
 Without them `UsbNcm.sys` is not selected and the device sits at Code 56
 (`CM_PROB_NEED_CLASS_CONFIG`).
 
-### 4.2 Host port (USBLIB) — 102 bytes, 2 interfaces
+### 4.2 Host port (USBLIB) — 94 bytes, 2 interfaces
 
 | IF | Function | Endpoint(s) |
 |---|---|---|
 | 0 | CDC-NCM communication (IAD function 0x0D) | EP5 IN 16 B |
 | 1 | CDC-NCM data | alt 0 empty / alt 1: EP3 OUT 64 B + EP4 IN 64 B |
+
+Both data alt settings declare `bInterfaceProtocol = 0x01`, and the NCM
+functional descriptor is 6 bytes here as well. That byte is a matching key, not
+decoration: macOS binds `AppleUSBNCMData` only on class `0x0A` / subclass
+`0x00` / protocol `0x01`, so with protocol `0x00` the control driver attaches and
+no interface is ever created (see
+[ncm-macos-enumeration-fix.md](ncm-macos-enumeration-fix.md)).
 
 No Microsoft OS descriptors are served on this controller: the peer is expected
 to bind the class driver itself (Linux `cdc_ncm`, macOS). A Windows peer on the
@@ -183,12 +191,13 @@ host port would need an INF.
 | Port | `bFunctionLength` | Payload |
 |---|---|---|
 | target (USBFS) | **6** | `bcdNCMVersion = 0x0100`, `bmNetworkCapabilities = 0x02` (NET_ADDRESS) |
-| host (USBLIB) | 14 | the same two fields plus `wMaxSegmentSize = 1514`, `wNumberMCFilters = 0`, `bNumberPowerFilters = 0` |
+| host (USBLIB) | **6** | the same two fields (`bmNetworkCapabilities = 0x01`) |
 
 `UsbNcm.sys` validates `bFunctionLength == 6` and refuses to start the device
-(Code 10) if the ECM-style trailing fields are present. The 14-byte form on the
-host port is what the class drivers on that side accept. **Do not unify the two
-blocks** — the field count belongs to the peer OS, not to the firmware's taste.
+(Code 10) if the ECM-style trailing fields are present. The host port used to
+carry the 14-byte form; nothing needs it — `wMaxSegmentSize` belongs to the
+Ethernet Networking descriptor (`0x0F`) — and the two ports now use the same
+6-byte block. Do not re-add the trailing fields to either one.
 
 ### 4.4 NCM class requests
 
@@ -211,16 +220,19 @@ its peer's driver actually sends:
 | Host port (USBLIB) | Code | Reply |
 |---|---|---|
 | `GET_NTB_PARAMETERS` | `0x80` | the same 28-byte structure |
-| `GET_NTB_INPUT_SIZE` | `0x87` | 2048 in, 2048 out (8 bytes) |
-| `SET_NTB_INPUT_SIZE` | `0x86` | accepted, ignored |
-| `GET_NTB_FORMAT` / `SET_NTB_FORMAT` | `0x89` / `0x88` | 0 / ignored |
-| `GET_MAX_DATAGRAM_SIZE` / `SET_MAX_DATAGRAM_SIZE` | `0x8A` / `0x8B` | 1514 / ignored |
+| `GET_NET_ADDRESS` / `SET_NET_ADDRESS` | `0x81` / `0x82` | 6-byte MAC (`02:00:00:00:00:01`) / accepted, ignored |
+| `GET_NTB_FORMAT` / `SET_NTB_FORMAT` | `0x83` / `0x84` | 0 / accepted (0 only) |
+| `GET_NTB_INPUT_SIZE` / `SET_NTB_INPUT_SIZE` | `0x85` / `0x86` | 2048 in, 2048 out (8 bytes) / accepted |
+| `GET_MAX_DATAGRAM_SIZE` / `SET_MAX_DATAGRAM_SIZE` | `0x87` / `0x88` | 1514 / accepted |
+| `GET_CRC_MODE` / `SET_CRC_MODE` | `0x89` / `0x8A` | 0 / accepted (0 only) |
 | `SET_PACKET_FILTER` | `0x43` | accepted, ignored |
 
-The host port follows the NCM 1.0 numbering (`0x87` = input size) because Linux
-`cdc_ncm` sends exactly that; the target port's numbering is what `UsbNcm.sys`
-probes and has been stable against it. Both return the identical
-`GET_NTB_PARAMETERS` table, so the NTB limits in §5.1 apply to either side.
+Both ports now follow the NCM 1.0 numbering. The host port previously used a
+shifted set (`0x87` = input size, `0x89` = format, `0x8A` = max datagram) that no
+peer sends: Linux `cdc_ncm` only needs `GET_NTB_PARAMETERS` and
+`SET_NTB_INPUT_SIZE`, while macOS probes the spec codes, which is part of why
+enumeration failed there. Both ports return the identical `GET_NTB_PARAMETERS`
+table, so the NTB limits in §5.1 apply to either side.
 
 Validation is asymmetric too: the target-port handlers require recipient =
 interface and `wIndex == 4` and stall otherwise, while the host-port handlers
@@ -367,9 +379,8 @@ state must be `Up` (not `Media disconnected`).
 
 ## 8. Gotchas worth remembering
 
-1. **6-byte NCM functional descriptor on the target port.** Windows' `UsbNcm.sys`
-   checks the length; the ECM-style 14 bytes gives Code 10. The host-port block
-   keeps 14 bytes on purpose (§4.3).
+1. **6-byte NCM functional descriptor on both ports.** Windows' `UsbNcm.sys`
+   checks the length; the ECM-style 14 bytes gives Code 10 (§4.3).
 2. **MS OS descriptors are required for Windows.** Without string `0xEE` plus the
    `WINNCM` CompatibleID the adapter sits at Code 56, not Code 10.
 3. **NTBs above 2048 bytes are dropped silently.** `wBlockLength` is validated
@@ -388,6 +399,11 @@ state must be `Up` (not `Media disconnected`).
 7. **Host-port handler order.** Broadcast relay precedes DHCP there; harmless
    today because that NIC is static, but fix it before enabling DHCP on the host
    side.
+8. **`bInterfaceProtocol = 0x01` is a matching key.** macOS binds
+   `AppleUSBNCMData` only to class `0x0A` / subclass `0x00` / protocol `0x01`.
+   With `0x00` the device enumerates, `AppleUSBNCMControl` loads, and nothing
+   else happens — no error in any log. See
+   [ncm-macos-enumeration-fix.md](ncm-macos-enumeration-fix.md).
 
 History: the descriptor-transfer failure of 2026-11-19 and the Code 10 diagnosis
 are in [ncm-descriptor-debug.md](ncm-descriptor-debug.md) and

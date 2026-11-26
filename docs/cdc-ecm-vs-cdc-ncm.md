@@ -83,10 +83,10 @@ Three consequences worth spelling out:
   target port sits at Code 56 (`CM_PROB_NEED_CLASS_CONFIG`); with a 14-byte NCM
   functional descriptor it sits at Code 10. Both were hit and fixed on this
   project — see [usb-endpoint-map-mode8.md](usb-endpoint-map-mode8.md) §4.
-* **The host port still carries only Linux-grade NCM.** Its descriptor block is
-  14 bytes and it serves no MS OS descriptor, which Linux accepts and Windows
-  will not. A Windows *host* is therefore still an open item, not a supported
-  configuration.
+* **The host port now binds on macOS and Linux.** Since `0bafa81` it declares
+  `bInterfaceProtocol = 0x01` and a 6-byte NCM functional descriptor, so both
+  class drivers attach. It still serves no MS OS descriptor, so a Windows *host*
+  remains an open item rather than a supported configuration.
 
 ---
 
@@ -105,7 +105,7 @@ controller owns, how big they are, and what kind of container crosses them.
 | Data OUT (host → device) | EP6 OUT 32 B, PMA `0x180`, IF3 alt 1 | EP3 OUT 64 B, PMA `0x110`, IF1 alt 1 |
 | Data IN (device → host) | EP6 IN 32 B, PMA `0x1A0`, IF3 alt 1 | EP4 IN 64 B, PMA `0x150`, IF1 alt 1 |
 | PMA used | `0x1C0` = 448 B | `0x190` = 400 B |
-| Interfaces / descriptor | 4 IF, 154 B | 2 IF, 102 B |
+| Interfaces / descriptor | 4 IF, 154 B | 2 IF, 94 B |
 | MS OS descriptors | none | none (Linux/macOS peer assumed) |
 
 Mode 7's host port is the busier of the two: three ACM endpoints coexist with the
@@ -240,10 +240,11 @@ a prerequisite, not an optimisation.
    product. The regression matrix must include 7→8→7 on Windows 11, macOS and
    Linux — and the 8→7 direction must be exercised with the network already
    down, because that is the state a Windows target lands in.
-4. **If a Windows host must be supported**, fix the host-port NCM descriptor
-   first: 6-byte NCM functional descriptor plus MS OS `WINNCM`, mirroring the
-   target port. That is a descriptor-only change, but it must be re-verified
-   against Linux `cdc_ncm`, which is the only peer currently proven on that port.
+4. **If a Windows host must be supported**, the remaining gap is the Microsoft
+   OS descriptor: the host port still serves no `MSFT100`/`WINNCM` pair. The
+   6-byte functional descriptor and the `bInterfaceProtocol = 0x01` matching key
+   landed in `0bafa81` (macOS and Linux bind); mirroring the target port's MS OS
+   block is the rest of the job, and needs a Windows host to verify.
 
 ---
 

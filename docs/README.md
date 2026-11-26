@@ -135,6 +135,7 @@ not for current behaviour — the canonical doc wins if they disagree.
 | Document | Date | Subject |
 |---|---|---|
 | [openterface-ncm-troubleshooting-2026-11-24.md](openterface-ncm-troubleshooting-2026-11-24.md) | 2026-11-24 | NCM bring-up on Windows (Code 10, truncated host descriptor) |
+| [ncm-macos-enumeration-fix.md](ncm-macos-enumeration-fix.md) | 2026-11-26 | macOS created no NCM interface (`bInterfaceProtocol`, functional descriptor, request codes) |
 | [ble-eth-tunnel-test-report-2026-11-24.md](ble-eth-tunnel-test-report-2026-11-24.md) | 2026-11-24 | BLE tunnel throughput and reliability |
 | [ble-eth-changelog-2026-11-25-pipeline-flowcontrol.md](ble-eth-changelog-2026-11-25-pipeline-flowcontrol.md) | 2026-11-25 | pipeline + flow control changes |
 | [target-usb-error-71-fix.md](target-usb-error-71-fix.md) | — | target suspend/resume `error -71` |
