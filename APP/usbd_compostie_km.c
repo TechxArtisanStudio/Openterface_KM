@@ -538,6 +538,26 @@ void CH9329_DispatchCommand(uint8_t addr, uint8_t cmd_code, uint8_t* pdata, uint
                 }
                 break;
 
+                case 0x14:  // Read captive-portal DNS hijack config
+                {
+                    uint8_t pconf[6];
+                    ECM_IPConfig_GetPortal(&pconf[0], &pconf[1], &pconf[2]);
+                    CH9329_SendResponse(addr, cmd_code, pconf, 6, 1);
+                }
+                break;
+
+                case 0x15:  // Write captive-portal DNS hijack config
+                {
+                    // payload: [enabled, mode, ip0, ip1, ip2, ip3]
+                    if (data_len < 7) {  // 1 byte sub_cmd + 6 bytes data
+                        status = STATUS_ERR_PARAM;
+                    } else if (ECM_IPConfig_SetPortal(pdata[1], pdata[2],
+                                                      &pdata[3]) != ECM_IP_CONFIG_OK) {
+                        status = STATUS_ERR_PARAM;
+                    }
+                }
+                break;
+
                 default:
                     printf("Unknown ISP_DEBUG sub_cmd: 0x%02X\r\n", sub_cmd);
                     status = STATUS_ERR_PARAM;
@@ -546,7 +566,8 @@ void CH9329_DispatchCommand(uint8_t addr, uint8_t cmd_code, uint8_t* pdata, uint
 
             // Send response (except for the sub-commands that already sent
             // their own diagnostic payload)
-            if (sub_cmd != 0x01 && sub_cmd != 0x10 && sub_cmd != 0x13) {
+            if (sub_cmd != 0x01 && sub_cmd != 0x10 && sub_cmd != 0x13 &&
+                sub_cmd != 0x14) {
                 CH9329_SendResponse(addr, cmd_code, &status, 1, 1);
             }
         }
@@ -598,9 +619,20 @@ void CH9329_DispatchCommand(uint8_t addr, uint8_t cmd_code, uint8_t* pdata, uint
                                 .subnet_mask = { pdata[9], pdata[10], pdata[11], pdata[12] },
                                 .target_host_ip = { pdata[13], pdata[14], pdata[15], pdata[16] },
                                 .target_dev_ip = { pdata[17], pdata[18], pdata[19], pdata[20] },
-                                .reserved = { 0, 0 },
-                                .padding = 0
+                                .portal_enabled = 0,
+                                .portal_mode = 0,
+                                .portal_ip = { 0, 0, 0, 0 }
                             };
+
+                            // Preserve the portal config across IP updates:
+                            // carry over the current values from the cache.
+                            {
+                                ECM_IPConfig_t cur;
+                                ECM_IPConfig_GetCurrent(&cur);
+                                config.portal_enabled = cur.portal_enabled;
+                                config.portal_mode = cur.portal_mode;
+                                memcpy(config.portal_ip, cur.portal_ip, 4);
+                            }
 
                             USB_DEBUG("SET_ECM_IP: sub_cmd=0x00 (Set All)\r\n");
                             USB_DEBUG("  New Host IP: %d.%d.%d.%d\r\n", config.host_ip[0], config.host_ip[1], config.host_ip[2], config.host_ip[3]);

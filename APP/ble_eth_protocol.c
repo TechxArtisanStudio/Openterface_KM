@@ -1043,9 +1043,19 @@ static void dispatch_frame(const ble_eth_frame_t *frame)
                     .subnet_mask = { frame->payload[9], frame->payload[10], frame->payload[11], frame->payload[12] },
                     .target_host_ip = { frame->payload[13], frame->payload[14], frame->payload[15], frame->payload[16] },
                     .target_dev_ip = { frame->payload[17], frame->payload[18], frame->payload[19], frame->payload[20] },
-                    .reserved = { 0, 0 },
-                    .padding = 0
+                    .portal_enabled = 0,
+                    .portal_mode = 0,
+                    .portal_ip = { 0, 0, 0, 0 }
                 };
+
+                // Preserve the portal config across IP updates.
+                {
+                    ECM_IPConfig_t cur;
+                    ECM_IPConfig_GetCurrent(&cur);
+                    config.portal_enabled = cur.portal_enabled;
+                    config.portal_mode = cur.portal_mode;
+                    memcpy(config.portal_ip, cur.portal_ip, 4);
+                }
 
                 if (!ECM_IPConfig_Validate(&config)) {
                     status = BLE_ETH_STATUS_PARAM_ERR;

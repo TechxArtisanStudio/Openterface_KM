@@ -13,7 +13,7 @@ extern "C" {
 #if USB_WORK_MODE_COMPILES_BRIDGE_ECM || USB_WORK_MODE_COMPILES_BRIDGE_NCM
 
 #define ECM_IP_CONFIG_MAGIC        0x45434D49u  /* "ECMI" */
-#define ECM_IP_CONFIG_VERSION      1u
+#define ECM_IP_CONFIG_VERSION      2u
 /* Flash storage addresses - must be within valid flash range (0x08000000 - 0x08070000 for 448KB flash)
  * Placed BEFORE other config modules to avoid conflicts:
  * - BLENAMECFG at 0x0806D000 (defined in linker script)
@@ -31,18 +31,23 @@ extern "C" {
 #define ECM_IP_CONFIG_DEFAULT_SUBNET_MASK    { 255, 255, 255, 0 }
 #define ECM_IP_CONFIG_DEFAULT_TARGET_HOST_IP { 192, 168, 20, 2 }
 #define ECM_IP_CONFIG_DEFAULT_TARGET_DEV_IP  { 192, 168, 20, 5 }
+/* Captive portal DNS hijack: ON by default, answer address follows host_ip */
+#define ECM_IP_CONFIG_DEFAULT_PORTAL_ENABLED 1u
+#define ECM_IP_CONFIG_DEFAULT_PORTAL_MODE    1u   /* 1 = hijack all UDP/53 A queries */
+#define ECM_IP_CONFIG_DEFAULT_PORTAL_IP      { 0, 0, 0, 0 }
 
-/* User-visible network configuration (24 bytes, 4-byte aligned) */
+/* User-visible network configuration */
 typedef struct {
-    uint8_t  record_version;    /* Config version, currently 1 */
-    uint8_t  host_ip[4];        /* Host-side IP (default: 192.168.11.1) */
-    uint8_t  dev_ip[4];         /* Firmware host-side IP (default: 192.168.11.3) */
+    uint8_t  record_version;    /* Config version, currently 2 */
+    uint8_t  host_ip[4];        /* Host-side IP (default: 192.168.20.1) */
+    uint8_t  dev_ip[4];         /* Firmware host-side IP (default: 192.168.20.3) */
     uint8_t  subnet_mask[4];    /* Subnet mask (default: 255.255.255.0) */
-    uint8_t  target_host_ip[4]; /* Target PC IP (default: 192.168.11.2) */
-    uint8_t  target_dev_ip[4];  /* Firmware target-side IP (default: 192.168.11.5) */
-    uint8_t  reserved[2];       /* Reserved for future expansion */
-    uint8_t  padding;           /* Padding to 4-byte alignment */
-} ECM_IPConfig_t;               /* sizeof = 24 */
+    uint8_t  target_host_ip[4]; /* Target PC IP (default: 192.168.20.2) */
+    uint8_t  target_dev_ip[4];  /* Firmware target-side IP (default: 192.168.20.5) */
+    uint8_t  portal_enabled;    /* Captive-portal DNS hijack: 0 = off, 1 = on */
+    uint8_t  portal_mode;       /* 0 = off, 1 = answer every UDP/53 A query */
+    uint8_t  portal_ip[4];      /* Answer address; 0.0.0.0 = follow host_ip */
+} ECM_IPConfig_t;               /* sizeof = 27 */
 
 /* Complete storage structure in Flash (with verification) */
 typedef struct {
@@ -52,7 +57,7 @@ typedef struct {
     uint32_t write_count;       /* Write count for wear leveling */
     ECM_IPConfig_t config;      /* Actual network config */
     uint32_t footer_magic;      /* Footer magic, ensures complete write */
-} ECM_IPConfig_Flash_t;         /* sizeof = 44 */
+} ECM_IPConfig_Flash_t;         /* sizeof = 47 */
 
 /* Error codes for CH9329 response */
 #define ECM_IP_CONFIG_OK              0x00
@@ -90,6 +95,11 @@ uint8_t ECM_IPConfig_SetTargetSide(const uint8_t target_host_ip[4],
 /* Reset to defaults */
 uint8_t ECM_IPConfig_Reset(void);
 
+/* Captive-portal DNS hijack configuration (stored with the IP config) */
+void ECM_IPConfig_GetPortal(uint8_t *enabled, uint8_t *mode, uint8_t ip[4]);
+uint8_t ECM_IPConfig_SetPortal(uint8_t enabled, uint8_t mode,
+                               const uint8_t ip[4]);
+
 #else /* USB_WORK_MODE_COMPILES_BRIDGE_ECM */
 
 /* Stub functions when ECM bridge is not compiled */
@@ -106,6 +116,8 @@ uint8_t ECM_IPConfig_Reset(void);
 #define ECM_IPConfig_SetHostSide(h, d, s)    (0x00)
 #define ECM_IPConfig_SetTargetSide(th, td)   (0x00)
 #define ECM_IPConfig_Reset()                 (0x00)
+#define ECM_IPConfig_GetPortal(e, m, ip)     ((void)0)
+#define ECM_IPConfig_SetPortal(e, m, ip)     (0x00)
 
 #endif /* USB_WORK_MODE_COMPILES_BRIDGE_ECM || USB_WORK_MODE_COMPILES_BRIDGE_NCM */
 

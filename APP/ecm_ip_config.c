@@ -18,8 +18,9 @@ static const ECM_IPConfig_t ECM_IP_CONFIG_DEFAULT = {
     .subnet_mask    = ECM_IP_CONFIG_DEFAULT_SUBNET_MASK,
     .target_host_ip = ECM_IP_CONFIG_DEFAULT_TARGET_HOST_IP,
     .target_dev_ip  = ECM_IP_CONFIG_DEFAULT_TARGET_DEV_IP,
-    .reserved       = { 0, 0 },
-    .padding        = 0,
+    .portal_enabled = ECM_IP_CONFIG_DEFAULT_PORTAL_ENABLED,
+    .portal_mode    = ECM_IP_CONFIG_DEFAULT_PORTAL_MODE,
+    .portal_ip      = ECM_IP_CONFIG_DEFAULT_PORTAL_IP,
 };
 
 /* RAM cache - runtime read-only access */
@@ -104,6 +105,17 @@ static bool validate_config(const ECM_IPConfig_t *cfg)
     for (i = 0; i < 4; i++) {
         for (j = i + 1; j < 4; j++) {
             if (memcmp(all_ips[i], all_ips[j], 4) == 0) return false;
+        }
+    }
+
+    /* 5. Portal config: enabled/mode are boolean-ish, portal_ip must be a
+     * valid unicast address unless it is 0.0.0.0 (= follow host_ip). */
+    if (cfg->portal_enabled > 1u) return false;
+    if (cfg->portal_mode > 1u) return false;
+    {
+        const uint8_t z[4] = { 0, 0, 0, 0 };
+        if (memcmp(cfg->portal_ip, z, 4) != 0 && !validate_ip_basic(cfg->portal_ip)) {
+            return false;
         }
     }
 
@@ -381,6 +393,30 @@ bool ECM_IPConfig_Validate(const ECM_IPConfig_t *config)
 void ECM_IPConfig_GetCurrent(ECM_IPConfig_t *config)
 {
     *config = s_ram_cache;
+}
+
+void ECM_IPConfig_GetPortal(uint8_t *enabled, uint8_t *mode, uint8_t ip[4])
+{
+    if (enabled) *enabled = s_ram_cache.portal_enabled;
+    if (mode)    *mode    = s_ram_cache.portal_mode;
+    if (ip)      memcpy(ip, s_ram_cache.portal_ip, 4);
+}
+
+uint8_t ECM_IPConfig_SetPortal(uint8_t enabled, uint8_t mode,
+                               const uint8_t ip[4])
+{
+    ECM_IPConfig_t new_config;
+
+    if (enabled > 1u || mode > 1u || ip == NULL) {
+        return ECM_IP_CONFIG_ERR_PARAM;
+    }
+
+    memcpy(&new_config, &s_ram_cache, sizeof(new_config));
+    new_config.portal_enabled = enabled;
+    new_config.portal_mode = mode;
+    memcpy(new_config.portal_ip, ip, 4);
+
+    return ECM_IPConfig_Set(&new_config);
 }
 
 #endif /* USB_WORK_MODE_COMPILES_BRIDGE_ECM || USB_WORK_MODE_COMPILES_BRIDGE_NCM */

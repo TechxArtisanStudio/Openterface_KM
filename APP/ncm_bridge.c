@@ -1195,6 +1195,161 @@ static uint8_t handle_dhcp_packet(const uint8_t *frame, uint16_t frame_len)
 /*******************************************************************************
  * Host Frame Handler (RX from Windows host)
  ******************************************************************************/
+/*******************************************************************************
+ * Captive-portal DNS hijack
+ *
+ * The bridge intercepts every DNS query (UDP port 53) that crosses the
+ * link — regardless of which DNS server the peer configured — and answers
+ * it locally with the portal address. The peer OS then fails its own
+ * connectivity probe (msftconnecttest / captive.apple.com / generate_204),
+ * flags the network as a captive portal and pops up its built-in sign-in
+ * window pointing at the file manager. UDP only; the HTTP 302 hop stays on
+ * the Host (portal_redirect.py). Configurable via ECM_IPConfig portal
+ * fields (0x33 sub-commands 0x14/0x15); portal_ip 0.0.0.0 follows host_ip.
+ ******************************************************************************/
+#define NCM_PORTAL_MAX_REPLY  512u
+
+static volatile uint16_t g_portal_hijacked;
+
+static uint8_t handle_dns_hijack(const uint8_t *data, uint16_t len,
+                                 NCM_FrameQueue_t *queue,
+                                 const uint8_t *dev_mac)
+{
+    static uint8_t reply[NCM_PORTAL_MAX_REPLY];
+    uint8_t enabled, mode, portal_ip[4], host_ip[4];
+    const uint8_t *answer_ip;
+    uint16_t eth_type, ihl, udp_off, dns_off, src_port, dst_port;
+    uint16_t dns_flags, qdcount, question_off, question_len;
+    uint16_t udp_len, ip_total, off;
+    uint32_t sum;
+    uint16_t chk;
+    uint8_t i;
+
+    if (!s_bridge_enabled || len < (uint16_t)(NCM_ETH_HEADER_LEN + 20u + 8u + 12u)) {
+        return 0;
+    }
+    eth_type = get_be16(&data[12]);
+    if (eth_type != NCM_ETH_TYPE_IPV4 || data[14] != 0x45u) {
+        return 0;
+    }
+    if (data[NCM_ETH_HEADER_LEN + 9] != 17u) {          /* UDP only */
+        return 0;
+    }
+
+    udp_off = NCM_ETH_HEADER_LEN + 20u;
+    src_port = get_be16(&data[udp_off]);
+    dst_port = get_be16(&data[udp_off + 2]);
+    if (dst_port != 53u || src_port == 53u) {           /* queries only */
+        return 0;
+    }
+
+    dns_off = udp_off + 8u;
+    if (len < (uint16_t)(dns_off + 12u)) {
+        return 0;
+    }
+    dns_flags = get_be16(&data[dns_off + 2]);
+    if (dns_flags & 0x8000u) {                          /* QR=1: response */
+        return 0;
+    }
+    qdcount = get_be16(&data[dns_off + 4]);
+    if (qdcount != 1u) {
+        return 0;
+    }
+
+    /* Parse the single question: labels until the root, plus type+class. */
+    question_off = dns_off + 12u;
+    {
+        uint16_t p = question_off;
+        uint8_t label_len;
+        do {
+            if (p >= len) {
+                return 0;
+            }
+            label_len = data[p];
+            p = (uint16_t)(p + 1u + label_len);
+        } while (label_len != 0u);
+        question_len = (uint16_t)(p + 4u - question_off);
+        if (p > len || question_len > (uint16_t)(NCM_PORTAL_MAX_REPLY - 60u)) {
+            return 0;
+        }
+    }
+
+    ECM_IPConfig_GetPortal(&enabled, &mode, portal_ip);
+    if (!enabled || mode != 1u) {
+        return 0;
+    }
+    ECM_IPConfig_GetHostIP(host_ip);
+    answer_ip = (portal_ip[0] | portal_ip[1] | portal_ip[2] | portal_ip[3])
+                ? portal_ip : host_ip;
+
+    /* Build the reply: swap L2/L3/UDP addresses, keep the transaction ID. */
+    off = 0;
+    memcpy(&reply[0], &data[6], 6);                     /* dst = querier MAC */
+    memcpy(&reply[6], dev_mac, 6);                      /* src = our MAC */
+    put_be16(&reply[12], NCM_ETH_TYPE_IPV4);
+    off = NCM_ETH_HEADER_LEN;
+
+    reply[off] = 0x45u;                                 /* v4, IHL 5 */
+    reply[off + 1] = 0x00u;                             /* DSCP/ECN */
+    ip_total = (uint16_t)(20u + 8u + 12u + question_len + 16u);
+    put_be16(&reply[off + 2], ip_total);
+    put_be16(&reply[off + 4], get_be16(&data[NCM_ETH_HEADER_LEN + 4])); /* id */
+    put_be16(&reply[off + 6], 0x0000u);                 /* no fragmentation */
+    reply[off + 8] = 0x80u;                             /* TTL */
+    reply[off + 9] = 17u;                               /* UDP */
+    reply[off + 10] = 0x00u;
+    reply[off + 11] = 0x00u;                            /* IP checksum later */
+    memcpy(&reply[off + 12], &data[NCM_ETH_HEADER_LEN + 16], 4); /* src = DNS server */
+    memcpy(&reply[off + 16], &data[NCM_ETH_HEADER_LEN + 12], 4); /* dst = querier */
+    off += 20u;
+
+    put_be16(&reply[off], 53u);                         /* src port */
+    put_be16(&reply[off + 2], src_port);                /* dst = querier port */
+    udp_len = (uint16_t)(8u + 12u + question_len + 16u);
+    put_be16(&reply[off + 4], udp_len);
+    put_be16(&reply[off + 6], 0x0000u);                 /* UDP checksum: none */
+    off += 8u;
+
+    put_be16(&reply[off], get_be16(&data[dns_off]));    /* transaction ID */
+    put_be16(&reply[off + 2],
+             (uint16_t)(0x8400u | (dns_flags & 0x0100u) | 0x0080u)); /* QR|AA|RD|RA */
+    put_be16(&reply[off + 4], 1u);                      /* QDCOUNT */
+    put_be16(&reply[off + 6], 1u);                      /* ANCOUNT */
+    put_be16(&reply[off + 8], 0u);                      /* NSCOUNT */
+    put_be16(&reply[off + 10], 0u);                     /* ARCOUNT (drop OPT) */
+    off += 12u;
+
+    memcpy(&reply[off], &data[question_off], question_len);
+    off = (uint16_t)(off + question_len);
+
+    put_be16(&reply[off], 0xC00Cu);                     /* ptr to question */
+    put_be16(&reply[off + 2], 1u);                      /* type A */
+    put_be16(&reply[off + 4], 1u);                      /* class IN */
+    put_be16(&reply[off + 6], 10u);                     /* TTL hi */
+    put_be16(&reply[off + 8], 0u);                      /* TTL lo */
+    put_be16(&reply[off + 10], 4u);                     /* RDLENGTH */
+    memcpy(&reply[off + 12], answer_ip, 4);             /* RDATA */
+    off = (uint16_t)(off + 16u);
+
+    /* IPv4 header checksum */
+    sum = 0;
+    for (i = 0; i < 10u; i++) {
+        sum += (uint16_t)(reply[NCM_ETH_HEADER_LEN + i * 2u] << 8) |
+               reply[NCM_ETH_HEADER_LEN + i * 2u + 1u];
+    }
+    while (sum >> 16) {
+        sum = (sum & 0xFFFFu) + (sum >> 16u);
+    }
+    put_be16(&reply[NCM_ETH_HEADER_LEN + 10], (uint16_t)(~sum) & 0xFFFFu);
+
+    if (!queue_push_bridge(queue, reply, off, &reply[0], dev_mac)) {
+        return 0;
+    }
+    g_portal_hijacked++;
+    USB_DEBUG("NCM: DNS hijacked -> portal\r\n");
+    return 1;
+}
+
 static uint8_t handle_host_frame(const uint8_t *data, uint16_t len)
 {
     uint16_t eth_type;
@@ -1231,6 +1386,11 @@ static uint8_t handle_host_frame(const uint8_t *data, uint16_t len)
         /* Check for DHCP */
         if (handle_dhcp_packet(data, len)) {
             g_host_diag.dhcp_offer++;
+            return 1;
+        }
+        /* Captive portal: answer DNS queries before they cross the link */
+        if (handle_dns_hijack(data, len, &g_host_tx_queue,
+                              NCM_DEV_MAC)) {
             return 1;
         }
         /* L2 bridge: Host->Target frames (HTTP replies for the browser). */
@@ -1446,6 +1606,7 @@ uint16_t NCM_Bridge_GetHostDiagnostics(uint8_t *out, uint16_t max_len)
     DIAG_PUT16(g_bridge_arp_proxy);
     DIAG_PUT16(g_bridge_host_to_target);
     DIAG_PUT16(g_bridge_target_to_host);
+    DIAG_PUT16(g_portal_hijacked);
 
     /* Append the BLE-Eth tunnel debug block (28 bytes). */
     {
@@ -1495,6 +1656,8 @@ uint16_t NCM_Bridge_GetBridgeDiagnostics(uint8_t *out, uint16_t max_len)
     BD_PUT16(g_target_diag_discovery);
     BD_PUT16(g_bridge_target_to_host);
     BD_PUT8(g_target_tx_queue.count);
+    BD_PUT16(g_portal_hijacked);          /* captive-portal DNS answers */
+    BD_PUT8(0x00u);                       /* reserved */
 
 #undef BD_PUT8
 #undef BD_PUT16
@@ -1847,8 +2010,21 @@ static uint8_t handle_target_arp_frame(const uint8_t *frame, uint16_t frame_len)
 
         if (!is_dev_ip) {
             /* Proxy-ARP for the Host: tell the Target we own 192.168.20.1 so
-             * browser traffic is sent to us for bridging. */
-            if (s_bridge_enabled && memcmp(&frame[38], ncm_host_ip, 4) == 0) {
+             * browser traffic is sent to us for bridging. With the captive
+             * portal active also claim the portal answer address (the DNS
+             * server handed out via DHCP), so the target can reach it. */
+            uint8_t proxy_ip_match = 0;
+            {
+                uint8_t p_enabled, p_mode, p_ip[4];
+                ECM_IPConfig_GetPortal(&p_enabled, &p_mode, p_ip);
+                if (p_enabled && p_mode == 1u) {
+                    const uint8_t *eff = (p_ip[0] | p_ip[1] | p_ip[2] | p_ip[3])
+                                         ? p_ip : ncm_host_ip;
+                    proxy_ip_match = (memcmp(&frame[38], eff, 4) == 0);
+                }
+            }
+            if (s_bridge_enabled && (memcmp(&frame[38], ncm_host_ip, 4) == 0 ||
+                                     proxy_ip_match)) {
                 uint8_t reply[42];
                 memcpy(&reply[0], &frame[6], 6);
                 memcpy(&reply[6], NCM_TARGET_DEV_MAC, 6);
@@ -2146,12 +2322,39 @@ static uint8_t handle_target_dhcp_packet(const uint8_t *frame, uint16_t frame_le
     memcpy(&reply[off], ncm_subnet_mask, 4);
     off += 4;
 
-    /* DNS server - use public DNS */
+    /* DNS server: when the captive portal is active, hand out the portal
+     * answer address so the target's DNS queries cross the bridge and get
+     * hijacked (a "public" DNS would never resolve: nothing ARPs for it). */
     reply[off++] = NCM_DHCP_OPT_DNS;
     reply[off++] = 0x04;
-    uint8_t public_dns[4] = { 8, 8, 8, 8 };
-    memcpy(&reply[off], public_dns, 4);
+    {
+        uint8_t p_enabled, p_mode, p_ip[4];
+        ECM_IPConfig_GetPortal(&p_enabled, &p_mode, p_ip);
+        if (p_enabled && p_mode == 1u) {
+            if (p_ip[0] | p_ip[1] | p_ip[2] | p_ip[3]) {
+                memcpy(&reply[off], p_ip, 4);
+            } else {
+                memcpy(&reply[off], ncm_host_ip, 4);
+            }
+        } else {
+            uint8_t public_dns[4] = { 8, 8, 8, 8 };
+            memcpy(&reply[off], public_dns, 4);
+        }
+    }
     off += 4;
+
+    /* Router: with the portal active, announce the Host so NCSI can run its
+     * connectivity probe through this interface. */
+    {
+        uint8_t p_enabled, p_mode, p_ip[4];
+        ECM_IPConfig_GetPortal(&p_enabled, &p_mode, p_ip);
+        if (p_enabled && p_mode == 1u) {
+            reply[off++] = NCM_DHCP_OPT_ROUTER;
+            reply[off++] = 0x04;
+            memcpy(&reply[off], ncm_host_ip, 4);
+            off += 4;
+        }
+    }
 
     /* End option */
     reply[off++] = NCM_DHCP_OPT_END;
@@ -2381,6 +2584,11 @@ static uint8_t handle_target_frame(const uint8_t *data, uint16_t len)
             return 1;
         }
         if (handle_target_icmp_packet(data, len)) {
+            return 1;
+        }
+        /* Captive portal: answer DNS queries before they cross the link */
+        if (handle_dns_hijack(data, len, &g_target_tx_queue,
+                              NCM_TARGET_DEV_MAC)) {
             return 1;
         }
         /* L2 bridge: Target->Host frames (browser HTTP requests) to Host. */
