@@ -9,7 +9,12 @@
 # and the systemd unit once, then restarts the services.
 set -euo pipefail
 
-IFACE="${1:-enp0s21f0u1u2}"
+# Default interface: auto-detect the firmware's host-facing NIC by MAC
+# (02:00:00:00:00:01). USB renames the enp* name on every replug, but the
+# MAC-stable altname enx020000000001 always works.
+HOST_MAC="02:00:00:00:00:01"
+IFACE="${1:-$(ip -o link | grep -i "$HOST_MAC" | sed -E 's/^[0-9]+: ([^:@]+).*/\1/' | head -1)}"
+IFACE="${IFACE:-enx020000000001}"
 SHARE_DIR="${SHARE_DIR:-/home/bbot/SharedWithTarget}"
 # Unique product identity: never use a generic name (e.g. FEDORA) — any
 # machine with the same hostname on an adjacent network steals name

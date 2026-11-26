@@ -1750,9 +1750,57 @@ void NCM_Bridge_HostRxPacket(const uint8_t *data, uint16_t len)
     }
 }
 
+/*******************************************************************************
+ * Target-path watchdog
+ *
+ * A USB replug in the middle of a large NTB transfer (or a lost bulk packet)
+ * leaves the target RX reassembly waiting for bytes that will never arrive
+ * and can leave the EP7 IN busy flag stuck after the peer stops reading.
+ * Either condition silently kills the whole target path. Reset both after
+ * three seconds without progress; the next NTB re-syncs via its header.
+ ******************************************************************************/
+#define NCM_TARGET_WATCHDOG_MS  3000u
+
+static volatile uint32_t g_target_last_rx_ms;
+static uint16_t s_wd_last_in_count;
+static uint32_t s_wd_last_in_change_ms;
+
+static void target_watchdog(void)
+{
+    extern volatile uint16_t g_usbfs_ep7_in_count;  /* EP7 IN completions */
+    uint32_t now = systick_ms;
+    uint16_t in_count = g_usbfs_ep7_in_count;
+
+    /* RX: reassembly stuck mid-NTB with no incoming packets */
+    if (s_target_rx_need != 0 &&
+        (uint32_t)(now - g_target_last_rx_ms) > NCM_TARGET_WATCHDOG_MS) {
+        s_target_rx_len = 0;
+        s_target_rx_need = 0;
+        USB_DEBUG("NCM: RX watchdog reset\r\n");
+    }
+
+    /* TX: EP7 busy but no IN completions since the last check */
+    if (USBFS_Endp_Busy[DEF_UEP7] != 0) {
+        if (in_count == s_wd_last_in_count &&
+            (uint32_t)(now - s_wd_last_in_change_ms) > NCM_TARGET_WATCHDOG_MS) {
+            USBFS_Endp_Busy[DEF_UEP7] = 0;
+            s_target_ntb_tx_len = 0;
+            s_target_ntb_tx_off = 0;
+            /* Queued replies are stale by now; drop them so the queue
+             * cannot feed the wedge again. */
+            queue_clear(&g_target_tx_queue);
+            USB_DEBUG("NCM: TX watchdog reset\r\n");
+        }
+    } else {
+        s_wd_last_in_change_ms = now;
+    }
+    s_wd_last_in_count = in_count;
+}
+
 void NCM_Bridge_Poll(void)
 {
     HIDLauncher_Poll();
+    target_watchdog();
     g_host_diag.poll_calls++;
     poll_host_notification();
     NCM_Bridge_Target_NotificationPoll();
@@ -2620,6 +2668,8 @@ void NCM_Bridge_TargetRxDone(const uint8_t *data, uint16_t len)
     if (data == NULL || len == 0) {
         return;
     }
+
+    g_target_last_rx_ms = systick_ms;
 
     if (s_target_rx_need == 0) {
         /* Start of a new transfer: the first packet holds the NTB header. */
