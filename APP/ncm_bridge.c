@@ -2653,13 +2653,15 @@ static uint8_t handle_target_dhcp_packet(const uint8_t *frame, uint16_t frame_le
     memcpy(&reply[off], ncm_target_dev_ip, 4);
     off += 4;
 
-    /* Lease time: 1 hour */
+    /* Lease time: 5 minutes.  Short on purpose: the lease carries the DNS
+     * hint, so a firmware or policy change has to be able to reach the
+     * target again without waiting an hour for a renewal. */
     reply[off++] = NCM_DHCP_OPT_LEASE_TIME;
     reply[off++] = 0x04;
     reply[off++] = 0x00;
     reply[off++] = 0x00;
-    reply[off++] = 0x0E;
-    reply[off++] = 0x10;  /* 3600 seconds */
+    reply[off++] = 0x01;
+    reply[off++] = 0x2C;  /* 300 seconds */
 
     /* Subnet mask */
     reply[off++] = NCM_DHCP_OPT_SUBNET;
@@ -2667,39 +2669,31 @@ static uint8_t handle_target_dhcp_packet(const uint8_t *frame, uint16_t frame_le
     memcpy(&reply[off], ncm_subnet_mask, 4);
     off += 4;
 
-    /* DNS server: when the captive portal is active, hand out the portal
-     * answer address so the target's DNS queries cross the bridge and get
-     * hijacked (a "public" DNS would never resolve: nothing ARPs for it). */
-    reply[off++] = NCM_DHCP_OPT_DNS;
-    reply[off++] = 0x04;
+    /* DNS: only while the one-shot portal greeting is armed.  Advertising a
+     * resolver unconditionally makes the target ship every lookup through
+     * the dongle even though its own Wi-Fi link is perfectly healthy.  With
+     * the greeting disabled we stay silent and the target keeps using the
+     * DNS servers of its real uplink. */
     {
         uint8_t p_enabled, p_mode, p_ip[4];
         ECM_IPConfig_GetPortal(&p_enabled, &p_mode, p_ip);
         if (p_enabled && p_mode == 1u) {
+            reply[off++] = NCM_DHCP_OPT_DNS;
+            reply[off++] = 0x04;
             if (p_ip[0] | p_ip[1] | p_ip[2] | p_ip[3]) {
                 memcpy(&reply[off], p_ip, 4);
             } else {
                 memcpy(&reply[off], ncm_host_ip, 4);
             }
-        } else {
-            uint8_t public_dns[4] = { 8, 8, 8, 8 };
-            memcpy(&reply[off], public_dns, 4);
-        }
-    }
-    off += 4;
-
-    /* Router: with the portal active, announce the Host so NCSI can run its
-     * connectivity probe through this interface. */
-    {
-        uint8_t p_enabled, p_mode, p_ip[4];
-        ECM_IPConfig_GetPortal(&p_enabled, &p_mode, p_ip);
-        if (p_enabled && p_mode == 1u) {
-            reply[off++] = NCM_DHCP_OPT_ROUTER;
-            reply[off++] = 0x04;
-            memcpy(&reply[off], ncm_host_ip, 4);
             off += 4;
         }
     }
+
+    /* Deliberately no router option.  This port is a side channel for file
+     * transfer, not an uplink: the moment we hand out a default gateway the
+     * target routes its whole internet session into the dongle and loses
+     * the Wi-Fi path it was already using.  Everything the target needs
+     * from us lives in the same /24, so the on-link route is enough. */
 
     /* End option */
     reply[off++] = NCM_DHCP_OPT_END;
@@ -2901,6 +2895,14 @@ static uint8_t handle_target_frame(const uint8_t *data, uint16_t len)
 
     eth_type = (uint16_t)(data[12] << 8) | data[13];
 
+    /* DHCP first.  A DISCOVER is an IPv4 broadcast, so the discovery relay
+     * below would forward it to the Host and return before the local DHCP
+     * server ever saw it; the target then falls back to an APIPA address
+     * and never becomes reachable. */
+    if (handle_target_dhcp_packet(data, len)) {
+        return 1;
+    }
+
     /* Windows sends WS-Discovery probes to 239.255.255.250 (and ff02::c)
      * and NetBIOS name queries to the broadcast address. These must reach
      * the Host before it can appear in the Windows Network view. */
@@ -2919,14 +2921,10 @@ static uint8_t handle_target_frame(const uint8_t *data, uint16_t len)
     /* Handle IPv4 */
     if (eth_type == NCM_ETH_TYPE_IPV4) {
         /* Feed the frame to an active BLE-Eth tunnel first: target TCP
-         * responses and ICMP echo replies terminate here, everything else
-         * (DHCP, pings for the device itself) falls through to the local
-         * handlers below. */
+         * responses and ICMP echo replies terminate here; pings aimed at
+         * the device itself fall through to the local handler below. */
         if (BLE_Eth_HandleTargetFrame(data, len) && g_ble_tx_event_cb) {
             g_ble_tx_event_cb();
-        }
-        if (handle_target_dhcp_packet(data, len)) {
-            return 1;
         }
         if (handle_target_icmp_packet(data, len)) {
             return 1;
