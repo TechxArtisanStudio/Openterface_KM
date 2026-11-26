@@ -350,6 +350,39 @@ again — from the second connection every command answers, and
   (`CMD_ERROR`) because that image predates the command, so "silence" and
   "error frame" point at different causes
 
+`the link connects but nothing answers, and mtu_size reads 60`
+
+Check `client.mtu_size` before blaming the firmware. A healthy link on this unit
+negotiates **247**; if it reports **60**, every application write is being dropped
+and no notification will ever arrive — `INFO`, `PING` and `0x25` all time out
+together, with an empty frame list, while `connect()` still succeeds and the
+services (and all characteristic properties) resolve normally.
+
+This is a host-side stale identity, not a device fault. Right after a previous
+connection is torn down, macOS can surface the same unit under a *second*
+`CBPeripheral` UUID, without the bond association and therefore without the MTU
+exchange. Scanning again a few seconds later returns the original UUID and MTU
+247, and everything works:
+
+- rule of thumb: **MTU 60 means retry, not reflash** — reconnect (or rescan) and
+  the same commands answer
+- `blueutil --paired` keeps showing the correct address and `paired` throughout,
+  and `blueutil --info <address>` can simultaneously claim `not paired`, so
+  neither output is a reliable verdict here; trust `mtu_size` instead
+- the two silent failures differ in what preceded them: this one follows a
+  reconnect on a bonded unit, while the first-connection-after-flash case above
+  follows an erase
+- cheap guard in a test loop:
+
+  ```python
+  client = BleakClient(dev, timeout=25)
+  await client.connect()
+  if client.mtu_size < 100:
+      await client.disconnect()
+      await asyncio.sleep(5)
+      continue  # retry, do not raise
+  ```
+
 `ERROR: BLE link disconnected while proxy was running`
 
 - the SSH path is working, but repeated sessions can still hit intermittent BLE disconnects

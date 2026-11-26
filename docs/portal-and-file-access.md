@@ -253,6 +253,7 @@ This is the only auto-open path that installs nothing on the target.
 | Share prompts for credentials | guest SMB blocked | `AllowInsecureGuestAuth = 1` |
 | Flash fails mid-write, `error -71` | hub dropped the device | root port; xHCI unbind/bind |
 | BLE connect fails with `Peer removed pairing information` after flashing | the host kept its bond, the reflashed device lost its half | forget the device on the host, then re-scan and re-pair — see `ble-eth-ssh-usage.md` §Common Failures |
+| `0x25` gets no reply and `mtu_size` reads 60 | host attached to a stale duplicate identity after a reconnect | retry or rescan; a healthy link reports MTU 247 — see `ble-eth-ssh-usage.md` §Common Failures |
 
 ---
 
