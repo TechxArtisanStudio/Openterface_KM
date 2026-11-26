@@ -108,6 +108,55 @@ Blank UIDs (all `0x00` or all `0xFF`, seen on engineering samples) fall back to
 the legacy fixed values, so such a unit behaves exactly like the pre-UID
 firmware instead of shipping a degenerate address.
 
+### 4.2 Where the entropy actually comes from
+
+The value is real, not assumed. Read back through the ISP bootloader:
+
+```
+$ wchisp info
+Chip: CH32V208GBU6[0x8319] (Code Flash: 128KiB)
+Chip UID: A5-33-B4-10-53-5C-AC-A0
+BTVER(bootloader ver): 02.80
+```
+
+The bootloader exposes 8 of the 12 UID bytes (its `0x11` ESIG response carries
+flash size plus two 32-bit UID words); the firmware reads all three words at
+`0x1FFFF7E8`. Two consequences matter:
+
+* **This block is not a MAC address.** The first byte `0xA5` is `1010 0101`:
+  the multicast bit (bit 0) is set and the local bit is set, so it is not a
+  valid unicast address. The SDK's `FLASH_GetMACAddress()` reads this same
+  offset — on CH32V208 it would hand back a multicast address, which is why
+  the firmware hashes the block instead of copying six bytes out of it. (The
+  function is a leftover from the Ethernet-capable siblings.)
+* **Hashing is the only option.** There is no vendor-assigned, per-chip MAC to
+  reuse, so the address has to be derived — hence `02:` plus a hash.
+
+The hash is 32 bits, so the budget is easy to state. Two specific units
+collide with probability 1/2³² ≈ 2.3·10⁻¹⁰ — two dongles on one desk is not a
+risk. Fleet-wide the birthday bound applies, but a collision only matters if
+both units ever sit on the same layer-2 segment:
+
+| Units shipped | Chance some pair shares a hash |
+|---|---|
+| 1 000 | 0.012 % |
+| 10 000 | 1.2 % |
+| 50 000 | 25 % |
+| 77 000 | 50 % |
+
+`02:` keeps every derived address inside the locally-administered block, so it
+cannot collide with any vendor-assigned address at all; the birthday table
+above is the only way a collision can arise, plus the two operational cases:
+
+* a unit with a blank UID falls back to the legacy fixed address (§4.1), so
+  every such unit is identical again — engineering samples only, but worth
+  knowing;
+* re-marked or cloned dies that share a UID, which no firmware can detect.
+
+Only one unit was measured, so per-chip uniqueness rests on WCH's "96-bit
+unique ID" guarantee rather than on our own comparison. A second unit would
+settle it: flash it and compare `Chip UID`.
+
 Because the MAC is no longer predictable, the host-side helper scripts match
 the *shape* `02:xx:xx:xx:xx:01` instead of a literal address:
 `tools/find_host_nic.sh` is the single place that does this, and

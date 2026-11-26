@@ -25,10 +25,11 @@
  *   rr      role.  Hard-coded per role so the four addresses of a unit are
  *           distinct by construction (see mac_uid.h for why that matters).
  *
- * Two units collide only if the 32-bit hash collides; that is a birthday
- * problem at ~65k units, and in practice it cannot even be observed, because
- * each bridge link is a point-to-point cable and the same unit never uses one
- * role on both ends.
+ * Two units collide only if the 32-bit hash collides: 1/2^32 per pair, a
+ * birthday problem only at ~77k units.  A collision also has to be observed
+ * to matter, i.e. both units on one layer-2 segment, and each bridge link is
+ * a point-to-point cable.  The remaining hole is the blank-UID fallback below,
+ * which still makes affected units identical.
  *
  * BLANK UID
  * ---------
@@ -39,9 +40,13 @@
 
 #include "mac_uid.h"
 
-/* 96-bit unique ID.  Same ESIG region the SDK's FLASH_GetMACAddress() reads,
- * so it is valid on CH32V20x (this part is CH32V20x_D8W).  Volatile because
- * it is a read-only system area, not RAM. */
+/* 96-bit unique ID.  Measured on a CH32V208GBU6: A5-33-B4-10-53-5C-AC-A0 (the
+ * ISP bootloader exposes the first eight bytes).  Note that this is NOT a MAC:
+ * 0xA5 has the multicast bit set.  The SDK's FLASH_GetMACAddress() reads the
+ * same offset and would therefore return a multicast address on this part --
+ * it is a leftover from the Ethernet-capable siblings, so the bytes have to be
+ * hashed rather than copied.  Volatile because it is a read-only system area,
+ * not RAM. */
 #define MAC_UID_BASE      0x1FFFF7E8u
 #define MAC_UID_WORDS     3u
 #define MAC_UID_BYTES     (MAC_UID_WORDS * 4u)   /* 12 */
