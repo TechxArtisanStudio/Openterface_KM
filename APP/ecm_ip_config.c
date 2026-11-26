@@ -206,6 +206,15 @@ void ECM_IPConfig_Init(void)
         /* Flash data invalid or uninitialized, use defaults */
         s_ram_cache = ECM_IP_CONFIG_DEFAULT;
     }
+
+    /* Migration: builds before the captive-portal fix could persist
+     * portal_mode = 2 ("hijack every query forever").  That pins the OS in
+     * "captive portal detected" state, so every NCSI poll relaunches its
+     * portal browser -- the Edge/MSN popup storm.  Force greet-once in RAM;
+     * the corrected value is persisted the next time any field is saved. */
+    if (s_ram_cache.portal_mode > 1u) {
+        s_ram_cache.portal_mode = 1u;
+    }
 }
 
 void ECM_IPConfig_Get(ECM_IPConfig_t *config)
