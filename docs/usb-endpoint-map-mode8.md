@@ -245,7 +245,9 @@ Single-datagram NTBs, 2048 B maximum. Header is **12** bytes, not 14:
 NDP at `wNdpIndex`: `"NCM0"` signature, `wLength`, `wNextNdpIndex = 0`, then one
 `(wDatagramIndex, wDatagramLength)` entry and a `(0, 0)` terminator. Frames below
 60 bytes are zero-padded, and the datagram length covers that padding; payload
-start is 4-byte aligned.
+start is 4-byte aligned. `NCM_NDP_MAX_DATAGRAMS = 4` exists in `ncm_bridge.h`,
+but `NCM_BuildNtb()` always emits a single datagram, so the effective limit today
+is one frame per NTB.
 
 Parameters advertised in `GET_NTB_PARAMETERS`:
 
