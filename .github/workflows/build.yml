@@ -47,6 +47,11 @@ env:
   # The BLE-Eth tunnel on this branch runs over the CDC-NCM bridge (mode 8);
   # build KeyMod Plus with the same flags used for on-device validation.
   KEYMOD_PLUS_MODE: ' USB_WORK_MODE=hid_ncm_bridge'
+  # The shipping KVMGo image is mode 7 (hid_acm_ecm_bridge), but the BLE-Eth
+  # tunnel is validated on hardware running mode 8 on board version 1. That
+  # combination is compiled only by this extra step — without it, mode 8 board-1
+  # descriptor/endpoint changes reach the bench untested by CI.
+  KVMGO_MODE8: ' USB_WORK_MODE=hid_ncm_bridge'
 
 jobs:
   build:
@@ -125,6 +130,32 @@ jobs:
         Copy-Item "${{ env.BUILD_DIR }}\openterface-km-firmware.elf" "${{ env.OUTPUT_DIR }}\openterface-km-firmware-kvmgo.elf"
         Copy-Item "${{ env.BUILD_DIR }}\openterface-km-firmware.map" "${{ env.OUTPUT_DIR }}\openterface-km-firmware-kvmgo.map"
         Copy-Item "${{ env.BUILD_DIR }}\openterface-km-firmware.siz" "${{ env.OUTPUT_DIR }}\openterface-km-firmware-kvmgo.siz"
+
+    - name: Build KVMGo mode 8 (board 1, CDC-NCM bridge)
+      run: |
+        echo "Building KVMGo with the CDC-NCM bridge (mode 8)..."
+
+        # Build
+        cd build
+        $env:PATH = "C:\tools\risc-none-embed-gcc\bin;" + $env:PATH
+        $env:RISC_COMPILER_PATH = "C:\tools\risc-none-embed-gcc"
+        make clean
+        make --no-print-directory PRODUCT=kvmgo${{ env.KVMGO_MODE8 }} show-config
+        make -j4 PRODUCT=kvmgo${{ env.KVMGO_MODE8 }}${{ env.PROFILES_OVERRIDE }}${{ env.BLE_OVERRIDE }} all
+        if ($LASTEXITCODE -ne 0) {
+          Write-Host "✗ KVMGo mode 8 build failed with exit code $LASTEXITCODE" -ForegroundColor Red
+          exit 1
+        }
+        riscv-none-embed-objcopy -O binary "openterface-km-firmware.elf" "openterface-km-firmware.bin"
+        riscv-none-embed-size --format=berkeley openterface-km-firmware.elf | Tee-Object -FilePath openterface-km-firmware.siz
+        Write-Host "✓ KVMGo mode 8 build succeeded" -ForegroundColor Green
+
+        # Copy artifact with version suffix to output directory
+        Copy-Item "${{ env.BUILD_DIR }}\openterface-km-firmware.hex" "${{ env.OUTPUT_DIR }}\openterface-km-firmware-kvmgo-mode8.hex"
+        Copy-Item "${{ env.BUILD_DIR }}\openterface-km-firmware.bin" "${{ env.OUTPUT_DIR }}\openterface-km-firmware-kvmgo-mode8.bin"
+        Copy-Item "${{ env.BUILD_DIR }}\openterface-km-firmware.elf" "${{ env.OUTPUT_DIR }}\openterface-km-firmware-kvmgo-mode8.elf"
+        Copy-Item "${{ env.BUILD_DIR }}\openterface-km-firmware.map" "${{ env.OUTPUT_DIR }}\openterface-km-firmware-kvmgo-mode8.map"
+        Copy-Item "${{ env.BUILD_DIR }}\openterface-km-firmware.siz" "${{ env.OUTPUT_DIR }}\openterface-km-firmware-kvmgo-mode8.siz"
 
     - name: Build Mini-KVM v1.2 (version 2)
       run: |
@@ -239,6 +270,16 @@ jobs:
         path: |
           ${{ env.OUTPUT_DIR }}\openterface-km-firmware-kvmgo.hex
           ${{ env.OUTPUT_DIR }}\openterface-km-firmware-kvmgo.bin
+
+    - name: Upload KVMGo mode 8 firmware
+      uses: actions/upload-artifact@v4
+      with:
+        name: openterface-km-firmware-kvmgo-mode8
+        if-no-files-found: error
+        retention-days: 7
+        path: |
+          ${{ env.OUTPUT_DIR }}\openterface-km-firmware-kvmgo-mode8.hex
+          ${{ env.OUTPUT_DIR }}\openterface-km-firmware-kvmgo-mode8.bin
 
     - name: Upload Mini-KVM v1.2 firmware
       uses: actions/upload-artifact@v4
