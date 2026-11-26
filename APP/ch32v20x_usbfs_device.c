@@ -253,7 +253,7 @@ static uint8_t USBFS_CDC_NCM_NtbParams[28] = {
     0x00, 0x00,  /* wNdpInPayloadRemainder: 0 */
     0x04, 0x00,  /* wNdpInAlignment: 4 */
     0x00, 0x00,  /* wPadding1 (must be present: fixed layout) */
-    0x00, 0x08, 0x00, 0x00,  /* dwNtbOutMaxSize: 2048 bytes (must cover s_target_rx_buf) */
+    0x00, 0x08, 0x00, 0x00,  /* dwNtbOutMaxSize: 2048 bytes (sized for s_target_rx_buf, the NTB reassembly buffer -- NOT an endpoint buffer) */
     0x04, 0x00,  /* wNdpOutDivisor: 4 */
     0x00, 0x00,  /* wNdpOutPayloadRemainder: 0 */
     0x04, 0x00,  /* wNdpOutAlignment: 4 */
@@ -330,13 +330,28 @@ __attribute__((aligned(4))) UINT8 EP1_DatabufHD[64 + 64]; //ep1_out(64)+ep1_in(6
 __attribute__((aligned(4))) UINT8 EP2_DatabufHD[64 + 64]; //ep2_out(64)+ep2_in(64)
 __attribute__((aligned(4))) UINT8 EP4_DatabufHD[64 + 64]; //ep4_out(64)+ep4_in(64)
 #if USB_WORK_MODE_COMPILES_BRIDGE_NCM
-/* NCM bridge needs larger buffers for NTB.
- * Using 2048 bytes to match Linux cdc_ncm driver's minimum requirement. */
-__attribute__((aligned(4))) UINT8 EP5_DatabufHD[2048];    //ep5_out NTB RX
-__attribute__((aligned(4))) UINT8 EP6_DatabufHD[64 + 64]; //ep6 notification
-/* EP7 is bidirectional (TX|RX enabled), so copy-mode TX data starts at
- * offset 64; leave room for a full-size NTB after that offset. */
-__attribute__((aligned(4))) UINT8 EP7_DatabufHD[64 + 2048]; //ep7_in NTB TX
+/* NCM data endpoints are 64-byte bulk pipes. That is not a preference, it is
+ * what the descriptors say: MyNcmCfgDescr declares wMaxPacketSize 0x40 for
+ * both EP5 OUT and EP7 IN.  UEP5_DMA therefore holds exactly ONE received
+ * packet -- the ISR passes USBFSD->RX_LEN (<= 64) to
+ * NCM_Bridge_TargetRxDone(), and ncm_bridge.c reassembles the NTB from those
+ * 64-byte packets into s_target_rx_buf.  Nothing ever DMAs a whole NTB.
+ *
+ * This block used to allocate 2048 bytes per endpoint "to match Linux
+ * cdc_ncm's minimum requirement".  That minimum is dwNtbOutMaxSize, a size
+ * negotiated in the NCM functional descriptor (usb_prop.c, still 2048); it
+ * says how large an NTB the host may build, not how much the endpoint buffer
+ * must hold.  Allocating it here cost 3968 bytes of .bss for nothing, which
+ * mattered on the BLE builds where RAM is ~95% full.
+ *
+ * EP7 is bidirectional (TX|RX enabled) and single-buffered (no UEP_BUF_MOD),
+ * so USBFS_Endp_DataUp() copy-loads TX data at offset 64 -- see the
+ * buf_load_offset == 64 branch there.  Both directions hold one packet.
+ */
+#define NCM_EP_PKT_SIZE  64
+__attribute__((aligned(4))) UINT8 EP5_DatabufHD[NCM_EP_PKT_SIZE];            //ep5_out RX (one packet)
+__attribute__((aligned(4))) UINT8 EP6_DatabufHD[64 + 64];                    //ep6 notification
+__attribute__((aligned(4))) UINT8 EP7_DatabufHD[NCM_EP_PKT_SIZE + NCM_EP_PKT_SIZE]; //ep7_out(64)+ep7_in(64)
 #else
 __attribute__((aligned(4))) UINT8 EP5_DatabufHD[64 + 64]; //ep5_out(64)+ep5_in(64)
 __attribute__((aligned(4))) UINT8 EP6_DatabufHD[64 + 64]; //ep6_out(64)+ep6_in(64)

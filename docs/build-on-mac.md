@@ -77,12 +77,15 @@ standard `interrupt` form otherwise. Use `WCH_IRQ_FAST` for any new handler; do 
 attribute literal.
 
 **2. `.bss` grows by roughly 20 KB.** GCC 15 gives each inlined copy of a block-scope `static`
-array its own storage, so `mode 8` (NCM) with BLE no longer fits in the 64 KB RAM, and even the
-no-BLE image lands within ~100 bytes of the stack:
+array its own storage, so a `mode 8` (NCM) + BLE image used to overflow the 64 KB RAM. It links
+now, at 58 956 B of RAM (89.96%) — the endpoint-buffer fix in
+[`usb-endpoint-map-mode8.md`](usb-endpoint-map-mode8.md#23-buffer-layout) reclaimed 3968 B,
+which is what the 20 KB inflation was eating:
 
 ```bash
-# verified locally on 2026-11-26 (GCC 15.2, Apple Silicon), serial + NIC + ping OK
-./build.sh --no-ble --make-arg USB_WORK_MODE=hid_ncm_bridge \
+# links locally on 2026-11-27 (GCC 15.2, Apple Silicon); runtime not re-verified from this
+# toolchain with BLE on — flash only for bring-up
+./build.sh --make-arg USB_WORK_MODE=hid_ncm_bridge \
            --make-arg USB_WORK_MODE_RUNTIME_PROFILES=0 keymod-plus
 ```
 
@@ -90,12 +93,12 @@ Two flags matter:
 
 | Flag | Why |
 |---|---|
-| `--no-ble` | BLE costs ~14 KB of RAM; without it mode 8 fits under GCC 15 |
 | `USB_WORK_MODE_RUNTIME_PROFILES=0` | with `1` (the default) a stale mode record in flash wins over the compiled mode: the image enumerates but exposes the wrong function, e.g. no NIC |
+| `--no-ble` | drops ~14 KB and leaves a lot more slack; use it when you only need to test the USB function, not the radio |
 
-Images built this way are for bring-up only. Ship builds must come from the 8.2 toolchain:
+Images built this way are for bring-up only. Ship builds must still come from the 8.2 toolchain:
 it is the only one that produces the fast-interrupt code the firmware was written for, and the
-only one where the full BLE + NCM image fits.
+only one whose RAM figures are meaningful.
 
 ## Flash Tool
 

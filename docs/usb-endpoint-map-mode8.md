@@ -61,9 +61,9 @@ target port.
 | EP2 | IN | Interrupt | 8 | `USBFS_EP2_Buf[64]` | IF1 HID relative mouse | interval 1 ms |
 | EP3 | IN | Interrupt | 8 | `USBFS_EP3_Buf[64]` | IF2 HID absolute mouse | interval 1 ms |
 | EP4 | IN | Interrupt | 8 | `USBFS_EP4_Buf[64]` | IF3 HID multimedia | interval 10 ms |
-| EP5 | OUT | Bulk | 64 | `EP5_DatabufHD[2048]` | IF5 NCM data | target → device NTBs |
+| EP5 | OUT | Bulk | 64 | `EP5_DatabufHD[64]` | IF5 NCM data | target → device NTBs |
 | EP6 | IN | Interrupt | 16 | `EP6_DatabufHD[64+64]` | IF4 NCM comm | link notifications |
-| EP7 | IN | Bulk | 64 | `EP7_DatabufHD[64+2048]` | IF5 NCM data | device → target NTBs |
+| EP7 | IN | Bulk | 64 | `EP7_DatabufHD[64+64]` | IF5 NCM data | device → target NTBs |
 
 EP7 is *configured* as bidirectional (TX|RX) even though nothing ever arrives on
 its OUT direction; see 2.2.
@@ -87,19 +87,29 @@ USBFS does not use PMA: every endpoint buffer is ordinary SRAM, and the TX/RX
 halves of one endpoint live in the same array:
 
 ```
-EP5_DatabufHD[2048]        EP6_DatabufHD[64+64]        EP7_DatabufHD[64+2048]
- +0     RX window 2048      +0  TX half 64              +0  RX half 64 (unused)
-                            +64 unused                  +64 TX half 2048
+EP5_DatabufHD[64]          EP6_DatabufHD[64+64]        EP7_DatabufHD[64+64]
+ +0     RX packet 64        +0  TX half 64              +0  RX half 64 (unused)
+                            +64 unused                  +64 TX half 64
 ```
 
-* **EP5 (RX only)** — the whole 2048 B array is the receive window, because an
-  NTB may be up to `NCM_NTB_MAX_SIZE` (2048 B).
+* **EP5 (RX only)** — holds exactly one bulk packet. The endpoint is 64 bytes
+  wide (`wMaxPacketSize` `0x40` in the NCM data descriptor), so every OUT
+  interrupt delivers at most 64 bytes in `USBFSD->RX_LEN`. The NTB is
+  reassembled from those packets by `NCM_Bridge_TargetRxDone()` into
+  `s_target_rx_buf`, which is where the 2048-byte `NCM_NTB_MAX_SIZE` lives.
+  `dwNtbOutMaxSize = 2048` is a *negotiated* limit on the NTB the host may
+  build; it never means one DMA of 2048 bytes.
 * **EP6 (TX only)** — TX starts at `+0`; notification packets are 8 or 16 bytes,
   so the second 64-byte half is unused slack kept for symmetry with EP7.
 * **EP7 (TX + RX)** — `USBFS_Endp_DataUp()` adds a 64-byte offset whenever both
-  TX_EN and RX_EN are set (without `BUF_MOD`), so the TX half must be large
-  enough for a full NTB: hence `64 + 2048`. Writing an NTB at `+0` here would
-  land on the RX half and truncate the transfer.
+  TX_EN and RX_EN are set (without `BUF_MOD`), so the TX half sits at `+64` and
+  only needs one packet: the caller chunks the NTB at
+  `NCM_BRIDGE_USBFS_PACKET_SIZE` (64) before each call.
+
+Until this change both arrays were allocated as 2048 bytes ("one NTB") on the
+mistaken reading that a whole NTB arrives in a single DMA. It does not, and the
+two arrays were costing 3968 bytes of `.bss` — a third of the headroom on the
+BLE build, where RAM was 95% full.
 
 ### 2.4 Interface alt setting
 
@@ -135,8 +145,8 @@ HID, ACM or UAC endpoints exist on this controller in mode 8.
 
 PMA holds one 64-byte packet per direction, so an NTB leaves the device in
 64-byte chunks (`host_tx_feed()`), each copied from `s_host_ntb_tx` into the EP4
-buffer. The USBFS path chunks at 64 bytes as well, but its TX half is a 2048-byte
-SRAM window, so the copy is source-to-endpoint-buffer instead of source-to-PMA.
+buffer. The USBFS path chunks at 64 bytes as well, and its TX half is a 64-byte
+SRAM slot, so the copy is source-to-endpoint-buffer instead of source-to-PMA.
 
 ---
 
