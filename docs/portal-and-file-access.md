@@ -204,6 +204,37 @@ on the target:
 | `2` enable | `[2][0\|1]` | arm / disarm the launcher |
 | `3` status | `[3]` | reply `[status][enabled][url_len][state][trig]`, 5 bytes |
 
+`state` is one byte of `launch_state_t` (`APP/hid_launcher.c`). The machine
+moves one state per 40 ms edge, so a 7-character URL finishes in about 1.2 s:
+
+| Value | State | Meaning |
+|---|---|---|
+| 0 | `idle` | nothing running (armed or not) |
+| 1–2 | `win_down` / `win_up` | the Win key edge for `Win+R` |
+| 3–4 | `r_down` / `r_up` | the `R` keystroke |
+| 5 | `wait_run` | waiting for the Run dialog |
+| 6–7 | `char_down` / `char_up` | typing the URL, one character per cycle |
+| 8–9 | `enter_down` / `enter_up` | confirming |
+| 10 | `done` | finished; `trig` increments here |
+
+There is no "typing" state and no `done` at 8 — the reply carries the raw enum,
+which is why a host-side map that stops at 8 reports `state=10` as unknown.
+
+Verified on hardware (2026-11-27, KVM-GO, serial `02A0F2DFEE01`, mode 8 + BLE):
+
+```
+0x25 [3]                -> 00 00 00 00 00    idle, trig 0
+0x25 [1][7]"notepad"    -> 00
+0x25 [2][1]             -> 00
+0x25 [3]   ~0.6 s later -> 00 01 07 05 00    wait_run
+0x25 [3]   ~1.2 s later -> 00 01 07 0A 01    done, trig 1
+```
+
+Before `fa50399` the reply was cut to 4 bytes, so `trig` never reached the host.
+A build that predates the command answers `57 AB 00 D0 00 D2` (`CMD_ERROR`)
+instead — if you see that, check you are talking to the unit under test and not
+another one advertising in range.
+
 This is the only auto-open path that installs nothing on the target.
 
 ---

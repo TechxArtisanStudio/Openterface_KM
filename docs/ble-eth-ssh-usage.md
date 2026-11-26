@@ -334,6 +334,22 @@ Scanning still lists the device while the bond is stale, so a successful scan is
 not proof that the connection will succeed. If several units are in range, also
 check that `--ble-addr` points at the one under test before deleting anything.
 
+`the first command after flashing gets no reply at all`
+
+The unit has just been written by `wchisp`, so neither side holds a bond. The
+first connection spends its opening seconds on SMP pairing; ATT writes issued in
+that window are acknowledged by the stack but never reach the application, so
+`0x1E` (`PING`) and `0x25` both come back empty while `connect()` reports
+success and the services resolve normally. Pair once, drop the link, connect
+again — from the second connection every command answers, and
+`blueutil --paired` now lists the unit under its own address:
+
+- symptom is silent, not an error: `write_gatt_char()` returns, no notification
+  ever arrives, and a `wait_for` timeout is all you see
+- a wrong unit in range looks different — it answers `57 AB 00 D0 00 D2`
+  (`CMD_ERROR`) because that image predates the command, so "silence" and
+  "error frame" point at different causes
+
 `ERROR: BLE link disconnected while proxy was running`
 
 - the SSH path is working, but repeated sessions can still hit intermittent BLE disconnects
