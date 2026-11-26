@@ -13,6 +13,7 @@
 
 /*******************************************************************************/
 /* Header File */
+#include "wch_irq.h"
 #include "include/ch32v20x_usbfs_device.h"
 #include "usbd_composite_km.h"
 #include "peripheral.h"
@@ -315,7 +316,7 @@ extern volatile uint8_t g_target_ncm_notify_state;
 
 /******************************************************************************/
 /* Interrupt Service Routine Declaration*/
-void USBFS_IRQHandler(void) __attribute__((interrupt("WCH-Interrupt-fast")));
+void USBFS_IRQHandler(void) WCH_IRQ_FAST;
 #if DEF_USBD_SPEED == DEF_USBD_SPEED_LOW
   #define RepDataLoadLen    8
 #else
@@ -451,7 +452,7 @@ static const uint8_t MsOsCompatIdDesc[40] = {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00                      /* reserved[6]   */
 };
 
-void USBFS_IRQHandler(void) __attribute__((interrupt("WCH-Interrupt-fast")));
+void USBFS_IRQHandler(void) WCH_IRQ_FAST;
 /*********************************************************************
  * @fn      USBFS_RCC_Init
  *

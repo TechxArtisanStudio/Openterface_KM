@@ -9,6 +9,7 @@
 * Attention: This software (modified or not) and binary are used for 
 * microcontroller manufactured by Nanjing Qinheng Microelectronics.
 *******************************************************************************/ 
+#include "wch_irq.h"
 #include "usb_lib.h"
 #include "usb_prop.h"
 #include "usb_desc.h"
@@ -19,8 +20,8 @@
 #include "stdarg.h"		 
 #include "stdio.h"	
 
-void USBWakeUp_IRQHandler(void) __attribute__((interrupt("WCH-Interrupt-fast")));
-void USB_LP_CAN1_RX0_IRQHandler(void) __attribute__((interrupt("WCH-Interrupt-fast")));
+void USBWakeUp_IRQHandler(void) WCH_IRQ_FAST;
+void USB_LP_CAN1_RX0_IRQHandler(void) WCH_IRQ_FAST;
 
 /*******************************************************************************
  * @fn        USBWakeUp_IRQHandler

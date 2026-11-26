@@ -13,6 +13,7 @@
 /*********************************************************************
  * INCLUDES
  */
+#include "wch_irq.h"
 #include "ch32v20x_it.h"
 #include "include/Version_selection.h"
 #ifdef ENABLE_BLE
@@ -22,10 +23,10 @@
 /*********************************************************************
  * LOCAL FUNCTIONS
  */
-void NMI_Handler(void) __attribute__((interrupt("WCH-Interrupt-fast")));
-void HardFault_Handler(void) __attribute__((interrupt("WCH-Interrupt-fast")));
+void NMI_Handler(void) WCH_IRQ_FAST;
+void HardFault_Handler(void) WCH_IRQ_FAST;
 #ifdef ENABLE_BLE
-void BB_IRQHandler(void) __attribute__((interrupt("WCH-Interrupt-fast")));
+void BB_IRQHandler(void) WCH_IRQ_FAST;
 #endif
 
 /*********************************************************************

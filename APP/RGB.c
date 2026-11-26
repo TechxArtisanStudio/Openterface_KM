@@ -29,6 +29,7 @@
  *   - PC13 is a feedback output (not PWM), reset LOW at init.
  */
 
+#include "wch_irq.h"
 #include "RGB.h"
 #include "sd_switch.h"
 #include <math.h>
@@ -96,7 +97,7 @@ void RGB_TIM_Init(void)
 }
 
 /* TIM2 interrupt: increment the millisecond counter */
-void TIM2_IRQHandler(void) __attribute__((interrupt("WCH-Interrupt-fast")));
+void TIM2_IRQHandler(void) WCH_IRQ_FAST;
 void TIM2_IRQHandler(void)
 {
     if (TIM_GetITStatus(TIM2, TIM_IT_Update) != RESET)

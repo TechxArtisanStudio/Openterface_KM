@@ -12,6 +12,7 @@
 
 /******************************************************************************/
 /* Header file contains */
+#include "wch_irq.h"
 #include "HAL.h"
 
 /*********************************************************************
@@ -114,7 +115,7 @@ void HAL_TimeInit(void)
 }
 
 
-__attribute__((interrupt("WCH-Interrupt-fast")))
+WCH_IRQ_FAST
 void RTCAlarm_IRQHandler(void)
 {
     RTCTigFlag = 1;
