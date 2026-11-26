@@ -324,11 +324,16 @@ without the bond it had before, so it advertises normally yet refuses the
 connection from the machine that flashed it. Re-pairing does not work until the
 stale bond is deleted on the host:
 
-- macOS: System Settings -> Bluetooth -> the device -> *Forget This Device*
-  (`blueutil --unpair <address>`, if installed, does the same), then run the
-  client again; the next `BleEthClient.connect()` pairs from scratch
+- macOS: System Settings -> Bluetooth -> the device -> *Forget This Device*,
+  then run the client again; the next `BleEthClient.connect()` pairs from scratch
 - Windows: Settings -> Bluetooth & devices -> the device -> *Remove device*
 - Linux: `bluetoothctl remove <MAC>`
+
+Do not rely on `blueutil --unpair` on macOS. It is marked EXPERIMENTAL, and on
+macOS 26 it was seen exiting 0 without removing the bond: the device stays in the
+paired list and the next connection fails with the same code. Use the System
+Settings panel, and re-check `blueutil --paired` afterwards to confirm the entry
+is actually gone.
 
 Scanning still lists the device while the bond is stale, so a successful scan is
 not proof that the connection will succeed. If several units are in range, also
