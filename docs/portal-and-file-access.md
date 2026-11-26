@@ -254,6 +254,7 @@ This is the only auto-open path that installs nothing on the target.
 | Flash fails mid-write, `error -71` | hub dropped the device | root port; xHCI unbind/bind |
 | BLE connect fails with `Peer removed pairing information` after flashing | the host kept its bond, the reflashed device lost its half | forget the device on the host, then re-scan and re-pair — see `ble-eth-ssh-usage.md` §Common Failures |
 | `0x25` gets no reply and `mtu_size` reads 60 | host attached to a stale duplicate identity after a reconnect | retry or rescan; a healthy link reports MTU 247 — see `ble-eth-ssh-usage.md` §Common Failures |
+| Bulk transfer works but `ping` loses 40–50% | radio on: the NCM poll loop is sliced by the BLE task (open) | run the same load with BLE off — 0% loss there — see `ble-eth-ssh-usage.md` §Load Behaviour With BLE Enabled |
 
 ---
 

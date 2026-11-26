@@ -301,6 +301,34 @@ Example candidate ladder:
 
 Use at least 3 repeated runs per size before calling it stable.
 
+## Load Behaviour With BLE Enabled
+
+Measured with the Mac as host and a Windows machine as target, one direction
+saturated at a time. Bulk throughput does not care whether the radio is on; the
+cost lands on small packets:
+
+| Measurement | BLE on | BLE off |
+|---|---|---|
+| TCP 8 MiB target -> host | 0.50–0.56 MiB/s | 0.55 MiB/s |
+| TCP 8 MiB host -> target | 0.39–0.40 MiB/s | 0.37 MiB/s |
+| ICMP while host -> target runs flat out | **37.5–50% loss**, RTT 2.7–7.8 ms | 0% loss, RTT 117–214 ms |
+| ICMP while target -> host runs flat out | **10% loss, up to 361 duplicate replies** | 0% loss, no duplicates |
+
+The duplicate replies are not a `ping` artifact: 30 packets on an idle link gave
+0 loss and 0 duplicates, and the same saturation with BLE off produced neither.
+Two separate runs reproduced them (+85 and +361), which points at the bridge
+queuing and re-sending rather than at ICMP. The suspected mechanism is
+`NCM_Bridge_Poll()` being sliced by `TMOS_SystemProcess()` in the main loop, with
+the NCM endpoint dropping and retransmitting at the queue tail. **This is not
+root-caused** — treat the loss as a known cost of running the radio during bulk
+transfers, not as a network misconfiguration to debug.
+
+One observation that has not been reproduced: after a long target -> host 8 MiB
+run followed by an echo test, host -> target fell to 0.07–0.09 MiB/s and stayed
+there across three fresh connections; a power cycle (reflash) restored 0.22–0.40
+MiB/s. If one direction suddenly crawls for no reason, power-cycle the unit
+before investigating anything else.
+
 ## Common Failures
 
 `ERROR: bleak library not installed`
@@ -387,6 +415,23 @@ exchange. Scanning again a few seconds later returns the original UUID and MTU
       await asyncio.sleep(5)
       continue  # retry, do not raise
   ```
+
+`the reply never arrives because the client filters on the wrong opcode`
+
+Every positive response is sent as `cmd | 0x80` (see
+[ble-eth-protocol.md](ble-eth-protocol.md)), so `PING` (`0x1E`) comes back as
+`0x9E` and `INFO` (`0x1F`) as `0x9F`. A client that matches notifications against
+the *request* opcode throws the replies away and reports a timeout with an empty
+buffer — the same silence as the three causes above, with no way to tell them
+apart until you log the raw frames:
+
+```
+57 ab 00 9e 03 01 02 03 a9     PING, payload 01 02 03, answered as 0x9E
+57 ab 00 9f 08 01 02 00 f6 1f 00 00 00 c1   INFO, answered as 0x9F
+```
+
+`0x25` is the trap here: it answers `0xA5`, which *is* `0x25 | 0x80`, so a filter
+derived from the portal example looks correct while `PING` and `INFO` time out.
 
 `ERROR: BLE link disconnected while proxy was running`
 
