@@ -1233,16 +1233,24 @@ static uint8_t handle_dhcp_packet(const uint8_t *frame, uint16_t frame_len)
 #define NCM_PORTAL_GREET_MAX  4u
 #endif
 
+/* Wire-format QNAME for "dns.msftncsi.com": 3 dns / 8 msftncsi / 3 com / root.
+ * NOTE: "msftncsi" is eight characters, so its label length MUST be 8u.  It
+ * was 9u, which made this reference array one byte longer than any real qname;
+ * the length check in dns_name_equals_ci then always failed and the probe was
+ * treated as a generic name -- i.e. always spoofed, exactly like mode 2. */
 static const uint8_t k_ncsi_probe_name[] = {
-    3u, 'd', 'n', 's', 9u, 'm', 's', 'f', 't', 'n', 'c', 's', 'i',
+    3u, 'd', 'n', 's', 8u, 'm', 's', 'f', 't', 'n', 'c', 's', 'i',
     3u, 'c', 'o', 'm', 0u
 };
+typedef char k_ncsi_probe_name_len_check[
+    (sizeof(k_ncsi_probe_name) == 18u) ? 1 : -1];
 static const uint8_t k_ncsi_probe_answer[4] = { 131u, 107u, 255u, 255u };
 
 static volatile uint16_t g_portal_hijacked;
 static volatile uint32_t s_portal_greet_start_ms;
 static volatile uint8_t  s_portal_greet_probes;
 static uint8_t           s_portal_greet_used;
+static uint8_t           s_portal_greet_done;  /* window spent this boot */
 
 /* Restart the greeting window (called when the target side reconnects).
  * Hosts may re-issue SET_INTERFACE(alt=1) every few seconds while they
@@ -1250,9 +1258,12 @@ static uint8_t           s_portal_greet_used;
  * link permanently "captive portal". Only a genuine reconnect re-greets. */
 void NCM_Bridge_PortalGreetRestart(void)
 {
+    if (s_portal_greet_done) {
+        return;                     /* one greeting per power-on, period */
+    }
     if (s_portal_greet_used &&
-        (uint32_t)(systick_ms - s_portal_greet_start_ms) < 30000u) {
-        return;
+        (uint32_t)(systick_ms - s_portal_greet_start_ms) < NCM_PORTAL_GREET_MS) {
+        return;                     /* window still running: do not extend it */
     }
     s_portal_greet_used = 1;
     s_portal_greet_start_ms = systick_ms;
@@ -1370,8 +1381,14 @@ static uint8_t handle_dns_hijack(const uint8_t *data, uint16_t len,
             s_portal_greet_probes < NCM_PORTAL_GREET_MAX) {
             greeting = 1;
             s_portal_greet_probes++;
+            if (s_portal_greet_probes >= NCM_PORTAL_GREET_MAX) {
+                s_portal_greet_done = 1;
+            }
         }
         if (!greeting) {
+            /* Window is over for this boot: answer truthfully forever, so
+             * NCSI settles and the portal browser stops relaunching. */
+            s_portal_greet_done = 1;
             answer_ip = k_ncsi_probe_answer;
         }
     }
