@@ -344,6 +344,11 @@ These are consequences of the design, not bugs to file:
   root port when possible; `xhci_hcd` unbind/bind recovers the controller
   without a reboot.
 * **One greeting per power-on.** A replug does not re-arm it (§5).
+* **Saturation with the radio on drops packets.** `NCM_Bridge_Poll()` runs in the
+  same loop as `TMOS_SystemProcess()` and owns only a 2-frame queue; enabling
+  BLE costs 37.5–50% of ICMP in the fully serialised direction under load. The
+  mechanism, the per-direction asymmetry and the fix options are in
+  [ncm-tmos-scheduling.md](ncm-tmos-scheduling.md).
 
 ---
 

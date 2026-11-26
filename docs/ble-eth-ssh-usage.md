@@ -317,11 +317,20 @@ cost lands on small packets:
 The duplicate replies are not a `ping` artifact: 30 packets on an idle link gave
 0 loss and 0 duplicates, and the same saturation with BLE off produced neither.
 Two separate runs reproduced them (+85 and +361), which points at the bridge
-queuing and re-sending rather than at ICMP. The suspected mechanism is
-`NCM_Bridge_Poll()` being sliced by `TMOS_SystemProcess()` in the main loop, with
-the NCM endpoint dropping and retransmitting at the queue tail. **This is not
-root-caused** — treat the loss as a known cost of running the radio during bulk
-transfers, not as a network misconfiguration to debug.
+queuing and re-sending rather than at ICMP.
+
+The **loss** is now explained and is structural, not a misconfiguration: there is
+no preemption between `NCM_Bridge_Poll()` and `TMOS_SystemProcess()` at all —
+they are serialised in one main loop, the BLE stack runs first and to completion,
+and the NCM side owns only a 2-frame queue (~7.8 ms of slack at these rates).
+Enabling the radio moves the tail drop into the device, which is why loss rises
+while RTT *falls*. See [ncm-tmos-scheduling.md](ncm-tmos-scheduling.md) for the
+loop order, the interrupt inventory, the per-direction asymmetry that explains
+why host -> target loses 4x more than target -> host, and the fix options.
+
+The **duplicates** are still open. The suspect is the unguarded re-entry into
+`NCM_Bridge_Poll()` from the EP4 IN ISR; that document records the test that
+would settle it.
 
 One observation that has not been reproduced: after a long target -> host 8 MiB
 run followed by an echo test, host -> target fell to 0.07–0.09 MiB/s and stayed

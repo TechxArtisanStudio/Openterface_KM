@@ -80,6 +80,7 @@ for the WCH MounRiver Studio flow.
 | Document | Status | Covers |
 |---|---|---|
 | **[ncm-bridge.md](ncm-bridge.md)** | **Canonical** | address plan, data path, DHCP options, one-shot DNS greeting, diagnostics, limits |
+| [ncm-tmos-scheduling.md](ncm-tmos-scheduling.md) | Reference | how the bridge and the BLE stack share the main loop, why loss appears with the radio on, fix options |
 | **[portal-and-file-access.md](portal-and-file-access.md)** | **Canonical** | host services (nginx/dnsmasq/file manager/wsdd), WebDAV, SMB, zero-install contract |
 | [cdc-ncm-implementation-plan.md](cdc-ncm-implementation-plan.md) | Superseded | original CDC-NCM port plan (descriptor, NTB, memory budget) |
 | [ncm-descriptor-debug.md](ncm-descriptor-debug.md) | Superseded | NCM descriptor subtype, `GET_NTB_PARAMETERS`, MAC string fixes |
