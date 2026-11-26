@@ -221,6 +221,7 @@ This is the only auto-open path that installs nothing on the target.
 | *Network* view is empty, UNC works | no gateway ⇒ "unidentified network" ⇒ Public profile | expected; use `\\KEYMOD-HOST` |
 | Share prompts for credentials | guest SMB blocked | `AllowInsecureGuestAuth = 1` |
 | Flash fails mid-write, `error -71` | hub dropped the device | root port; xHCI unbind/bind |
+| BLE connect fails with `Peer removed pairing information` after flashing | the host kept its bond, the reflashed device lost its half | forget the device on the host, then re-scan and re-pair — see `ble-eth-ssh-usage.md` §Common Failures |
 
 ---
 

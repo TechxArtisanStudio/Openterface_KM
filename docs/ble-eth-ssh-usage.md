@@ -316,6 +316,24 @@ python3 -m pip install -r tools/requirements.txt
 - confirm the device is powered and advertising
 - pass `--ble-addr` if scanning by name is unreliable
 
+`failed to connect: Peer removed pairing information (CBErrorDomain Code=14)`
+
+The host still holds a bond, but the device no longer has the matching keys.
+`wchisp flash` erases and rewrites the whole code flash, and the unit comes back
+without the bond it had before, so it advertises normally yet refuses the
+connection from the machine that flashed it. Re-pairing does not work until the
+stale bond is deleted on the host:
+
+- macOS: System Settings -> Bluetooth -> the device -> *Forget This Device*
+  (`blueutil --unpair <address>`, if installed, does the same), then run the
+  client again; the next `BleEthClient.connect()` pairs from scratch
+- Windows: Settings -> Bluetooth & devices -> the device -> *Remove device*
+- Linux: `bluetoothctl remove <MAC>`
+
+Scanning still lists the device while the bond is stale, so a successful scan is
+not proof that the connection will succeed. If several units are in range, also
+check that `--ble-addr` points at the one under test before deleting anything.
+
 `ERROR: BLE link disconnected while proxy was running`
 
 - the SSH path is working, but repeated sessions can still hit intermittent BLE disconnects
