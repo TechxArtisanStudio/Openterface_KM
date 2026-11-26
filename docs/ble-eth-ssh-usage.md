@@ -304,33 +304,47 @@ Use at least 3 repeated runs per size before calling it stable.
 ## Load Behaviour With BLE Enabled
 
 Measured with the Mac as host and a Windows machine as target, one direction
-saturated at a time. Bulk throughput does not care whether the radio is on; the
-cost lands on small packets:
+saturated at a time. Bulk throughput does not care whether the radio is on:
 
-| Measurement | BLE on | BLE off |
+| Measurement | Radio on | Radio off (no BLE link) |
 |---|---|---|
 | TCP 8 MiB target -> host | 0.50–0.56 MiB/s | 0.55 MiB/s |
-| TCP 8 MiB host -> target | 0.39–0.40 MiB/s | 0.37 MiB/s |
-| ICMP while host -> target runs flat out | **37.5–50% loss**, RTT 2.7–7.8 ms | 0% loss, RTT 117–214 ms |
-| ICMP while target -> host runs flat out | **10% loss, up to 361 duplicate replies** | 0% loss, no duplicates |
+| TCP 8 MiB host -> target | 0.49–0.56 MiB/s | 0.52–0.56 MiB/s |
 
-The duplicate replies are not a `ping` artifact: 30 packets on an idle link gave
-0 loss and 0 duplicates, and the same saturation with BLE off produced neither.
-Two separate runs reproduced them (+85 and +361), which points at the bridge
-queuing and re-sending rather than at ICMP.
+Small packets behave badly under saturation, but **not because of the radio**.
+An earlier version of this table claimed 37.5–50% ICMP loss with the radio on
+against 0% with it off. That comparison was invalid: the "off" run had the TCP
+load flowing in the opposite direction to the probe. With the load and the probe
+in the same direction the loss appears on any build, and with them in opposite
+directions it does not appear even with the radio on:
 
-The **loss** is now explained and is structural, not a misconfiguration: there is
-no preemption between `NCM_Bridge_Poll()` and `TMOS_SystemProcess()` at all —
-they are serialised in one main loop, the BLE stack runs first and to completion,
-and the NCM side owns only a 2-frame queue (~7.8 ms of slack at these rates).
-Enabling the radio moves the tail drop into the device, which is why loss rises
-while RTT *falls*. See [ncm-tmos-scheduling.md](ncm-tmos-scheduling.md) for the
-loop order, the interrupt inventory, the per-direction asymmetry that explains
-why host -> target loses 4x more than target -> host, and the fix options.
+| Load direction | Probe direction | Loss | RTT |
+|---|---|---|---|
+| host -> target | host -> target | 42–58% | 1.5–11 ms |
+| host -> target | target -> host | 0–2% | 111–225 ms |
+| target -> host | target -> host | 0% | 111–225 ms |
+| target -> host | host -> target | 0–2% | 114–225 ms |
 
-The **duplicates** are still open. The suspect is the unguarded re-entry into
-`NCM_Bridge_Poll()` from the EP4 IN ISR; that document records the test that
-would settle it.
+The cause is the 2-frame queue in each direction. In the host -> target path a
+64-byte chunk leaves only once per main-loop pass, so under TCP the queue stays
+full and an ICMP request that arrives while both slots are occupied is
+tail-dropped — and because the queue is short there is no delay to show for it.
+Two frames at 0.53 MiB/s is ~5.5 ms, which is exactly the RTT in the dropping
+case. The other direction's TX is also refilled from the EP4 completion
+interrupt, which keeps up well enough to queue rather than drop: ~200 ms of delay,
+0–2% loss.
+
+This is a property of a saturated 12 Mbit/s link with 3 kB of buffer, not a
+misconfiguration. The scheduling changes in
+[ncm-tmos-scheduling.md](ncm-tmos-scheduling.md) did not move it; the only lever
+that would is a deeper queue, which costs 3028 B of RAM per direction (89% -> 94%
+on the current images).
+
+Duplicate replies were reported once in earlier runs (up to 361 in one run, +85
+in another) and have not reproduced since a re-entry guard was added to
+`NCM_Bridge_Poll()`; 50 probes at 5/s during full target -> host saturation gave
+0 duplicates. Treat that as an open item with a plausible fix rather than a
+closed one.
 
 One observation that has not been reproduced: after a long target -> host 8 MiB
 run followed by an echo test, host -> target fell to 0.07–0.09 MiB/s and stayed

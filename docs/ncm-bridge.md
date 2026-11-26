@@ -344,10 +344,12 @@ These are consequences of the design, not bugs to file:
   root port when possible; `xhci_hcd` unbind/bind recovers the controller
   without a reboot.
 * **One greeting per power-on.** A replug does not re-arm it (§5).
-* **Saturation with the radio on drops packets.** `NCM_Bridge_Poll()` runs in the
-  same loop as `TMOS_SystemProcess()` and owns only a 2-frame queue; enabling
-  BLE costs 37.5–50% of ICMP in the fully serialised direction under load. The
-  mechanism, the per-direction asymmetry and the fix options are in
+* **Saturation drops small packets, in either direction, with or without BLE.**
+  Each direction owns a 2-frame queue; TCP keeps it full, so an ICMP request
+  arriving at a full queue is tail-dropped (~5 ms of queue, hence low RTT). With
+  the probe in the opposite direction to the load the same link only queues
+  (0–2% loss, ~200 ms). The radio is not a factor — measured both ways. The
+  mechanism, the measurements and what was tried are in
   [ncm-tmos-scheduling.md](ncm-tmos-scheduling.md).
 
 ---
