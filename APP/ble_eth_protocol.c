@@ -937,9 +937,14 @@ static void dispatch_frame(const ble_eth_frame_t *frame)
         /* HID portal launcher control.
          * subcmd 1: set URL        [1][len][url bytes...]
          * subcmd 2: launch         [2][0|1]
-         * subcmd 3: query status   [3]  -> 4-byte status in response
+         * subcmd 3: query status   [3]  -> [status][enabled][url_len][state][trig]
+         *
+         * The response is 1 status byte plus the 4 status bytes that
+         * HIDLauncher_GetStatus() writes, so the buffer must be 5 bytes: with a
+         * 4-byte buffer the write at &rsp[1] ran one byte past the array, and
+         * the trigger count never reached the host.
          */
-        uint8_t rsp[4] = { BLE_ETH_STATUS_SUCCESS, 0, 0, 0 };
+        uint8_t rsp[5] = { BLE_ETH_STATUS_SUCCESS, 0, 0, 0, 0 };
         if (frame->payload_len < 1u) {
             rsp[0] = BLE_ETH_STATUS_PARAM_ERR;
         } else {
@@ -961,7 +966,7 @@ static void dispatch_frame(const ble_eth_frame_t *frame)
         }
         uint8_t buf[16];
         uint16_t len = build_frame(buf, addr, BLE_ETH_CMD_PORTAL_RESP, rsp,
-                                   (uint8_t)(frame->payload_len >= 1u && frame->payload[0] == 3u ? 4u : 1u));
+                                   (uint8_t)(frame->payload_len >= 1u && frame->payload[0] == 3u ? 5u : 1u));
         tx_queue_push_front(buf, len);
         break;
     }

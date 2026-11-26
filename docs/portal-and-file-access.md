@@ -202,7 +202,7 @@ on the target:
 |---|---|---|
 | `1` set URL | `[1][len][url]` | store the URL (`HID_URL_MAX` limit) |
 | `2` enable | `[2][0\|1]` | arm / disarm the launcher |
-| `3` status | `[3]` | 4-byte status in the response |
+| `3` status | `[3]` | reply `[status][enabled][url_len][state][trig]`, 5 bytes |
 
 This is the only auto-open path that installs nothing on the target.
 
