@@ -236,7 +236,9 @@ python3 tools/ctrl_board.py verify      # Verify via USB
 python3 tools/verify_firmware.py        # Verify via CMD_GET_INFO
 ```
 
-The control board handles all BOOT pin and power sequencing automatically via USB serial commands (115200 baud).
+The control board handles all BOOT pin and power sequencing automatically via USB serial commands (460800 baud).
+
+This helper is Linux-only: it discovers the port with `udevadm`, checks ISP/run state with `lsusb`, and calls `/home/bbot/.cargo/bin/wchisp`. On macOS, see [build-on-mac.md](build-on-mac.md#flashing-with-the-dev-kit-control-board-on-macos) for the same sequence driven by hand.
 
 ### Flash Options
 

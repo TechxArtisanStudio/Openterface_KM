@@ -118,8 +118,48 @@ EOF
 sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
 
+### Flashing with the Dev Kit control board on macOS
+
+`tools/ctrl_board.py` drives the control board, but it looks the port up with
+`udevadm`, confirms ISP/run state with `lsusb`, and calls a hardcoded
+`/home/bbot/.cargo/bin/wchisp`. None of those exist on macOS, so it fails before
+sending its first frame. `wchisp` itself is fine here — there are no udev rules to
+install — so only the BOOT/power sequencing has to be reproduced by hand.
+
+The control board accepts the same 7-byte frames over its own USB CDC port
+(`/dev/cu.usbmodem*`, 460800 baud):
+
+| Step | Frame | Meaning |
+|---|---|---|
+| power off | `57 AB 00 1A 01 00 1D` | PWR low |
+| BOOT high | `57 AB 00 19 01 01 1D` | BOOT pin high (ISP) |
+| power on | `57 AB 00 1A 01 01 1E` | PWR high |
+| BOOT low | `57 AB 00 19 01 00 1C` | release BOOT (run mode) |
+
+A full cycle is: power off, BOOT high, power on, wait ~3 s, `wchisp flash <bin>`,
+then BOOT low, power off, power on, wait ~5 s. Each frame is a plain seven-byte
+write:
+
+```python
+import serial, time
+with serial.Serial("/dev/cu.usbmodem211101", 460800, timeout=1) as s:
+    s.reset_input_buffer()
+    s.write(bytes.fromhex("57AB001A01001D"))   # power off
+    time.sleep(0.4)
+```
+
+There is no `lsusb` to confirm the state, so use `system_profiler SPUSBDataType`
+instead: in ISP mode the CH32V208 shows up as `1a86:55e0` (or `4348:55e0`), and
+after the final power-on the running image appears as USB product
+"Openterface Host". Flashing erases the BLE bond — see
+[ble-eth-ssh-usage.md](ble-eth-ssh-usage.md#common-failures) before reconnecting
+over BLE.
+
 ## Troubleshooting
 
 - `riscv-none-embed-gcc` not found: ensure the MRS toolchain `bin/` directory is on your `PATH`.
 - `wchisp` timeout: check that the device is in ISP mode (VID 0x1A86 or 0x4348, PID 0x55E0) and udev rules are installed.
 - Firmware doesn’t boot after flash: verify you released the BOOT pin and power-cycled the target after flashing. See [build-flash-cycle.md](build-flash-cycle.md).
+- `RAM: 64 KB / 64 KB 100.00%` in the build report: this is a reporting artifact, not an overflow. `.stack` is placed at `ORIGIN + LENGTH - 2048`, so the linker counts the whole end of the region as used. Read the gap instead — with mode 8 + BLE on GCC 15, `.bss` ends at `0x2000DE50` and `.stack` starts at `0x2000F800`, i.e. 6576 B free. A real overflow fails the link.
+- Local size figures do not line up with CI: the same `PRODUCT=kvmgo USB_WORK_MODE=hid_ncm_bridge` configuration is 58 956 B (89.96%) under GCC 15 and 58 440 B (89.17%) under the CI 8.2 toolchain. Compare against the same toolchain only.
+- `wchisp` reports a size larger than the `.bin` (e.g. 232 448 for a 231 568 B image): it pads the image to the flash block size before writing. Not an error.

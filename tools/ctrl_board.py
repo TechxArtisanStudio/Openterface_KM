@@ -3,7 +3,8 @@
 Control Board Tool for Openterface KM Dev Kit.
 
 Controls the target's BOOT pin and power via the control board (USB Serial).
-Uses 115200 baud serial commands.
+Uses 460800 baud serial commands. Linux only: port discovery uses udevadm and
+state checks use lsusb (see docs/build-on-mac.md for the macOS equivalent).
 
 Usage:
     python3 tools/ctrl_board.py power off
