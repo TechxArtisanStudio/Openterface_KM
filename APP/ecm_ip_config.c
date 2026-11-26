@@ -110,8 +110,8 @@ static bool validate_config(const ECM_IPConfig_t *cfg)
 
     /* 5. Portal config: enabled/mode are small enums, portal_ip must be a
      * valid unicast address unless it is 0.0.0.0 (= follow host_ip).
-     * portal_mode: 0 = off, 1 = greet once then satisfy the OS probe,
-     *              2 = hijack every query forever. */
+     * portal_mode: 0 = off, 1 = redirect the first visit only (one shot per
+     *              peer), 2 = hijack every query forever. */
     if (cfg->portal_enabled > 1u) return false;
     if (cfg->portal_mode > 2u) return false;
     {

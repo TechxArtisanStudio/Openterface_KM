@@ -1209,28 +1209,36 @@ static uint8_t handle_dhcp_packet(const uint8_t *frame, uint16_t frame_len)
  ******************************************************************************/
 #define NCM_PORTAL_MAX_REPLY  512u
 
-/* How long the portal stays "convincing" after the target (re)connects.
+/* One-shot captive-portal greeting.
  *
- * Windows NCSI validates BOTH an HTTP probe (www.msftconnecttest.com /
- * connecttest.txt) and a DNS probe (dns.msftncsi.com -> 131.107.255.255).
- * Hijacking the DNS probe is what makes the OS detect a portal at all, but
- * it also makes it detect one on EVERY poll, so Windows re-launches the
- * portal browser (msftconnecttest.com/redirect) every poll as well - the
- * field symptom was msn.com tabs piling up indefinitely.
+ * Windows/macOS decide "captive portal" from a DNS probe (dns.msftncsi.com
+ * must answer 131.107.255.255) plus an HTTP probe.  Answering those probes
+ * locally is what makes the OS open its sign-in window once -- and it is the
+ * only thing the bridge needs to do.  Earlier revisions spoofed EVERY DNS
+ * answer for the whole session, so the peer could never resolve anything for
+ * real: every request landed on the portal address.
  *
- * So: answer the probe name with the portal address only for the greeting
- * window (the popup that opens the file manager once per plug-in), then
- * answer it truthfully so NCSI can settle and the popup stops reappearing.
- * 0 = never greet (portal plumbing stays silent, NCSI always satisfied).
+ * Mode 1 is now a true one-shot, tracked per peer IP: each machine gets a
+ * short window after its own first query (NCM_PORTAL_FIRST_VISIT_MS) and a
+ * small answer budget (NCM_PORTAL_FIRST_VISIT_MAX).  Once either is spent the
+ * bridge stops touching that peer's DNS and behaves like a plain wire, so
+ * only the first visit is redirected.
+ *
+ * Two NCSI names stay emulated for the rest of the power-on because the OS
+ * polls them forever:
+ *   - dns.msftncsi.com         -> 131.107.255.255 (what Windows expects)
+ *   - www.msftconnecttest.com  -> portal address, so /connecttest.txt can be
+ *                                 served locally; without it NCSI fails and
+ *                                 Windows keeps flagging the link as dead.
+ * Neither changes what the user's browser is allowed to resolve.
+ *
+ * portal_mode 2 keeps the legacy "always a portal" behaviour for lab use.
  */
-#ifndef NCM_PORTAL_GREET_MS
-#define NCM_PORTAL_GREET_MS   45000u
+#ifndef NCM_PORTAL_FIRST_VISIT_MS
+#define NCM_PORTAL_FIRST_VISIT_MS   10000u
 #endif
-/* ...and at most this many probe answers may be spoofed, so a chatty
- * resolver (Windows asks both A and AAAA) cannot keep the OS in "portal
- * detected" forever. */
-#ifndef NCM_PORTAL_GREET_MAX
-#define NCM_PORTAL_GREET_MAX  4u
+#ifndef NCM_PORTAL_FIRST_VISIT_MAX
+#define NCM_PORTAL_FIRST_VISIT_MAX  4u
 #endif
 
 /* Wire-format QNAME for "dns.msftncsi.com": 3 dns / 8 msftncsi / 3 com / root.
@@ -1246,28 +1254,99 @@ typedef char k_ncsi_probe_name_len_check[
     (sizeof(k_ncsi_probe_name) == 18u) ? 1 : -1];
 static const uint8_t k_ncsi_probe_answer[4] = { 131u, 107u, 255u, 255u };
 
-static volatile uint16_t g_portal_hijacked;
-static volatile uint32_t s_portal_greet_start_ms;
-static volatile uint8_t  s_portal_greet_probes;
-static uint8_t           s_portal_greet_used;
-static uint8_t           s_portal_greet_done;  /* window spent this boot */
+/* Wire-format QNAME for "www.msftconnecttest.com" (Windows HTTP probe). */
+static const uint8_t k_ncsi_http_name[] = {
+    3u, 'w', 'w', 'w',
+    15u, 'm', 's', 'f', 't', 'c', 'o', 'n', 'n', 'e', 'c', 't', 't', 'e', 's', 't',
+    3u, 'c', 'o', 'm', 0u
+};
+typedef char k_ncsi_http_name_len_check[
+    (sizeof(k_ncsi_http_name) == 25u) ? 1 : -1];
 
-/* Restart the greeting window (called when the target side reconnects).
- * Hosts may re-issue SET_INTERFACE(alt=1) every few seconds while they
- * re-validate the link; restarting on every one of those would keep the
- * link permanently "captive portal". Only a genuine reconnect re-greets. */
+static volatile uint16_t g_portal_hijacked;
+
+/* Per-peer first-visit record.  A fixed four-entry table is plenty: the
+ * bridge only ever serves the two USB ports and their neighbours. */
+#define NCM_PORTAL_CLIENTS  4u
+
+typedef struct {
+    uint8_t  ip[4];
+    uint8_t  used;
+    uint8_t  spent;                 /* first visit already served */
+    uint8_t  count;
+    uint32_t start_ms;
+} NCM_PortalClient_t;
+
+static NCM_PortalClient_t s_portal_clients[NCM_PORTAL_CLIENTS];
+static uint8_t            s_portal_greet_used;
+
+/* Find (or, with create set, allocate) the first-visit record of a peer. */
+static NCM_PortalClient_t *portal_client(const uint8_t *ip, uint8_t create)
+{
+    NCM_PortalClient_t *free_slot = 0;
+    NCM_PortalClient_t *oldest = &s_portal_clients[0];
+    NCM_PortalClient_t *c;
+    uint8_t i;
+
+    for (i = 0; i < NCM_PORTAL_CLIENTS; i++) {
+        c = &s_portal_clients[i];
+        if (c->used && memcmp(c->ip, ip, 4) == 0) {
+            return c;
+        }
+        if (!c->used) {
+            if (!free_slot) {
+                free_slot = c;
+            }
+        } else if ((int32_t)(c->start_ms - oldest->start_ms) < 0) {
+            oldest = c;
+        }
+    }
+    if (!create) {
+        return 0;
+    }
+    c = free_slot ? free_slot : oldest;     /* table full: recycle the oldest */
+    memset(c, 0, sizeof(*c));
+    c->used = 1;
+    memcpy(c->ip, ip, 4);
+    return c;
+}
+
+/* 1 = this answer may be spoofed to the portal address. */
+static uint8_t portal_first_visit_admit(const uint8_t *ip)
+{
+    NCM_PortalClient_t *c = portal_client(ip, 1);
+
+    if (!c || c->spent) {
+        return 0;
+    }
+    if (c->count == 0u) {
+        c->start_ms = systick_ms;
+    } else if (NCM_PORTAL_FIRST_VISIT_MS > 0u &&
+               (uint32_t)(systick_ms - c->start_ms) >= NCM_PORTAL_FIRST_VISIT_MS) {
+        c->spent = 1;
+        return 0;
+    }
+    if (c->count >= NCM_PORTAL_FIRST_VISIT_MAX) {
+        c->spent = 1;
+        return 0;
+    }
+    if (++c->count >= NCM_PORTAL_FIRST_VISIT_MAX) {
+        c->spent = 1;               /* last spoofed answer for this peer */
+    }
+    return 1;
+}
+
+/* Kept for the USB layer.  The greeting is one-shot per peer and per
+ * power-on, so re-enumeration must NOT re-arm it: re-arming was what kept
+ * the OS in "portal detected" state and relaunched its browser on every
+ * poll.  The call simply latches the first enumeration. */
 void NCM_Bridge_PortalGreetRestart(void)
 {
-    if (s_portal_greet_done) {
-        return;                     /* one greeting per power-on, period */
-    }
-    if (s_portal_greet_used &&
-        (uint32_t)(systick_ms - s_portal_greet_start_ms) < NCM_PORTAL_GREET_MS) {
-        return;                     /* window still running: do not extend it */
+    if (s_portal_greet_used) {
+        return;
     }
     s_portal_greet_used = 1;
-    s_portal_greet_start_ms = systick_ms;
-    s_portal_greet_probes = 0;
+    memset(s_portal_clients, 0, sizeof(s_portal_clients));
 }
 
 /* Case-insensitive compare of a wire-format QNAME against a reference. */
@@ -1357,6 +1436,14 @@ static uint8_t handle_dns_hijack(const uint8_t *data, uint16_t len,
         }
     }
 
+    /* Only A/IN questions are answered locally.  Everything else (AAAA, MX,
+     * ...) must pass through untouched: a spoofed AAAA carrying an A record
+     * confuses resolvers and would also burn the first-visit budget. */
+    if (get_be16(&data[question_off + question_len - 4u]) != 1u ||
+        get_be16(&data[question_off + question_len - 2u]) != 1u) {
+        return 0;
+    }
+
     ECM_IPConfig_GetPortal(&enabled, &mode, portal_ip);
     if (!enabled || mode == 0u) {
         return 0;
@@ -1365,31 +1452,35 @@ static uint8_t handle_dns_hijack(const uint8_t *data, uint16_t len,
     answer_ip = (portal_ip[0] | portal_ip[1] | portal_ip[2] | portal_ip[3])
                 ? portal_ip : host_ip;
 
-    /* Mode 1 = greet once, then let the OS settle. Only during the greeting
-     * window is the NCSI DNS probe answered with the portal address; after
-     * that it gets the value Windows expects, so the OS stops treating the
-     * link as a captive portal and stops relaunching the portal browser on
-     * every poll. Mode 2 = hijack everything forever (always a portal). */
-    if (mode == 1u &&
-        dns_name_equals_ci(&data[question_off],
-                           (uint16_t)(question_len - 4u),
-                           k_ncsi_probe_name,
-                           (uint16_t)sizeof(k_ncsi_probe_name))) {
-        uint8_t greeting = 0;
-        if (NCM_PORTAL_GREET_MS > 0u &&
-            (uint32_t)(systick_ms - s_portal_greet_start_ms) < NCM_PORTAL_GREET_MS &&
-            s_portal_greet_probes < NCM_PORTAL_GREET_MAX) {
-            greeting = 1;
-            s_portal_greet_probes++;
-            if (s_portal_greet_probes >= NCM_PORTAL_GREET_MAX) {
-                s_portal_greet_done = 1;
+    /* Mode 1 = one shot: only a peer's first visit is redirected.  Mode 2 =
+     * hijack every query forever (always a portal, lab use only). */
+    if (mode == 2u) {
+        /* legacy always-portal behaviour: keep the portal answer as is */
+    } else {
+        const uint8_t *src_ip = &data[NCM_ETH_HEADER_LEN + 12];
+        uint8_t is_dns_probe = dns_name_equals_ci(&data[question_off],
+                                                  (uint16_t)(question_len - 4u),
+                                                  k_ncsi_probe_name,
+                                                  (uint16_t)sizeof(k_ncsi_probe_name));
+        uint8_t is_http_probe = dns_name_equals_ci(&data[question_off],
+                                                   (uint16_t)(question_len - 4u),
+                                                   k_ncsi_http_name,
+                                                   (uint16_t)sizeof(k_ncsi_http_name));
+
+        if (is_dns_probe) {
+            /* Spoof the probe only while this peer's first visit is being
+             * served; afterwards answer what Windows expects so NCSI settles
+             * and the portal browser stops relaunching. */
+            if (!portal_first_visit_admit(src_ip)) {
+                answer_ip = k_ncsi_probe_answer;
             }
-        }
-        if (!greeting) {
-            /* Window is over for this boot: answer truthfully forever, so
-             * NCSI settles and the portal browser stops relaunching. */
-            s_portal_greet_done = 1;
-            answer_ip = k_ncsi_probe_answer;
+        } else if (is_http_probe) {
+            /* Always keep the NCSI HTTP probe pointed at the portal so
+             * /connecttest.txt is served locally.  This is OS plumbing, not a
+             * user-facing redirect, and it keeps Windows off the "no internet"
+             * path (which is what relaunches Edge). */
+        } else if (!portal_first_visit_admit(src_ip)) {
+            return 0;               /* first visit over: plain wire */
         }
     }
 
