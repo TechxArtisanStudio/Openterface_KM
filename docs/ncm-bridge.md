@@ -75,10 +75,13 @@ peer ──USB bulk OUT──► NTB reassembly ──► frame handler ──�
   datagrams). A ZLP terminates an NTB whose length is an exact multiple of the
   packet size.
 * The frame handler runs, in this order, **DHCP → discovery relay → ARP/ICMP →
-  forwarding**. The DHCP step must stay first: a `DHCPDISCOVER` is an IPv4
-  broadcast, so the discovery relay would copy it to the other port and return
-  before the local server saw it. That ordering bug made the target fall back
-  to `169.254.x.x` (fixed in `5b3aff4`).
+  forwarding**, on both ports. The DHCP step must stay first: a `DHCPDISCOVER`
+  is an IPv4 broadcast, so the discovery relay would copy it to the other port
+  and return before the local server saw it. That ordering bug made the target
+  fall back to `169.254.x.x` (fixed in `5b3aff4`); the same bug in the mirror
+  path left the *host* port unable to hand out an address until `96ce641`, and
+  because development always used a statically configured host it stayed
+  invisible for months.
 * Proxy ARP answers for the peer addresses on the segment, so neither side
   needs the other's real MAC.
 * Endpoint numbers differ per build mode and per USB controller. Do not
@@ -91,7 +94,13 @@ over the control channel when no console is available.
 
 ---
 
-## 4. DHCP server (target port)
+## 4. DHCP server
+
+Both ports run one. `handle_target_dhcp_packet()` serves the target,
+`handle_dhcp_packet()` serves the host; they parse the same `DISCOVER` /
+`REQUEST` pair and differ only in the address they hand out.
+
+### Target port
 
 `handle_target_dhcp_packet()` parses `DISCOVER` / `REQUEST` and replies
 `OFFER` / `ACK` with this option set:
@@ -104,6 +113,22 @@ over the control channel when no console is available.
 | 1 subnet mask | `255.255.255.0` | |
 | 6 DNS | `portal_ip`, or `host_ip` when `portal_ip` is `0.0.0.0` | **only** while `portal_enabled && portal_mode == 1` (§5) |
 | 3 router | **never sent** | see below |
+
+### Host port
+
+| Option | Value | Rationale |
+|---|---|---|
+| 53 message type | 2 / 5 | OFFER / ACK |
+| 54 server id | `dev_ip` (`192.168.20.3`) | the host side has no other stable identity |
+| 51 lease time | 3600 s | the host is not a transient guest; there is no greeting to refresh |
+| 1 subnet mask | `255.255.255.0` | |
+| 6 DNS | `8.8.8.8`, **only** while `portal_enabled && portal_mode == 1` | a decoy: the firmware answers every query itself in that state (§5) |
+| 3 router | **never sent** | same reason as below |
+
+This is what makes the dongle OS-neutral in practice: a peer left on "obtain an
+address automatically" — the default on every desktop OS — gets `host_ip` with no
+manual configuration. Verified on macOS 26.5 (see
+[cross-os-portability.md](cross-os-portability.md)).
 
 ### Why there is no router option
 

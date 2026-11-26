@@ -17,6 +17,7 @@ Start with the document that matches your job, not with the folder listing.
 | choose between the ECM (mode 7) and NCM (mode 8) bridges | [cdc-ecm-vs-cdc-ncm.md](cdc-ecm-vs-cdc-ncm.md) |
 | work on the NCM side channel (DHCP, DNS, portal) | [ncm-bridge.md](ncm-bridge.md) |
 | reach files from the target PC | [portal-and-file-access.md](portal-and-file-access.md) |
+| check whether the dongle works on another OS, or whether a value is OS-bound | [cross-os-portability.md](cross-os-portability.md) |
 | touch the CH9329 / HID path | [ch9329-communication-protocol.md](ch9329-communication-protocol.md) |
 | work on BLE (tunnel, pairing, OTA) | [ble-eth-protocol.md](ble-eth-protocol.md), [ble-pairing-design.md](ble-pairing-design.md) |
 | know whether a fix is already in the tree | §4, *Fix records* |
@@ -68,6 +69,7 @@ for the WCH MounRiver Studio flow.
 |---|---|---|
 | [controllable-usb-endpoint-modes.md](controllable-usb-endpoint-modes.md) | Design | mode model (build-time and runtime profiles), endpoint policy, verification matrix |
 | [cdc-ecm-vs-cdc-ncm.md](cdc-ecm-vs-cdc-ncm.md) | Design | ECM vs NCM: OS compatibility, mode 7/mode 8 endpoint comparison, runtime switching feasibility |
+| [cross-os-portability.md](cross-os-portability.md) | Reference | driver matching keys per OS, what was OS-biased and fixed, what is still hardcoded, verified host/target matrix |
 | [usb-endpoint-map-mode7.md](usb-endpoint-map-mode7.md) | Reference | Mode 7 endpoint map: HID + host ACM + host ECM + target ECM |
 | [usb-endpoint-map-mode8.md](usb-endpoint-map-mode8.md) | Reference | Mode 8 endpoint map: HID + CDC-NCM on both ports (endpoints, descriptors, buffers) |
 | [usb-firmware-industrial-grade-optimization.md](usb-firmware-industrial-grade-optimization.md) | Plan | robustness backlog for the USB stack |

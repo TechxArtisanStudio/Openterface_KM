@@ -396,13 +396,19 @@ state must be `Up` (not `Media disconnected`).
 6. **Alt 0/1 toggling is normal.** The data interface stays "active" in both alts
    by design; a partial NTB is discarded on the transition, so a frame that was
    mid-transfer during the toggle is lost.
-7. **Host-port handler order.** Broadcast relay precedes DHCP there; harmless
-   today because that NIC is static, but fix it before enabling DHCP on the host
-   side.
+7. **DHCP must be answered before the broadcast relay — on both ports.** A
+   DISCOVER is an IPv4 broadcast, so `bridge_forward_discovery()` consumes it and
+   returns before the local DHCP server runs. The target port was fixed first;
+   the host port kept the wrong order until `0a8e4c1`, which is exactly why a
+   peer left on "obtain an address automatically" fell back to `169.254` while a
+   manually configured host looked fine. Any new protocol handler that answers
+   broadcasts belongs above that call.
 8. **`bInterfaceProtocol = 0x01` is a matching key.** macOS binds
    `AppleUSBNCMData` only to class `0x0A` / subclass `0x00` / protocol `0x01`.
    With `0x00` the device enumerates, `AppleUSBNCMControl` loads, and nothing
-   else happens — no error in any log. See
+   else happens — no error in any log. Both ports now declare `0x01`; the target
+   port kept `0x00` for a while because that was the value Windows had been
+   verified against, which quietly made it a Windows-only port. See
    [ncm-macos-enumeration-fix.md](ncm-macos-enumeration-fix.md).
 
 History: the descriptor-transfer failure of 2026-11-19 and the Code 10 diagnosis
