@@ -1530,6 +1530,32 @@ void NCM_Bridge_SetBleTxCallback(void (*cb)(void))
     g_ble_tx_event_cb = cb;
 }
 
+/*******************************************************************************
+ * Host-link resync (SET_INTERFACE / SET_CONFIGURATION companion)
+ *
+ * USBD_SetInterface_Impl (usb_prop.c) forces EP4 TX to NAK/DIS on every
+ * SET_INTERFACE(iface=1) and the SET_CONFIGURATION path resets endpoint
+ * registers too.  If an NTB chunk was armed at that moment (Windows traffic
+ * forwarded early, or the boot GARP racing the host's interface setup), the
+ * packet is cancelled by the register write: no CTR_TX ever fires, so
+ * USBD_Endp4_Busy stays 1 forever and host_tx_feed() refuses to arm again.
+ * Observed state: tx_sent==0 since boot, EP4R stuck in NAK, host TX queue
+ * overflowing while everything queues fine.
+ * Drop the half-streamed NTB, clear the software busy flags and replay the
+ * link notification sequence so the host re-opens the pipes.
+ ******************************************************************************/
+void NCM_Bridge_HostLinkReset(void)
+{
+    USBD_Endp4_Busy = 0;
+    USBD_Endp5_Busy = 0;
+    s_host_ntb_tx_len = 0;
+    s_host_ntb_tx_off = 0;
+    s_host_ntb_zlp_pending = 0;
+    /* Replay DOWN -> UP -> SPEED -> BEACON via poll_host_notification(). */
+    g_host_notify_state = NCM_NOTIFY_DOWN;
+    g_host_notify_hold_until_ms = systick_ms + 50;
+}
+
 void NCM_Bridge_HostRxDone(const uint8_t *data, uint16_t len)
 {
     /* Parse NTB and process frames */

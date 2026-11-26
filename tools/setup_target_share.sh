@@ -64,7 +64,14 @@ EOF
 fi
 testparm -s >/dev/null
 
-echo "[3/6] Installing wsdd systemd unit on $IFACE"
+echo "[3/6] Installing wsdd systemd unit (interface resolved by MAC at start)"
+# wsdd must get the interface the kernel reports in netlink messages: kernel
+# messages carry only the real name, never altnames, and the name changes on
+# USB re-enumeration (enp0s21f0u1u2 -> enp0s21f0u5u2).  The wrapper resolves
+# the current interface by the stable MAC 02:00:00:00:00:01 at each start.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+install -m755 "$SCRIPT_DIR/wsdd_iface.sh" /usr/local/bin/wsdd_iface.sh
+install -m755 "$SCRIPT_DIR/wsdd_poke.sh" /usr/local/bin/wsdd_poke.sh
 cat > "$WSDD_UNIT" <<EOF
 [Unit]
 Description=WS-Discovery on KeyMod NCM interface
@@ -73,10 +80,10 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/sbin/wsdd -i ${IFACE} -4 -n ${NETBIOS_NAME} -w ${WORKGROUP}
+ExecStart=/usr/local/bin/wsdd_iface.sh
 # wsdd 0.8 misses the initial netlink address dump on some boots, so poke an
 # address event after startup; wsdd then binds 3702 to the interface address.
-ExecStartPost=/usr/sbin/ip addr change 192.168.20.1/24 dev ${IFACE}
+ExecStartPost=/usr/local/bin/wsdd_poke.sh
 Restart=on-failure
 RestartSec=5
 

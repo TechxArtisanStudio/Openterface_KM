@@ -23,6 +23,7 @@ extern "C" {
 void NCM_Bridge_Init(void);
 void NCM_Bridge_InitTarget(void);      /* Target-facing USBFS (re-)enumeration only */
 void NCM_Bridge_UpdateIPConfig(void);  /* Update IP config immediately after modification */
+void NCM_Bridge_HostLinkReset(void);   /* Sync SW TX busy flags after control-transfer endpoint resets */
 void NCM_Bridge_HostRxDone(const uint8_t *data, uint16_t len);
 void NCM_Bridge_TargetRxDone(const uint8_t *data, uint16_t len);
 void NCM_Bridge_Poll(void);
@@ -49,6 +50,7 @@ uint8_t NCM_ParseNtb(const uint8_t *ntb_buf, uint16_t ntb_len,
 #define NCM_Bridge_Init()                  ((void)0)
 #define NCM_Bridge_InitTarget()            ((void)0)
 #define NCM_Bridge_UpdateIPConfig()        ((void)0)
+#define NCM_Bridge_HostLinkReset()         ((void)0)
 #define NCM_Bridge_HostRxDone(data, len)   ((void)0)
 #define NCM_Bridge_TargetRxDone(data, len) ((void)0)
 #define NCM_Bridge_Poll()                  ((void)0)

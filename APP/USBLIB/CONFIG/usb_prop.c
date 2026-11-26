@@ -396,6 +396,10 @@ void USBD_SetInterface_Impl(void)
             SetEPTxStatus(ENDP4, EP_TX_DIS);
             g_host_ncm_data_if_active = 0;
         }
+        /* The register writes above cancel any armed EP4/EP5 packet without
+         * a CTR, so the software busy flags would stay set forever and
+         * host_tx_feed()/the notify poll would never arm again. */
+        NCM_Bridge_HostLinkReset();
     }
 #endif
 
@@ -501,6 +505,10 @@ void USBD_Reset(void)
   SetEPRxStatus(ENDP5, EP_RX_DIS);
   _ClearDTOG_TX(ENDP5);
   _ClearDTOG_RX(ENDP5);
+
+  /* Configuration (re)applied: cancel any armed-but-never-completed packet
+   * and resync the software busy flags (see NCM_Bridge_HostLinkReset). */
+  NCM_Bridge_HostLinkReset();
 #else
   /* EP3: ECM bulk IN (host PC side). Start disabled per CDC-ECM spec;
    * enabled when the host selects data interface alt setting 1. */
