@@ -37,7 +37,13 @@ const uint8_t  USBD_DeviceDescriptor[] = {
     0x04, 0x01,                     // bcdDevice
     0x01,                           // iManufacturer
     0x02,                           // iProduct
-    0x00,                           // iSerialNumber
+    /* string index 3, filled at runtime with the UID-derived address.  With
+     * this left at 0 every unit presented the same (absent) serial, so two
+     * dongles looked like one device to Windows -- which keeps COM port
+     * numbers and driver bindings per serial -- and were indistinguishable in
+     * ioreg.  Every mode gets a serial: there is no mode where a per-unit
+     * identity is unwanted. */
+    0x03,                           // iSerialNumber
     0x01,                           // bNumConfigurations
 };
 
@@ -1041,11 +1047,19 @@ const uint8_t USBD_StringProduct[USBD_SIZE_STRING_PRODUCT] = {
     'O', 0, 'p', 0, 'e', 0, 'n', 0, 't', 0, 'e', 0, 'r', 0, 'f', 0, 'a', 0, 'c', 0, 'e', 0,
     ' ', 0, 'H', 0, 'o', 0, 's', 0, 't', 0};
 
-/* USB Device String Serial */
+/* USB Device String Serial.
+ *
+ * iSerialNumber = 3, so this is what the Host stores as the device serial and
+ * what Windows keys its per-device state on.  It used to be the constant
+ * "0123456789"; now it is the UID-derived host NIC address, i.e. the same
+ * twelve hex digits beside the MAC the Host adopts on this port (see
+ * mac_uid.h).  Locally administered, so it cannot be mistaken for a vendor
+ * serial number. */
 uint8_t USBD_StringSerial[USBD_SIZE_STRING_SERIAL] = {
-	USBD_SIZE_STRING_SERIAL,          
-	USB_STRING_DESCRIPTOR_TYPE,                   
-	'0', 0, '1', 0, '2', 0, '3', 0, '4', 0, '5', 0 , '6', 0, '7', 0, '8', 0, '9', 0
+	USBD_SIZE_STRING_SERIAL,
+	USB_STRING_DESCRIPTOR_TYPE,
+	'0', 0, '2', 0, '0', 0, '0', 0, '0', 0, '0', 0,
+	'0', 0, '0', 0, '0', 0, '0', 0, '0', 0, '1', 0
 };
 
 const uint8_t USBD_StringAudioFunction[USBD_SIZE_STRING_AUDIO_FUNC] = {
@@ -1102,7 +1116,8 @@ uint8_t USBD_StringNcmMac[USBD_SIZE_STRING_NCM_MAC] = {
 };
 
 /**
- * Rewrites the iMACAddress string descriptors from the UID-derived MACs.
+ * Rewrites the iMACAddress and iSerialNumber string descriptors from the
+ * UID-derived MACs.
  *
  * Called from USBD_init() before the D+ pull-up is enabled, i.e. before the
  * Host can ask for a descriptor, so the constants above never reach the wire.
@@ -1112,6 +1127,9 @@ uint8_t USBD_StringNcmMac[USBD_SIZE_STRING_NCM_MAC] = {
  */
 void USBD_MacString_Init(void)
 {
+    /* Serial is mode-independent: every image reports its own identity. */
+    MacUid_FormatSerial(USBD_StringSerial, MAC_ROLE_HOST_NIC);
+
 #if USB_WORK_MODE_COMPILES_HOST_CDC_ECM
     MacUid_FormatString(USBD_StringEcmMac, MAC_HOST_NIC);
 #endif

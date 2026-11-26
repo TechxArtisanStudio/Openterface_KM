@@ -1561,19 +1561,31 @@ const uint8_t MyProdInfo[ ]  =
     't', 0
 };
 
-/* Serial Number Information */
-const uint8_t  MySerNumInfo[ ] =
+/* Serial Number Information (iSerialNumber = 3).
+ *
+ * This was the literal "20250721" -- a build date, identical on every unit, so
+ * two boards attached to the same machine were one device to Windows (COM port
+ * numbers and driver bindings are keyed on the serial).  It now carries the
+ * UID-derived target NIC address, i.e. the twelve hex digits beside the MAC
+ * this port's OS adopts (mac_uid.h).  Same 26-byte layout as iMACAddress, and
+ * DEF_USBD_SN_DESC_LEN reads the length from byte 0, so the size follows.  The
+ * initialiser is the pre-init fallback and documents the legacy value. */
+uint8_t MySerNumInfo[ ] =
 {
-    0x12, // Descriptor length (8 chars * 2 + 2)
+    0x1A, // Descriptor length (12 chars * 2 + 2)
     0x03, // Descriptor type (STRING)
-    '2', 0,
     '0', 0,
     '2', 0,
-    '5', 0,
     '0', 0,
-    '7', 0,
-    '2', 0,
-    '1', 0
+    '0', 0,
+    '0', 0,
+    '0', 0,
+    '0', 0,
+    '0', 0,
+    '0', 0,
+    '0', 0,
+    '0', 0,
+    '0', 0
 };
 
 /* CDC ECM MAC address string: ASCII hex, no separators.
@@ -1616,12 +1628,15 @@ uint8_t MyNcmMacInfo[ ] =
 };
 
 /**
- * Rewrites the USBFS-side iMACAddress strings from the UID-derived MACs.
- * Must run before USBFS_Device_Init(ENABLE) connects the port; main() calls
- * it right before that for exactly this reason.
+ * Rewrites the USBFS-side iMACAddress and iSerialNumber strings from the
+ * UID-derived MACs.  Must run before USBFS_Device_Init(ENABLE) connects the
+ * port; main() calls it right before that for exactly this reason.
  */
 void MyMacInfo_Init(void)
 {
+    /* Mode-independent: this port always reports its own identity. */
+    MacUid_FormatSerial(MySerNumInfo, MAC_ROLE_TARGET_NIC);
+
 #if USB_WORK_MODE_COMPILES_TARGET_CDC_ECM
     MacUid_FormatString(MyEcmMacInfo,       MAC_HOST_NIC);
     MacUid_FormatString(MyTargetEcmMacInfo, MAC_TARGET_NIC);

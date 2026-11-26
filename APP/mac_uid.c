@@ -131,3 +131,13 @@ void MacUid_FormatString(uint8_t *desc, const uint8_t *mac)
         desc[3u + i * 2u] = 0x00u;
     }
 }
+
+void MacUid_FormatSerial(uint8_t *desc, MacRole role)
+{
+    /* Same 26-byte layout as iMACAddress: a USB string descriptor is a length
+     * byte, a type byte, then UTF-16LE, so the twelve digits occupy 24 bytes
+     * either way.  Kept as a distinct entry point so the descriptor that
+     * feeds iSerialNumber is obvious at the call site and so a future change
+     * to the serial format cannot accidentally alter the ECM MAC string. */
+    MacUid_FormatString(desc, MacUid_Get(role));
+}

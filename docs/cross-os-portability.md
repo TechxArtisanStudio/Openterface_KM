@@ -163,12 +163,49 @@ the *shape* `02:xx:xx:xx:xx:01` instead of a literal address:
 `setup_target_share.sh`, `setup_captive_portal.sh`, `wsdd_iface.sh` and
 `wsdd_poke.sh` all call it.
 
+### 4.3 The serial number carries the same identity (fixed)
+
+The host port had `iSerialNumber = 0`, i.e. no serial at all, and the target
+port served the literal `20250721` — a build date, identical on every unit.
+That is the same failure as §4.1 in a different register: Windows keys the COM
+port number, the driver binding and its per-device registry state on the
+serial, so two dongles collapse into one device and the second one steals the
+first one's COM number. It is also the only handle that distinguishes two
+units in `ioreg` or Device Manager before a NIC exists.
+
+Both ports now report the twelve hex digits of their own address
+(`MacUid_FormatSerial()`, written before the pull-up is enabled in
+`USBD_init()` / `MyMacInfo_Init()`):
+
+| Port | Serial | Equals |
+|---|---|---|
+| host (USBLIB) | `02A0F2DFEE01` | `iMACAddress` / `GET_NET_ADDRESS` of the same port |
+| target (USBFS) | `02A0F2DFEE00` | the target NIC MAC the target OS adopts |
+
+Measured on one unit (macOS 26.5, `ioreg -p IOUSB -l`):
+
+```
+"USB Serial Number" = "02A0F2DFEE01"
+en23: ether 02:a0:f2:df:ee:01
+arp:  192.168.20.2 -> 2:a0:f2:df:ee:32
+```
+
+Three roles of one UID, visible at three layers. Two rules follow:
+
+* the serial must stay **12 uppercase hex digits** — Windows stores it
+  verbatim and rejects nothing, but `&` and `+` are what break other drivers'
+  instance paths, and a short or duplicated serial recreates the collision;
+* do not "improve" it into a MAC with colons: `iSerialNumber` is a plain
+  string, and the ECM `iMACAddress` format is the one place that needs the
+  12-digit form (`MacUid_FormatString`). The two are separate entry points on
+  purpose.
+
 ## 5. Verified combinations
 
 | Host | Target | State |
 |---|---|---|
 | Fedora, static `192.168.20.1` | Windows 11 | verified, earlier sessions |
-| **macOS 26.5, DHCP** | **Windows 11** | **verified 2026-11-26**: service left on "Using DHCP", obtained `192.168.20.1/24`, router empty, no DNS servers; `ping 192.168.20.2` 1.7 ms; target IIS answered `404`. That run used the pre-UID `en23` = `02:00:00:00:00:01`; the UID-derived build is **not yet re-verified on hardware** |
+| **macOS 26.5, DHCP** | **Windows 11** | **verified 2026-11-26**: service left on "Using DHCP", obtained `192.168.20.1/24`, router empty, no DNS servers; `ping 192.168.20.2` 1.7 ms; target IIS answered `404`. That run used the pre-UID `en23` = `02:00:00:00:00:01`. Re-run 2026-11-26 on the UID-derived build (mode 8, no BLE, `USB_WORK_MODE_RUNTIME_PROFILES=0`): `USB Serial Number` = `02A0F2DFEE01`, `en23` = `02:a0:f2:df:ee:01`, `192.168.20.1/24` again by bare DHCP, ARP `.32` = `2:a0:f2:df:ee:32`, `ping` 1.6 ms, target IIS port 80 accepting. The target port's serial changed at the same time and the Windows peer still binds |
 | macOS | macOS | unverified. Protocol is now correct on the target port, but that port still advertises the DHCP capability bit (§4) |
 | Linux | Linux | unverified, though both ends are the same `cdc_ncm` path |
 

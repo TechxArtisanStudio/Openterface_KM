@@ -45,6 +45,16 @@ const uint8_t *MacUid_Get(MacRole role);
  * requires). */
 void MacUid_FormatString(uint8_t *desc, const uint8_t *mac);
 
+/* Same text, for the USB iSerialNumber descriptor.  A serial needs no MAC
+ * shape and no separators, so the 12 hex digits of a role's address work as
+ * is -- and matching the interface MAC is a debugging advantage: "the serial
+ * ends in 01" tells you which address the OS will adopt on that port.
+ *
+ * It must not be shorter than 12 characters or contain characters outside
+ * [0-9A-F]; Windows stores the serial verbatim and keys its per-device
+ * registry state (COM port number, driver binding) on it. */
+void MacUid_FormatSerial(uint8_t *desc, MacRole role);
+
 #define MAC_HOST_NIC     (MacUid_Get(MAC_ROLE_HOST_NIC))
 #define MAC_HOST_PEER    (MacUid_Get(MAC_ROLE_HOST_PEER))
 #define MAC_TARGET_NIC   (MacUid_Get(MAC_ROLE_TARGET_NIC))
