@@ -1624,8 +1624,8 @@ uint16_t NCM_Bridge_GetHostDiagnostics(uint8_t *out, uint16_t max_len)
     return (i > max_len) ? max_len : i;
 }
 
-/* Compact target-RX diagnostics (15 bytes, fits the 58B response limit).
- * Layout (v1):
+/* Compact target-RX diagnostics (20 bytes, fits the 58B response limit).
+ * Layout (v2):
  *  [0]      version (0x01)
  *  [1]      s_bridge_enabled
  *  [2..3]   EP5 OUT status low (target RX endpoint)
@@ -1635,10 +1635,16 @@ uint16_t NCM_Bridge_GetHostDiagnostics(uint8_t *out, uint16_t max_len)
  *  [10..11] discovery forwards (u16)
  *  [12..13] bridge target->host forwards (u16)
  *  [14]     target TX queue count
+ *  [15..16] portal DNS hijack answers (u16)
+ *  [17..18] raw EP5 OUT interrupt count (u16, wraps; counts toggle-mismatch too)
+ *  [19]     silence-watchdog recovery count
+ *  [20]     reserved
  */
 uint16_t NCM_Bridge_GetBridgeDiagnostics(uint8_t *out, uint16_t max_len)
 {
     uint16_t i = 0;
+    extern volatile uint16_t g_usbfs_ep5_in_count;  /* raw EP5 OUT interrupts */
+    extern volatile uint8_t  g_target_wd_silence_fires;
 
 #define BD_PUT8(v)  do { if (i < max_len) { out[i] = (uint8_t)(v); } i++; } while (0)
 #define BD_PUT16(v) do { if ((i + 1) < max_len) {                        \
@@ -1657,6 +1663,8 @@ uint16_t NCM_Bridge_GetBridgeDiagnostics(uint8_t *out, uint16_t max_len)
     BD_PUT16(g_bridge_target_to_host);
     BD_PUT8(g_target_tx_queue.count);
     BD_PUT16(g_portal_hijacked);          /* captive-portal DNS answers */
+    BD_PUT16(g_usbfs_ep5_in_count);       /* raw EP5 OUT interrupts (detect toggle desync) */
+    BD_PUT8(g_target_wd_silence_fires);   /* silence-watchdog recovery count */
     BD_PUT8(0x00u);                       /* reserved */
 
 #undef BD_PUT8
@@ -1758,18 +1766,52 @@ void NCM_Bridge_HostRxPacket(const uint8_t *data, uint16_t len)
  * and can leave the EP7 IN busy flag stuck after the peer stops reading.
  * Either condition silently kills the whole target path. Reset both after
  * three seconds without progress; the next NTB re-syncs via its header.
+ *
+ * Silence watchdog: the peer can also stop delivering frames entirely (e.g.
+ * a USB suspend/resume glitch desynchronizes the EP5 OUT data toggles, or
+ * NDIS paused the pipe after a missed link edge). Then no EP5 OUT interrupt
+ * ever fires while all software state looks idle, and neither watchdog above
+ * can detect it. A live Windows always emits *something* within seconds
+ * (NCSI probes, discovery, ARP), so 10 s with zero EP5 OUT interrupts while
+ * the path is idle means the pipe is dead: replay the alt=1 endpoint setup
+ * (resets our expected toggles; at most one in-flight packet is lost before
+ * the alternating sequences converge) and bounce the link notification
+ * DOWN->UP so NDIS restarts the data interface and re-issues SET_INTERFACE.
  ******************************************************************************/
 #define NCM_TARGET_WATCHDOG_MS  3000u
+#define NCM_TARGET_SILENCE_MS   10000u
 
 static volatile uint32_t g_target_last_rx_ms;
 static uint16_t s_wd_last_in_count;
 static uint32_t s_wd_last_in_change_ms;
+static uint16_t s_wd_last_ep5_count;
+static uint32_t s_wd_last_ep5_change_ms;
+volatile uint8_t g_target_wd_silence_fires;  /* 0x13 diag [19] */
+
+/* Replay the SET_INTERFACE(alt=1) endpoint configuration: reset expected
+ * data toggles to DATA0 and re-arm endpoint response so a desynchronized
+ * peer converges again (see block comment above). */
+static void target_ep_resync(void)
+{
+    USBFSD->UEP5_RX_CTRL = (USBFSD->UEP5_RX_CTRL & ~USBFS_UEP_R_TOG) | USBFS_UEP_R_RES_ACK;
+    USBFSD->UEP7_TX_CTRL = (USBFSD->UEP7_TX_CTRL & ~USBFS_UEP_T_TOG) | USBFS_UEP_T_RES_NAK;
+    USBFSD->UEP7_RX_CTRL = (USBFSD->UEP7_RX_CTRL & ~USBFS_UEP_R_TOG) | USBFS_UEP_R_RES_NAK;
+    USBFSD->UEP7_TX_LEN  = 0;
+    USBFS_Endp_Busy[DEF_UEP7] = 0;
+    s_target_zlp_pending = 0;
+    s_target_ntb_tx_len = 0;
+    s_target_ntb_tx_off = 0;
+    s_target_rx_len = 0;
+    s_target_rx_need = 0;
+}
 
 static void target_watchdog(void)
 {
     extern volatile uint16_t g_usbfs_ep7_in_count;  /* EP7 IN completions */
+    extern volatile uint16_t g_usbfs_ep5_in_count;  /* EP5 OUT interrupts */
     uint32_t now = systick_ms;
     uint16_t in_count = g_usbfs_ep7_in_count;
+    uint16_t ep5_count = g_usbfs_ep5_in_count;
 
     /* RX: reassembly stuck mid-NTB with no incoming packets */
     if (s_target_rx_need != 0 &&
@@ -1783,18 +1825,45 @@ static void target_watchdog(void)
     if (USBFS_Endp_Busy[DEF_UEP7] != 0) {
         if (in_count == s_wd_last_in_count &&
             (uint32_t)(now - s_wd_last_in_change_ms) > NCM_TARGET_WATCHDOG_MS) {
-            USBFS_Endp_Busy[DEF_UEP7] = 0;
-            s_target_ntb_tx_len = 0;
-            s_target_ntb_tx_off = 0;
+            /* Reset the EP7 IN toggle as well: a peer that stopped ACKing
+             * leaves our prepared data toggle desynchronized, and simply
+             * clearing the busy flag would re-arm into the same wedge. */
+            target_ep_resync();
             /* Queued replies are stale by now; drop them so the queue
              * cannot feed the wedge again. */
             queue_clear(&g_target_tx_queue);
+            /* Link bounce so NDIS restarts the data pipe and re-issues
+             * SET_INTERFACE, which resyncs the peer's toggles. */
+            g_target_ncm_notify_state = NCM_NOTIFY_DOWN;
+            g_target_ncm_notify_hold_until_ms = now + 100;
             USB_DEBUG("NCM: TX watchdog reset\r\n");
         }
     } else {
         s_wd_last_in_change_ms = now;
     }
     s_wd_last_in_count = in_count;
+
+    /* Silence: no EP5 OUT interrupt at all while the whole target path is
+     * idle (no partial reassembly, no NTB in flight, empty TX queue). */
+    if (s_bridge_enabled && g_target_ncm_data_if_active &&
+        s_target_rx_need == 0 && s_target_ntb_tx_len == 0 &&
+        g_target_tx_queue.count == 0) {
+        if (ep5_count != s_wd_last_ep5_count) {
+            s_wd_last_ep5_change_ms = now;
+        } else if ((uint32_t)(now - s_wd_last_ep5_change_ms) > NCM_TARGET_SILENCE_MS) {
+            target_ep_resync();
+            queue_clear(&g_target_tx_queue);
+            g_ncm_garp_sent = 0;  /* re-announce after the link bounce */
+            g_target_ncm_notify_state = NCM_NOTIFY_DOWN;
+            g_target_ncm_notify_hold_until_ms = now + 100;
+            g_target_wd_silence_fires++;
+            s_wd_last_ep5_change_ms = now;
+            USB_DEBUG("NCM: silence watchdog reset\r\n");
+        }
+    } else {
+        s_wd_last_ep5_change_ms = now;
+    }
+    s_wd_last_ep5_count = ep5_count;
 }
 
 void NCM_Bridge_Poll(void)

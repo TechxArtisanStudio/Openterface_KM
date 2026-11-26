@@ -524,7 +524,7 @@ void CH9329_DispatchCommand(uint8_t addr, uint8_t cmd_code, uint8_t* pdata, uint
                 }
                 break;
 
-                case 0x13:  // NCM bridge/target-RX diagnostics (15 bytes)
+                case 0x13:  // NCM bridge/target-RX diagnostics (20 bytes)
                 {
                     uint8_t bdiag[64];
                     uint16_t bdiag_len = NCM_Bridge_GetBridgeDiagnostics(bdiag, sizeof(bdiag));
