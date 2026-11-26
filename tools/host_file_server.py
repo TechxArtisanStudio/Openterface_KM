@@ -140,6 +140,8 @@ class FileServerHandler(BaseHTTPRequestHandler):
   .tile { position:relative; text-align:center; padding:12px 4px 8px; border-radius:8px; cursor:pointer }
   .tile:hover { background:var(--hd) }
   .tile .ic { font-size:40px; line-height:1 }
+  a.ic { display:inline-block; color:inherit; text-decoration:none; cursor:pointer }
+  a.ic:hover { text-decoration:none }
   .tile .nm { font-size:12.5px; margin-top:6px; word-break:break-all; color:var(--tx) }
   .tile .nm a { color:inherit; text-decoration:none }
   .tile .mini { position:absolute; top:2px; right:2px; display:none; gap:2px }
@@ -185,7 +187,7 @@ class FileServerHandler(BaseHTTPRequestHandler):
   <input id="f" type="file" multiple hidden>
 </header>
 <main>
-  <p class="tip">将文件拖入页面任意位置即可上传；点击文件名下载或进入文件夹。</p>
+  <p class="tip">将文件拖入页面任意位置即可上传；点击图标或文件名即可进入文件夹 / 下载文件。</p>
   <div id="iconview"></div>
   <div id="listview"></div>
   <table id="detailview">
@@ -239,8 +241,10 @@ function renderViews() {
     // icon view
     const tile = document.createElement('div');
     tile.className = 'tile';
-    tile.innerHTML = '<div class="ic">' + (f.up ? '&#128193;' : ic) + '</div>' +
+    tile.innerHTML = '<a class="ic" href="' + href + '">' + (f.up ? '&#128193;' : ic) + '</a>' +
       '<div class="nm"><a href="' + href + '">' + name + '</a></div>';
+    // Anywhere on the tile opens the entry; the download / delete buttons keep their own click.
+    tile.onclick = e => { if (!e.target.closest('a,button')) location.href = href; };
     if (!f.up) {
       tile.innerHTML += '<div class="mini"><a href="' + href + '" download>&#11015;</a>' +
         '<button onclick="delP(\'' + encodeURIComponent(f.n) + '\')">&#10005;</button></div>';
@@ -249,9 +253,10 @@ function renderViews() {
     // list view
     const row = document.createElement('div');
     row.className = 'lrow';
-    row.innerHTML = '<span>' + (f.up ? '&#128193;' : ic) + '</span>' +
+    row.innerHTML = '<a class="ic" href="' + href + '">' + (f.up ? '&#128193;' : ic) + '</a>' +
       '<span class="nm"><a href="' + href + '">' + name + '</a></span>' +
       '<span class="sz">' + (f.d ? '' : humanSize(f.s)) + '</span>';
+    row.onclick = e => { if (!e.target.closest('a,button')) location.href = href; };
     if (!f.up) {
       row.innerHTML += '<a class="del" href="' + href + '" download>下载</a>' +
         '<button class="del danger" onclick="delP(\'' + encodeURIComponent(f.n) + '\')">删除</button>';
