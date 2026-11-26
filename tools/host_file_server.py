@@ -362,8 +362,9 @@ function delP(qname) {
                  for e in sorted(path.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))]
         filedata = json.dumps(files, ensure_ascii=False).replace("</", "<\\/")
 
-        cur_dir = "/".join(urllib.parse.quote(p) for p in rel_parts)
-        cur_dir = (cur_dir + "/") if cur_dir else ""
+        # Absolute path prefix so browser-relative links never double up
+        cur_dir = "/" + "/".join(urllib.parse.quote(p) for p in rel_parts)
+        cur_dir = (cur_dir + "/") if len(cur_dir) > 1 else "/"
 
         page = (self.PAGE_TMPL
                 .replace("__CRUMB__", crumb)
