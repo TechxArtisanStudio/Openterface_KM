@@ -1,5 +1,7 @@
 # ECM Bridge DHCP Implementation
 
+> **Superseded.** The ECM bridge was replaced by CDC-NCM; see [ncm-bridge.md](ncm-bridge.md). The DHCP/ARP description below still matches the NCM path.
+
 ## Overview
 
 The ECM bridge (Mode 4) provides network connectivity between the host PC and target device through two separate CDC-ECM interfaces:

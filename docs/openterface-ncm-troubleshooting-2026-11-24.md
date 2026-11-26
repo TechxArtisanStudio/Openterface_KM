@@ -1,5 +1,7 @@
 # CDC-NCM Bridge Troubleshooting & Fix Record
 
+> **Superseded.** Behaviour lives in [ncm-bridge.md](ncm-bridge.md). This is the dated investigation that produced it.
+
 - **Date**: 2026-11-24
 - **Hardware**: KeyMod dev kit (CH32V208, dual USB controllers) + control board
 - **Firmware**: Openterface_KM `feature/cdc-ncm` branch, keymod-plus build (`USB_WORK_MODE=hid_ncm_bridge`, `USB_WORK_MODE_RUNTIME_PROFILES=0`)

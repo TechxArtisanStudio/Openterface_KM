@@ -22,6 +22,25 @@ A firmware project running on a CH32V20x microcontroller that enables the Opente
   - USB debugging interface
   - RTC and power management with sleep mode support
 
+## Documentation
+
+Firmware documentation lives in [`docs/`](docs/README.md), which is the index:
+one section per subsystem, one status per document (canonical, design,
+reference, plan, record, superseded).
+
+Most useful entry points:
+
+- [`docs/build-and-flash-guide.md`](docs/build-and-flash-guide.md) - toolchain,
+  build flags, flashing and verification.
+- [`docs/controllable-usb-endpoint-modes.md`](docs/controllable-usb-endpoint-modes.md) -
+  the USB modes the firmware can present and their endpoint policy.
+- [`docs/ncm-bridge.md`](docs/ncm-bridge.md) - the CDC-NCM side channel: address
+  plan, DHCP, the one-shot captive-portal greeting, diagnostics.
+- [`docs/portal-and-file-access.md`](docs/portal-and-file-access.md) - host-side
+  portal, file manager and SMB access from the target PC.
+- [`docs/ch9329-communication-protocol.md`](docs/ch9329-communication-protocol.md) -
+  CH9329-compatible command protocol.
+
 ## Source Folder Structure
 
 ```

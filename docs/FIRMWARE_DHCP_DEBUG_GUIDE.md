@@ -1,5 +1,7 @@
 # 固件 DHCP 服务器调试指南
 
+> **Superseded.** See §4 and §10 of [ncm-bridge.md](ncm-bridge.md) for the current DHCP behaviour and verification steps.
+
 ## 问题描述
 
 ### 现象

@@ -1,5 +1,7 @@
 # Target file access to Host (HTTP + WebDAV)
 
+> **Superseded.** See [portal-and-file-access.md](portal-and-file-access.md). The WebDAV and discovery references below are still accurate.
+
 The portal HTTP service has been replaced by a file server that exposes a
 dedicated Host directory to the Windows target over the USB NCM bridge.
 No firmware changes are needed — the device only forwards Ethernet frames.

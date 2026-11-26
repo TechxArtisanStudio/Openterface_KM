@@ -1,5 +1,7 @@
 # Host-served portal page on the target PC
 
+> **Superseded.** See [portal-and-file-access.md](portal-and-file-access.md) for the current portal and file-access setup.
+
 ## Architecture
 
 The portal page lives **only on the Host** — no HTML is stored in firmware.

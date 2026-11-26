@@ -1,5 +1,7 @@
 # CDC NCM Descriptor Debugging Notes
 
+> **Superseded.** Descriptor and `GET_NTB_PARAMETERS` behaviour is summarised in [ncm-bridge.md](ncm-bridge.md); this record keeps the debugging trail.
+
 ## Status: RESOLVED ✅
 
 The CDC NCM descriptor issue has been successfully resolved as of Nov 19, 2026.

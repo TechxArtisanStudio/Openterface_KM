@@ -1,5 +1,7 @@
 # CDC-NCM Implementation Plan for Windows Support
 
+> **Superseded.** The current NCM reference is [ncm-bridge.md](ncm-bridge.md); this plan is kept for the history of the port (descriptor shape, NTB layout, memory budget).
+
 ## Executive Summary
 
 This document outlines the implementation plan for adding **CDC-NCM (Network Control Model)** support to the Openterface KM firmware. The primary goal is to enable native Windows 10/11 support without requiring RNDIS drivers or custom INF files.
