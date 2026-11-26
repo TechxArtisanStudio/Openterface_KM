@@ -1124,12 +1124,23 @@ static uint8_t handle_dhcp_packet(const uint8_t *frame, uint16_t frame_len)
     memcpy(&reply[off], ncm_subnet_mask, 4);
     off += 4;
 
-    /* DNS server - use public DNS */
-    reply[off++] = NCM_DHCP_OPT_DNS;
-    reply[off++] = 0x04;
-    uint8_t public_dns[4] = { 8, 8, 8, 8 };
-    memcpy(&reply[off], public_dns, 4);
-    off += 4;
+    /* DNS: only while the captive portal is armed. The firmware then answers
+     * every query itself (handle_dns_hijack), so the address is a decoy and
+     * 8.8.8.8 is fine. With the portal off there is no resolver on this link
+     * and no uplink either, so advertising one only makes the peer's resolver
+     * time out -- omit it and let the peer keep its other interface's DNS. */
+    {
+        uint8_t p_enabled, p_mode, p_ip[4];
+        ECM_IPConfig_GetPortal(&p_enabled, &p_mode, &p_ip);
+        if (p_enabled && p_mode == 1u) {
+            reply[off++] = NCM_DHCP_OPT_DNS;
+            reply[off++] = 0x04;
+            reply[off++] = 8;
+            reply[off++] = 8;
+            reply[off++] = 8;
+            reply[off++] = 8;
+        }
+    }
 
     /* End option */
     reply[off++] = NCM_DHCP_OPT_END;
@@ -1564,6 +1575,17 @@ static uint8_t handle_host_frame(const uint8_t *data, uint16_t len)
 
     eth_type = (uint16_t)(data[12] << 8) | data[13];
 
+    /* DHCP first. A DISCOVER is an IPv4 broadcast, so the discovery relay
+     * below would forward it to the Target and return before the local DHCP
+     * server ever saw it -- the Host then falls back to 169.254. This is the
+     * ordering bug that was already fixed on the Target side; here it is what
+     * kept a peer left on "obtain an address automatically" from working, and
+     * therefore what made a manually configured host look like a requirement. */
+    if (handle_dhcp_packet(data, len)) {
+        g_host_diag.dhcp_offer++;
+        return 1;
+    }
+
     /* Discovery broadcasts/multicasts (wsdd, NetBIOS, LLMNR) are not
      * addressed to a unicast peer IP, so the regular bridge check below
      * cannot see them. Forward them before the local protocol handlers. */
@@ -1583,11 +1605,6 @@ static uint8_t handle_host_frame(const uint8_t *data, uint16_t len)
         /* Check for ICMP */
         if (handle_icmp_packet(data, len)) {
             g_host_diag.icmp_echo++;
-            return 1;
-        }
-        /* Check for DHCP */
-        if (handle_dhcp_packet(data, len)) {
-            g_host_diag.dhcp_offer++;
             return 1;
         }
         /* Captive portal: answer DNS queries before they cross the link */

@@ -942,10 +942,15 @@ static const uint8_t USBFS_RuntimeNcmBlock[USBFS_RUNTIME_NCM_BLOCK_SIZE] = {
     0x02,                                                   // bmNetworkCapabilities: NET_ADDRESS
     /* Endpoint Descriptor: CDC NCM notification EP6 IN */
     0x07, 0x05, 0x86, 0x03, 0x10, 0x00, 0x10,
-    /* Interface Descriptor: CDC NCM Data (IF5 alt 0, idle) */
-    0x09, 0x04, 0x05, 0x00, 0x00, 0x0A, 0x00, 0x00, 0x00,
+    /* Interface Descriptor: CDC NCM Data (IF5 alt 0, idle).
+     * bInterfaceProtocol must be 0x01: that is the value NCM 1.0 defines and
+     * the only one AppleUSBNCMData matches on class 0x0A / subclass 0x00.
+     * Windows' UsbNcm.sys keys off the communication interface's class 0x02 /
+     * subclass 0x0D, so it is indifferent to this byte -- leaving it 0x00 only
+     * locked macOS out of the target port. */
+    0x09, 0x04, 0x05, 0x00, 0x00, 0x0A, 0x00, 0x01, 0x00,
     /* Interface Descriptor: CDC NCM Data (IF5 alt 1, active) */
-    0x09, 0x04, 0x05, 0x01, 0x02, 0x0A, 0x00, 0x00, 0x00,
+    0x09, 0x04, 0x05, 0x01, 0x02, 0x0A, 0x00, 0x01, 0x00,
     /* Endpoint Descriptor: CDC NCM data OUT EP5 */
     0x07, 0x05, 0x05, 0x02, 0x40, 0x00, 0x00,
     /* Endpoint Descriptor: CDC NCM data IN EP7 */
