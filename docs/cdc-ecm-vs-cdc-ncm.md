@@ -113,6 +113,14 @@ ECM pair, so ECM data was squeezed into 32-byte slots to stay inside the 512-byt
 PMA. Mode 8 has no ACM on this controller, which is exactly why its NCM data
 endpoints can be 64 bytes.
 
+> **Trap**: the numbers above are the *runtime* descriptor, which mode 7 selects
+> because `USB_WORK_MODE_RUNTIME_PROFILES` defaults to 1. The static
+> `USBD_ConfigDescriptor` block for ACM+ECM still advertises `EP6 OUT 64 B` +
+> `EP4 IN 64 B`, while `usb_prop.c` initialises EP6 in both directions at 32 B
+> and transmission goes out on EP6. Building mode 7 with
+> `RUNTIME_PROFILES=0` would therefore hand the host an IN endpoint that is never
+> driven. Either fix or delete that block before using that combination.
+
 ### 4.2 Target port — USBFS controller (SRAM DMA, no PMA limit)
 
 | Role | Mode 7 (ECM) | Mode 8 (NCM) |
