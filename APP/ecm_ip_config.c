@@ -108,10 +108,12 @@ static bool validate_config(const ECM_IPConfig_t *cfg)
         }
     }
 
-    /* 5. Portal config: enabled/mode are boolean-ish, portal_ip must be a
-     * valid unicast address unless it is 0.0.0.0 (= follow host_ip). */
+    /* 5. Portal config: enabled/mode are small enums, portal_ip must be a
+     * valid unicast address unless it is 0.0.0.0 (= follow host_ip).
+     * portal_mode: 0 = off, 1 = greet once then satisfy the OS probe,
+     *              2 = hijack every query forever. */
     if (cfg->portal_enabled > 1u) return false;
-    if (cfg->portal_mode > 1u) return false;
+    if (cfg->portal_mode > 2u) return false;
     {
         const uint8_t z[4] = { 0, 0, 0, 0 };
         if (memcmp(cfg->portal_ip, z, 4) != 0 && !validate_ip_basic(cfg->portal_ip)) {

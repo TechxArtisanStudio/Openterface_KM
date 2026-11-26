@@ -33,7 +33,7 @@ extern "C" {
 #define ECM_IP_CONFIG_DEFAULT_TARGET_DEV_IP  { 192, 168, 20, 5 }
 /* Captive portal DNS hijack: ON by default, answer address follows host_ip */
 #define ECM_IP_CONFIG_DEFAULT_PORTAL_ENABLED 1u
-#define ECM_IP_CONFIG_DEFAULT_PORTAL_MODE    1u   /* 1 = hijack all UDP/53 A queries */
+#define ECM_IP_CONFIG_DEFAULT_PORTAL_MODE    1u   /* 1 = greet once, then NCSI settles */
 #define ECM_IP_CONFIG_DEFAULT_PORTAL_IP      { 0, 0, 0, 0 }
 
 /* User-visible network configuration */
@@ -45,7 +45,8 @@ typedef struct {
     uint8_t  target_host_ip[4]; /* Target PC IP (default: 192.168.20.2) */
     uint8_t  target_dev_ip[4];  /* Firmware target-side IP (default: 192.168.20.5) */
     uint8_t  portal_enabled;    /* Captive-portal DNS hijack: 0 = off, 1 = on */
-    uint8_t  portal_mode;       /* 0 = off, 1 = answer every UDP/53 A query */
+    uint8_t  portal_mode;       /* 0 = off, 1 = greet once then let the OS probe
+                                 *     settle, 2 = hijack every query forever */
     uint8_t  portal_ip[4];      /* Answer address; 0.0.0.0 = follow host_ip */
 } ECM_IPConfig_t;               /* sizeof = 27 */
 

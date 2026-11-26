@@ -1209,7 +1209,79 @@ static uint8_t handle_dhcp_packet(const uint8_t *frame, uint16_t frame_len)
  ******************************************************************************/
 #define NCM_PORTAL_MAX_REPLY  512u
 
+/* How long the portal stays "convincing" after the target (re)connects.
+ *
+ * Windows NCSI validates BOTH an HTTP probe (www.msftconnecttest.com /
+ * connecttest.txt) and a DNS probe (dns.msftncsi.com -> 131.107.255.255).
+ * Hijacking the DNS probe is what makes the OS detect a portal at all, but
+ * it also makes it detect one on EVERY poll, so Windows re-launches the
+ * portal browser (msftconnecttest.com/redirect) every poll as well - the
+ * field symptom was msn.com tabs piling up indefinitely.
+ *
+ * So: answer the probe name with the portal address only for the greeting
+ * window (the popup that opens the file manager once per plug-in), then
+ * answer it truthfully so NCSI can settle and the popup stops reappearing.
+ * 0 = never greet (portal plumbing stays silent, NCSI always satisfied).
+ */
+#ifndef NCM_PORTAL_GREET_MS
+#define NCM_PORTAL_GREET_MS   45000u
+#endif
+/* ...and at most this many probe answers may be spoofed, so a chatty
+ * resolver (Windows asks both A and AAAA) cannot keep the OS in "portal
+ * detected" forever. */
+#ifndef NCM_PORTAL_GREET_MAX
+#define NCM_PORTAL_GREET_MAX  4u
+#endif
+
+static const uint8_t k_ncsi_probe_name[] = {
+    3u, 'd', 'n', 's', 9u, 'm', 's', 'f', 't', 'n', 'c', 's', 'i',
+    3u, 'c', 'o', 'm', 0u
+};
+static const uint8_t k_ncsi_probe_answer[4] = { 131u, 107u, 255u, 255u };
+
 static volatile uint16_t g_portal_hijacked;
+static volatile uint32_t s_portal_greet_start_ms;
+static volatile uint8_t  s_portal_greet_probes;
+static uint8_t           s_portal_greet_used;
+
+/* Restart the greeting window (called when the target side reconnects).
+ * Hosts may re-issue SET_INTERFACE(alt=1) every few seconds while they
+ * re-validate the link; restarting on every one of those would keep the
+ * link permanently "captive portal". Only a genuine reconnect re-greets. */
+void NCM_Bridge_PortalGreetRestart(void)
+{
+    if (s_portal_greet_used &&
+        (uint32_t)(systick_ms - s_portal_greet_start_ms) < 30000u) {
+        return;
+    }
+    s_portal_greet_used = 1;
+    s_portal_greet_start_ms = systick_ms;
+    s_portal_greet_probes = 0;
+}
+
+/* Case-insensitive compare of a wire-format QNAME against a reference. */
+static uint8_t dns_name_equals_ci(const uint8_t *name, uint16_t name_len,
+                                  const uint8_t *ref, uint16_t ref_len)
+{
+    uint16_t i;
+    if (name_len != ref_len) {
+        return 0;
+    }
+    for (i = 0; i < ref_len; i++) {
+        uint8_t a = name[i];
+        uint8_t b = ref[i];
+        if (a >= 'A' && a <= 'Z') {
+            a = (uint8_t)(a + 32u);
+        }
+        if (b >= 'A' && b <= 'Z') {
+            b = (uint8_t)(b + 32u);
+        }
+        if (a != b) {
+            return 0;
+        }
+    }
+    return 1;
+}
 
 static uint8_t handle_dns_hijack(const uint8_t *data, uint16_t len,
                                  NCM_FrameQueue_t *queue,
@@ -1275,12 +1347,34 @@ static uint8_t handle_dns_hijack(const uint8_t *data, uint16_t len,
     }
 
     ECM_IPConfig_GetPortal(&enabled, &mode, portal_ip);
-    if (!enabled || mode != 1u) {
+    if (!enabled || mode == 0u) {
         return 0;
     }
     ECM_IPConfig_GetHostIP(host_ip);
     answer_ip = (portal_ip[0] | portal_ip[1] | portal_ip[2] | portal_ip[3])
                 ? portal_ip : host_ip;
+
+    /* Mode 1 = greet once, then let the OS settle. Only during the greeting
+     * window is the NCSI DNS probe answered with the portal address; after
+     * that it gets the value Windows expects, so the OS stops treating the
+     * link as a captive portal and stops relaunching the portal browser on
+     * every poll. Mode 2 = hijack everything forever (always a portal). */
+    if (mode == 1u &&
+        dns_name_equals_ci(&data[question_off],
+                           (uint16_t)(question_len - 4u),
+                           k_ncsi_probe_name,
+                           (uint16_t)sizeof(k_ncsi_probe_name))) {
+        uint8_t greeting = 0;
+        if (NCM_PORTAL_GREET_MS > 0u &&
+            (uint32_t)(systick_ms - s_portal_greet_start_ms) < NCM_PORTAL_GREET_MS &&
+            s_portal_greet_probes < NCM_PORTAL_GREET_MAX) {
+            greeting = 1;
+            s_portal_greet_probes++;
+        }
+        if (!greeting) {
+            answer_ip = k_ncsi_probe_answer;
+        }
+    }
 
     /* Build the reply: swap L2/L3/UDP addresses, keep the transaction ID. */
     off = 0;
@@ -2819,6 +2913,9 @@ void NCM_Bridge_InitTarget(void)
     g_target_ncm_notify_last_send_ms = 0;
     g_target_ncm_data_if_active = 0;
     g_ncm_target_tx_count = 0;
+
+    /* Target-side USB re-enumeration: greet the OS with the portal again. */
+    NCM_Bridge_PortalGreetRestart();
 
     /* Load target-side IP config */
     ECM_IPConfig_GetTargetHostIP(ncm_target_host_ip);

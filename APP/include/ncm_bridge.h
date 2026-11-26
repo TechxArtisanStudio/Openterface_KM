@@ -31,6 +31,7 @@ void NCM_Bridge_SetBleTxCallback(void (*cb)(void));
 uint8_t NCM_Bridge_SendRawFrame(const uint8_t *data, uint16_t len);
 void NCM_Bridge_Target_RearmLinkNotify(void);
 void NCM_Bridge_Target_SetDataAlt(uint8_t alt);  /* Reset RX state on SET_INTERFACE */
+void NCM_Bridge_PortalGreetRestart(void);        /* Re-arm the captive-portal greeting window */
 void NCM_Bridge_Target_NotificationPoll(void);  /* USBFS-side link notification poll */
 
 /* 0x33/0x10 diagnostics: host-side NCM bridge memory readout (no printf).
@@ -58,6 +59,7 @@ uint8_t NCM_ParseNtb(const uint8_t *ntb_buf, uint16_t ntb_len,
 #define NCM_Bridge_SendRawFrame(data, len) ((uint8_t)0)
 #define NCM_Bridge_Target_RearmLinkNotify() ((void)0)
 #define NCM_Bridge_Target_SetDataAlt(alt)   ((void)0)
+#define NCM_Bridge_PortalGreetRestart()     ((void)0)
 #define NCM_Bridge_Target_NotificationPoll() ((void)0)
 #define NCM_Bridge_GetHostDiagnostics(out, max) ((uint16_t)0)
 #define NCM_Bridge_GetBridgeDiagnostics(out, max) ((uint16_t)0)

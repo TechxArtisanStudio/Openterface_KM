@@ -39,13 +39,45 @@ if ! command -v nginx >/dev/null; then
 fi
 cat > "$NGINX_CONF" <<EOF
 # KeyMod captive portal: the firmware DNS hijack sends every name to
-# $HOST_IP, so the target OS connectivity probe (Windows NCSI,
-# macOS captive.apple.com, Android generate_204) lands here and is
-# redirected to the file manager.
+# $HOST_IP, so the target OS connectivity probe lands here.
+#
+# The OS probes are answered with the exact bodies they expect instead of a
+# redirect: the firmware only *spoofs* the NCSI DNS probe (dns.msftncsi.com)
+# during the greeting window after a plug-in, and once it stops, a 302 here
+# would keep Windows convinced the link is still a captive portal - it then
+# relaunches the portal browser (msftconnecttest.com/redirect -> msn.com) on
+# every poll. A real 200 lets the connectivity state settle.
 server {
     listen $HOST_IP:80;
     server_name _;
-    return 302 http://$HOST_IP:8080/;
+
+    # Windows NCSI
+    location = /connecttest.txt {
+        default_type text/plain;
+        add_header Cache-Control "no-store" always;
+        return 200 "Microsoft Connect Test";
+    }
+    location = /ncsi.txt {
+        default_type text/plain;
+        add_header Cache-Control "no-store" always;
+        return 200 "Microsoft NCSI";
+    }
+    # macOS captive probe expects this exact document to mean "no portal"
+    location = /hotspot-detect.html {
+        default_type text/html;
+        add_header Cache-Control "no-store" always;
+        return 200 "<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>";
+    }
+    # Android / ChromeOS
+    location = /generate_204 {
+        return 204;
+    }
+
+    # Portal URL the OS opens while a portal is still detected, plus any
+    # address the user typed: show the file manager.
+    location / {
+        return 302 http://$HOST_IP:8080/;
+    }
 }
 EOF
 nginx -t
@@ -56,7 +88,10 @@ echo "[3/3] Self test"
 IFACE="$(ip -o link | grep -i "$HOST_MAC" | sed -E 's/^[0-9]+: ([^:@]+).*/\1/')"
 sleep 1
 curl -s --noproxy "*" -m 5 -o /dev/null \
-    -w "probe: HTTP %{http_code} -> %{redirect_url}\n" \
+    -w "NCSI probe: HTTP %{http_code} (expect 200)\n" \
     "http://$HOST_IP/connecttest.txt"
+curl -s --noproxy "*" -m 5 -o /dev/null \
+    -w "portal URL: HTTP %{http_code} -> %{redirect_url} (expect 302)\n" \
+    "http://$HOST_IP/redirect"
 echo "Interface: ${IFACE:-unknown}  Portal redirect: OK"
-echo "On next plug-in the target OS should show its captive-portal popup."
+echo "On next plug-in the target OS should show its captive-portal popup once."
