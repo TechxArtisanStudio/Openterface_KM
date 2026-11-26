@@ -161,6 +161,13 @@ static uint16_t peripheralMTU = ATT_MTU_SIZE;
 #define BLE_ETH_NOTIFY_MAX_FAILS  3
 #define BLE_ETH_NOTIFY_SLOW_TICKS 24  /* 15 ms, one connection interval */
 #define BLE_ETH_ACK_HOLD_POLL_TICKS 16  /* 10 ms, re-check a held DATA ACK */
+
+/* Notifications this pump may emit per TMOS pass before yielding.  A full
+ * drain of the tunnel queue holds the main loop for as long as the queue is
+ * deep, and the NCM bridge queue behind it is only two frames (~3 kB, ~5.5 ms
+ * at measured throughput).  Four chunks is ~1 kB, well inside that slack, and
+ * the remainder is re-armed one tick later. */
+#define BLE_ETH_TX_CHUNKS_PER_PASS   4
 static uint8_t g_ble_eth_notify_fails;
 
 RingMemParm_t RingMemUSB;
@@ -863,6 +870,8 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
          * which PumpTick's signed wrap-safe comparison handles. */
         BLE_Eth_PumpTick((uint32_t)((uint64_t)TMOS_GetSystemClock() * 625U / 1000U));
 
+        uint8_t sent = 0;
+
         while ((len = BLE_Eth_GetNextTxChunk(tx_buf, max_notify_len)) > 0) {
             if (app_usb_notify(tx_buf, (uint8_t)len) != SUCCESS) {
                 /* The chunk is not consumed, so the queue still holds it. This
@@ -881,6 +890,13 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
             g_ble_eth_notify_fails = 0;
             g_ble_notify_ok_cum++;
             BLE_Eth_ConsumeTxChunk(len);
+            if (++sent >= BLE_ETH_TX_CHUNKS_PER_PASS) {
+                /* Budget spent: hand the CPU back and finish on the next
+                 * tick. Re-arming wins over the ACK hold below, which would
+                 * otherwise defer the rest of the queue by 10 ms. */
+                tmos_start_task(Peripheral_TaskID, SBP_PROCESS_BLEETH_TX_EVT, 1);
+                return (events ^ SBP_PROCESS_BLEETH_TX_EVT);
+            }
         }
 
         if (BLE_Eth_AckHeld()) {

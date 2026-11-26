@@ -2116,7 +2116,7 @@ static void target_watchdog(void)
     s_wd_last_ep5_count = ep5_count;
 }
 
-void NCM_Bridge_Poll(void)
+static void ncm_bridge_poll_body(void)
 {
     HIDLauncher_Poll();
     target_watchdog();
@@ -2220,6 +2220,27 @@ void NCM_Bridge_Poll(void)
             }
         }
     }
+}
+
+void NCM_Bridge_Poll(void)
+{
+    /* Two contexts call this: the main loop, and the EP4 IN completion ISR
+     * (`usb_endp.c`), which needs the next NTB chunk queued as soon as the
+     * previous one leaves. Running the body at the same time as the main loop
+     * is not merely wasteful -- `host_tx_feed()` hands the chunk to the
+     * controller and only then advances `s_host_ntb_tx_off`, so an ISR landing
+     * in that window re-sends the chunk it just queued, which the host sees as
+     * a duplicated Ethernet frame. The flag is set and cleared from both
+     * contexts, but the loser only ever skips work that the winner is already
+     * doing, so nothing is lost. */
+    static volatile uint8_t s_poll_busy = 0;
+
+    if (s_poll_busy) {
+        return;
+    }
+    s_poll_busy = 1;
+    ncm_bridge_poll_body();
+    s_poll_busy = 0;
 }
 
 void NCM_Bridge_UpdateIPConfig(void)

@@ -173,12 +173,10 @@ void Main_Circulation(void)
 #else
         Update_SDcard();
 #endif
-        //Enable Bluetooth broadcasting
-#ifdef ENABLE_BLE
-        if (version == 1 || version == 3) {
-            TMOS_SystemProcess();
-        }
-#endif
+        /* The BLE stack is pumped *after* the bridges, not before: TMOS runs
+         * application code inline (including the two notification pumps), so
+         * putting it first handed the NCM bridge whatever time was left over
+         * at the tail of every iteration. See docs/ncm-tmos-scheduling.md. */
         //Instruction code receiving protocol
         USB_DataRx_To_KMHandle();
         //Keyboard and mouse control code sending loop
@@ -222,6 +220,13 @@ void Main_Circulation(void)
         else if (BLE_Eth_HasActiveOrPendingConnection()) {
             ECM_Bridge_Poll();
             ecm_polled = 1;
+        }
+#endif
+
+        //Enable Bluetooth broadcasting
+#ifdef ENABLE_BLE
+        if (version == 1 || version == 3) {
+            TMOS_SystemProcess();
         }
 #endif
 
