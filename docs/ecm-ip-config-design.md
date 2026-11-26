@@ -1,5 +1,9 @@
 # ECM IP Configuration Design
 
+Status: **Design** — written for the ECM bridge; it remains the record for the
+flash layout, the validation rules and the `0x26`/`0x27` commands. What the shipped
+NCM bridge does with those addresses is in [ncm-bridge.md](ncm-bridge.md).
+
 ## Overview
 
 Allows every network configuration parameter in the ECM bridge to be changed
@@ -112,6 +116,12 @@ static const ECM_IPConfig_t ECM_IP_CONFIG_DEFAULT = {
 };
 ```
 
+> **Defaults actually shipped**: the constants above are the design-time values.
+> The current firmware ships `192.168.20.1 / .3 / .2 / .5` on `255.255.255.0`
+> (third octet `20`, see [ncm-bridge.md](ncm-bridge.md) §2). Only the numbers
+> differ — validation, flash layout and command codes in this document are
+> independent of them.
+
 #### 1.4 API interface
 
 ```c
@@ -183,10 +193,10 @@ static bool validate_config(const ECM_IPConfig_t *cfg) {
     /* 2. subnet mask validity */
     if (!validate_subnet_mask(cfg->subnet_mask))  return false;
     
-    /* 3. every IP must be in the same subnet
-     *    The ECM bridge emulates two NICs inside the firmware and bridges their
-     *    traffic; if the host side and the target side are not in the same
-     *    subnet, routing fails.
+    /* 3. the four addresses form one segment, so they share one network part
+     *    The bridge is a transparent L2 link: host_ip/dev_ip and
+     *    target_host_ip/target_dev_ip end up on the same wire. There is no
+     *    router on that wire, so an address outside the mask is unreachable.
      */
     if (!validate_same_subnet(cfg->host_ip, cfg->dev_ip, cfg->subnet_mask))
         return false;
@@ -212,10 +222,15 @@ static bool validate_config(const ECM_IPConfig_t *cfg) {
 }
 ```
 
-> **Note**: the host side and the target side are allowed to sit in different
-> subnets (cross-subnet traffic is handled by host-side routing), so validation only
-> requires host/dev in one subnet and target_host/target_dev in another, without
-> requiring the two sides to share a subnet.
+> **Note on "different subnets"**: the statement that the host side and the target
+> side may sit in different subnets describes the addresses the two machines had
+> **before** the bridge was plugged in — the host's uplink address and the target's
+> own LAN address. Those addresses are outside the bridge and never appear in the
+> configuration record, so they are not validated. Plugging the bridge in creates a
+> **new** segment, and the four addresses of that new segment (`host_ip`, `dev_ip`,
+> `target_host_ip`, `target_dev_ip`) must share one subnet — the bridge is a
+> transparent L2 link with no router on it. That is what `validate_config()`
+> enforces above.
 
 #### 1.6 Initialisation and error recovery
 
@@ -560,7 +575,7 @@ restore a usable two-page state:
 
 The defaults must also pass `validate_config()` (the factory defaults are valid by
 construction), ensuring that what is written during initialisation can be read back
-later.
+later. The shipped numbers are `192.168.20.x`, as noted in §1.3.
 
 ### 6. Verification flow
 
@@ -615,13 +630,15 @@ later.
 1. **IP format validation**: when setting the configuration, an IP address must not
    be `0.0.0.0` or `255.255.255.255`.
 
-2. **All IPs must be in the same subnet**: the ECM bridge emulates two NICs inside
-   the firmware and bridges their traffic, so **host_ip, dev_ip, target_host_ip and
-   target_dev_ip must all be in the same subnet**. If the host side and the target
-   side are not in the same subnet, routing fails and the network cannot come up.
-   For example:
+2. **The four bridge addresses share one subnet**: the bridge is a transparent L2
+   segment, so **host_ip, dev_ip, target_host_ip and target_dev_ip must all be in
+   the same subnet**. "The host side and the target side may be in different
+   subnets" refers only to the machines' own, pre-existing addresses (the host's
+   uplink, the target's own LAN): they lie outside the bridge and are not part of
+   this record. A bridge address outside the mask has no router to reach it, so the
+   link cannot come up. For example:
    - ✅ valid: `192.168.11.1`, `192.168.11.3`, `192.168.11.2`, `192.168.11.5`, mask `255.255.255.0`
-   - ❌ invalid: `192.168.11.1`, `192.168.11.3`, `10.0.0.2`, `10.0.0.5`, mask `255.255.255.0` (host side and target side on different subnets)
+   - ❌ invalid: `192.168.11.1`, `192.168.11.3`, `10.0.0.2`, `10.0.0.5`, mask `255.255.255.0` (the target-side addresses fall outside the bridge subnet)
 
 3. **IP addresses must be distinct**: the four IP addresses must all differ, to
    avoid conflicts. For example `host_ip` must not equal `dev_ip`.
@@ -677,13 +694,14 @@ reliability:
 
 - **Power-loss safe**: the atomic write strategy guarantees the configuration is never corrupted
 - **Long-lived**: alternating writes across two pages spread the flash wear
-- **Robust**: parameter validation rejects illegal configurations (all IPs in one subnet, all distinct), and error recovery keeps boot from blocking
+- **Robust**: parameter validation rejects illegal configurations (an address outside the bridge subnet, a duplicate address), and error recovery keeps boot from blocking
 - **Evolvable**: the version number and schema version support future firmware backward compatibility
 
-**Key constraint**: the way the ECM bridge works requires host_ip, dev_ip,
-target_host_ip and target_dev_ip to all be in the same subnet, otherwise routing
-between the host side and the target side fails. The configuration commands'
-validation logic enforces this, so any illegal configuration is rejected.
+**Key constraint**: the bridge creates one L2 segment, so host_ip, dev_ip,
+target_host_ip and target_dev_ip must all be in the same subnet; there is no router
+on that segment. The two machines' pre-existing addresses (uplink, own LAN) are not
+part of the record and may differ freely. The configuration commands' validation
+logic enforces the bridge constraint, so any illegal configuration is rejected.
 
 The design follows the existing flash configuration pattern and offers good
 backward compatibility and extensibility.

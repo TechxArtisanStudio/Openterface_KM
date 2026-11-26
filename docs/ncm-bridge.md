@@ -54,9 +54,12 @@ Defaults, stored in `ECM_IPConfig_t` (see §7) and overridable at runtime:
 `192.168.20.0/24` is deliberately outside any common home/office subnet so
 the peer never confuses it with its uplink.
 
-Frame identity is by MAC, not by interface name: the host-facing NCM function
-uses `02:00:00:00:00:01`, the target-facing one `02:00:00:00:00:32`. Interface
-names such as `enp0s21f0u1u2` change on every re-enumeration.
+Frame identity is by MAC, not by interface name (names such as
+`enp0s21f0u1u2` change on every re-enumeration). Both NCM functions advertise
+`02:00:00:00:00:01` in their `iMACAddress` string, so each peer adopts that as
+*its own* interface MAC. The source MAC the firmware puts on the frames it
+injects must not collide with it: `02:00:00:00:00:32` towards the host port,
+`02:00:00:00:00:33` towards the target port.
 
 ---
 

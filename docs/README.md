@@ -67,7 +67,7 @@ for the WCH MounRiver Studio flow.
 |---|---|---|
 | [controllable-usb-endpoint-modes.md](controllable-usb-endpoint-modes.md) | Design | mode model (build-time and runtime profiles), endpoint policy, verification matrix |
 | [usb-endpoint-map-mode7.md](usb-endpoint-map-mode7.md) | Reference | Mode 7 endpoint map: HID + host ACM + host ECM + target ECM |
-| [usb-endpoint-map-mode8.md](usb-endpoint-map-mode8.md) | Reference | Mode 8 endpoint map: HID + target CDC-NCM |
+| [usb-endpoint-map-mode8.md](usb-endpoint-map-mode8.md) | Reference | Mode 8 endpoint map: HID + CDC-NCM on both ports (endpoints, descriptors, buffers) |
 | [usb-firmware-industrial-grade-optimization.md](usb-firmware-industrial-grade-optimization.md) | Plan | robustness backlog for the USB stack |
 | [internal-memory-usage.md](internal-memory-usage.md) | Reference | RAM/flash budget per build configuration |
 
@@ -157,7 +157,7 @@ language, so no document needs a translation to be read.
 | [ble-pairing-design.md](ble-pairing-design.md) | pairing and security model | M1/M2/M3 status as of 2026-11-10 |
 | [ble-ota-design.md](ble-ota-design.md) | BLE OTA update | route A adopted; M0 not started |
 | [BLE_ADV_PARAM_0x19_COMMAND_SPECIFICATION.md](BLE_ADV_PARAM_0x19_COMMAND_SPECIFICATION.md) | advertising-parameter command `0x19` | all command codes and checksums reproduced exactly |
-| [usb-endpoint-map-mode7.md](usb-endpoint-map-mode7.md), [usb-endpoint-map-mode8.md](usb-endpoint-map-mode8.md) | endpoint maps | tables are authoritative; endpoint/pin values unchanged |
+| [usb-endpoint-map-mode7.md](usb-endpoint-map-mode7.md) | endpoint map (mode 7) | tables are authoritative; endpoint/pin values unchanged |
 | [ecm-ip-config-design.md](ecm-ip-config-design.md) | IP config flash record | struct layout and command codes unchanged |
 | [FIRMWARE_DHCP_DEBUG_GUIDE.md](FIRMWARE_DHCP_DEBUG_GUIDE.md) | DHCP debugging recipes | superseded by [ncm-bridge.md](ncm-bridge.md) §4 and §10 |
 | [STABILITY_FIX_PLAN.md](STABILITY_FIX_PLAN.md) | stability workstream | build sizes and test IDs unchanged |
@@ -165,6 +165,12 @@ language, so no document needs a translation to be read.
 
 When editing one of these, edit the English text directly; do not reintroduce a
 parallel translation.
+
+`usb-endpoint-map-mode8.md` was translated first and then **re-derived from the
+firmware source** on 2026-11-26: the endpoint tables, descriptor lengths, buffer
+layout and notification state machines now describe the implementation, not the
+original draft. Treat it as a source-derived reference; the translation note no
+longer applies to it.
 
 ---
 
