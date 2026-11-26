@@ -132,7 +132,7 @@ IF2  CDC ECM control  ─ EP2 IN  16B (notification)
 IF3  CDC ECM data     ─ EP6 OUT 32B / EP6 IN 32B (one bidirectional endpoint)
 ```
 
-### 3.2 What the Target PC sees (USBFS, 6 interfaces / 181B)
+### 3.2 What the Target PC sees (USBFS, 6 interfaces / 188B)
 
 ```
 IF0  HID keyboard     ─ EP1 IN 8B
