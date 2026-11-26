@@ -443,7 +443,10 @@ function delP(qname) {
         if path.is_dir():
             self._send(200, self._listing(path, urllib.parse.unquote(
                 urllib.parse.urlsplit(self.path).path)),
-                {"Content-Type": "text/html; charset=utf-8"})
+                # The page is generated per directory and its own script changes
+                # with it; caching only ever serves a stale UI.
+                {"Content-Type": "text/html; charset=utf-8",
+                 "Cache-Control": "no-store"})
         elif path.is_file():
             self._send_file(path)
         else:
