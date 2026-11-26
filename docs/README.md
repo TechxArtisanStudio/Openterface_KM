@@ -51,7 +51,7 @@ Everything they replace is still in the tree, marked *Superseded*, for history.
 |---|---|---|
 | [build-and-flash-guide.md](build-and-flash-guide.md) | Reference | toolchain, `make` flags, WCHISPStudio/MRS flashing, verification |
 | [build-flash-cycle.md](build-flash-cycle.md) | Reference | scripted build → ISP → flash loop over the control board UART |
-| [build-on-mac.md](build-on-mac.md) | Reference | macOS/Linux toolchain notes, xpack wrapper quirks |
+| [build-on-mac.md](build-on-mac.md) | Reference | macOS/Linux toolchain notes, xpack wrapper quirks, the control-board flash sequence on macOS, size-reporting traps |
 | [software-isp-entry-design.md](software-isp-entry-design.md) | Design | entering the bootloader without touching the BOOT pin |
 | [keymod-firmware-update-guide.md](keymod-firmware-update-guide.md) | Guide | end-user update procedure |
 | [KEYMOD_PLUS_BETA_NOTICE.md](KEYMOD_PLUS_BETA_NOTICE.md) | Notice | beta firmware caveats for KeyMod Plus |
