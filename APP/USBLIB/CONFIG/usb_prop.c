@@ -40,14 +40,23 @@ static volatile uint16_t USBD_CDC_ECM_PacketFilter;
 #include "../../include/ncm_bridge.h"
 
 #if USB_WORK_MODE_COMPILES_HOST_CDC_NCM
+/* CDC-NCM 1.0 class requests, in the numbering the specification and both
+ * Linux cdc_ncm and AppleUSBDeviceNCM use.  The first implementation shifted
+ * the upper block (0x87 = GET_NTB_INPUT_SIZE, 0x89 = GET_NTB_FORMAT,
+ * 0x8A = GET_MAX_DATAGRAM_SIZE) which no peer actually sends; Apple's driver
+ * probes the spec codes below, so both the read and write paths are needed. */
 #define USBD_CDC_NCM_REQ_GET_NTB_PARAMS       0x80u
-#define USBD_CDC_NCM_REQ_GET_NTB_INPUT_SIZE   0x87u
+#define USBD_CDC_NCM_REQ_GET_NET_ADDRESS      0x81u
+#define USBD_CDC_NCM_REQ_SET_NET_ADDRESS      0x82u
+#define USBD_CDC_NCM_REQ_GET_NTB_FORMAT       0x83u
+#define USBD_CDC_NCM_REQ_SET_NTB_FORMAT       0x84u
+#define USBD_CDC_NCM_REQ_GET_NTB_INPUT_SIZE   0x85u
 #define USBD_CDC_NCM_REQ_SET_NTB_INPUT_SIZE   0x86u
-#define USBD_CDC_NCM_REQ_GET_NTB_FORMAT       0x89u
-#define USBD_CDC_NCM_REQ_SET_NTB_FORMAT       0x88u
+#define USBD_CDC_NCM_REQ_GET_MAX_DATAGRAM     0x87u
+#define USBD_CDC_NCM_REQ_SET_MAX_DATAGRAM     0x88u
+#define USBD_CDC_NCM_REQ_GET_CRC_MODE         0x89u
+#define USBD_CDC_NCM_REQ_SET_CRC_MODE         0x8Au
 #define USBD_CDC_NCM_REQ_SET_PACKET_FILTER    0x43u
-#define USBD_CDC_NCM_REQ_GET_MAX_DATAGRAM     0x8Au
-#define USBD_CDC_NCM_REQ_SET_MAX_DATAGRAM     0x8Bu
 
 /* GET_NTB_INPUT_SIZE response: dwNtbInMaxSize(4) + dwNtbOutMaxSize(4).
  * We advertise the same max on both directions.                          */
@@ -957,6 +966,41 @@ static uint8_t *USBD_CDC_NCM_SetNtbInputSize(uint16_t Length)
   return USBD_CDC_NCM_CtrlBuf;
 }
 
+static uint8_t *USBD_CDC_NCM_GetNetAddress(uint16_t Length)
+{
+  /* Same address the iMACAddress string descriptor reports; the host adopts
+   * it as the interface MAC, the firmware keeps using .32/.33 on the wire. */
+  static const uint8_t mac[6] = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
+  if (Length == 0)
+  {
+    pInformation->Ctrl_Info.Usb_wLength = sizeof(mac);
+    return NULL;
+  }
+  return (uint8_t *)mac;
+}
+
+static uint8_t *USBD_CDC_NCM_GetNtbFormat(uint16_t Length)
+{
+  static const uint8_t ntb_format[2] = { 0x00, 0x00 };  /* NTB-16 only */
+  if (Length == 0)
+  {
+    pInformation->Ctrl_Info.Usb_wLength = sizeof(ntb_format);
+    return NULL;
+  }
+  return (uint8_t *)ntb_format;
+}
+
+static uint8_t *USBD_CDC_NCM_GetCrcMode(uint16_t Length)
+{
+  static const uint8_t crc_mode[2] = { 0x00, 0x00 };    /* no CRC */
+  if (Length == 0)
+  {
+    pInformation->Ctrl_Info.Usb_wLength = sizeof(crc_mode);
+    return NULL;
+  }
+  return (uint8_t *)crc_mode;
+}
+
 static uint8_t *USBD_CDC_NCM_GetMaxDatagram(uint16_t Length)
 {
   static uint8_t max_dg[2];
@@ -1013,19 +1057,34 @@ RESULT USBD_Data_Setup(uint8_t RequestNo)
       CopyRoutine = &USBD_CDC_NCM_GetNtbParams;
     }
     else if (USB_ModeConfig_ActiveModeHasHostCdcNcm() &&
+        Request_No == USBD_CDC_NCM_REQ_GET_NET_ADDRESS)
+    {
+      CopyRoutine = &USBD_CDC_NCM_GetNetAddress;
+    }
+    else if (USB_ModeConfig_ActiveModeHasHostCdcNcm() &&
+        Request_No == USBD_CDC_NCM_REQ_GET_NTB_FORMAT)
+    {
+      CopyRoutine = &USBD_CDC_NCM_GetNtbFormat;
+    }
+    else if (USB_ModeConfig_ActiveModeHasHostCdcNcm() &&
         Request_No == USBD_CDC_NCM_REQ_GET_NTB_INPUT_SIZE)
     {
       CopyRoutine = &USBD_CDC_NCM_GetNtbInputSize;
     }
     else if (USB_ModeConfig_ActiveModeHasHostCdcNcm() &&
-             (Request_No == USBD_CDC_NCM_REQ_SET_NTB_INPUT_SIZE ||
-              Request_No == USBD_CDC_NCM_REQ_GET_NTB_FORMAT ||
-              Request_No == USBD_CDC_NCM_REQ_GET_MAX_DATAGRAM))
+        Request_No == USBD_CDC_NCM_REQ_GET_MAX_DATAGRAM)
     {
-      CopyRoutine = (Request_No == USBD_CDC_NCM_REQ_GET_NTB_FORMAT ||
-                     Request_No == USBD_CDC_NCM_REQ_GET_MAX_DATAGRAM)
-                    ? &USBD_CDC_NCM_GetMaxDatagram
-                    : &USBD_CDC_NCM_SetNtbInputSize;
+      CopyRoutine = &USBD_CDC_NCM_GetMaxDatagram;
+    }
+    else if (USB_ModeConfig_ActiveModeHasHostCdcNcm() &&
+        Request_No == USBD_CDC_NCM_REQ_GET_CRC_MODE)
+    {
+      CopyRoutine = &USBD_CDC_NCM_GetCrcMode;
+    }
+    else if (USB_ModeConfig_ActiveModeHasHostCdcNcm() &&
+        Request_No == USBD_CDC_NCM_REQ_SET_NTB_INPUT_SIZE)
+    {
+      CopyRoutine = &USBD_CDC_NCM_SetNtbInputSize;
     }
     else
 #endif
@@ -1117,6 +1176,11 @@ RESULT USBD_NoData_Setup(uint8_t RequestNo)
       USBD_CDC_NCM_PacketFilter = pInformation->USBwValue;
       return USB_SUCCESS;
     }
+    if (USB_ModeConfig_ActiveModeHasHostCdcNcm() && Request_No == USBD_CDC_NCM_REQ_SET_NET_ADDRESS)
+    {
+      /* Accepted and ignored: the device keeps its descriptor MAC. */
+      return USB_SUCCESS;
+    }
     if (USB_ModeConfig_ActiveModeHasHostCdcNcm() && Request_No == USBD_CDC_NCM_REQ_SET_NTB_FORMAT)
     {
       /* We only support 16-bit NTB format (wValue == 0). Reject 32-bit. */
@@ -1129,6 +1193,15 @@ RESULT USBD_NoData_Setup(uint8_t RequestNo)
     if (USB_ModeConfig_ActiveModeHasHostCdcNcm() && Request_No == USBD_CDC_NCM_REQ_SET_MAX_DATAGRAM)
     {
       return USB_SUCCESS;
+    }
+    if (USB_ModeConfig_ActiveModeHasHostCdcNcm() && Request_No == USBD_CDC_NCM_REQ_SET_CRC_MODE)
+    {
+      /* No CRC support; only the "no CRC" setting is acceptable. */
+      if (pInformation->USBwValue == 0)
+      {
+        return USB_SUCCESS;
+      }
+      return USB_UNSUPPORT;
     }
     if (USB_ModeConfig_ActiveModeHasHostCdcNcm() && !USB_ModeConfig_ActiveModeHasHostCdcAcm()
         && !USB_ModeConfig_ActiveModeHasHostCdcEcm())

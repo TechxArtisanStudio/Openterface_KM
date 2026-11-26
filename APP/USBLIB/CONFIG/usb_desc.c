@@ -70,21 +70,24 @@ const uint8_t  USBD_NcmConfigDescriptor[USBD_SIZE_CONFIG_DESC] = {
     0xEA, 0x05,                             /* wMaxSegmentSize: 1514 */
     0x00, 0x00,                             /* wNumberMCFilters: none */
     0x00,                                   /* bNumberPowerFilters */
-    /* NCM Functional Descriptor (14 bytes, subtype 0x1A) */
-    0x0E, 0x24, 0x1A,                       /* NCM Functional */
+    /* NCM Functional Descriptor: exactly 6 bytes (NCM 1.0 section 5.2).
+     * bmNetworkCapabilities is one byte; wMaxSegmentSize and the filter
+     * counts belong to the Ethernet Networking descriptor above.  The old
+     * 14-byte form is what makes Windows fail with Code 10. */
+    0x06, 0x24, 0x1A,                       /* NCM Functional */
     0x00, 0x01,                             /* bcdNCMVersion: 1.00 */
-    0x01, 0x00, 0x00, 0x00,                 /* bmNetworkCapabilities: NET_ADDRESS */
-    0xEA, 0x05,                             /* wMaxSegmentSize: 1514 */
-    0x00, 0x00,                             /* wNumberMCFilters */
-    0x00,                                   /* bNumberPowerFilters */
+    0x01,                                   /* bmNetworkCapabilities: NET_ADDRESS */
 
     /* Endpoint Descriptor: NCM notification EP5 IN (interrupt) */
     0x07, 0x05, 0x85, 0x03, 0x10, 0x00, 0x10,
 
-    /* Interface 1: CDC NCM Data (alt 0, idle) */
-    0x09, 0x04, 0x01, 0x00, 0x00, 0x0A, 0x00, 0x00, 0x00,
+    /* Interface 1: CDC NCM Data (alt 0, idle).
+     * bInterfaceProtocol must be 0x01 (NCM): macOS binds AppleUSBNCMData
+     * only to class 0x0A / subclass 0x00 / protocol 0x01, and with 0x00 the
+     * device enumerates but no network interface is created. */
+    0x09, 0x04, 0x01, 0x00, 0x00, 0x0A, 0x00, 0x01, 0x00,
     /* Interface 1: CDC NCM Data (alt 1, active) */
-    0x09, 0x04, 0x01, 0x01, 0x02, 0x0A, 0x00, 0x00, 0x00,
+    0x09, 0x04, 0x01, 0x01, 0x02, 0x0A, 0x00, 0x01, 0x00,
 
     /* Endpoint Descriptor: NCM data OUT EP3 (bulk) */
     0x07, 0x05, 0x03, 0x02, 0x40, 0x00, 0x00,

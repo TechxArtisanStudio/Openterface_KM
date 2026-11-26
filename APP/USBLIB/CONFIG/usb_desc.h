@@ -47,8 +47,9 @@
 /* 9(cfg) + 79(CDC-ECM) = 88 */
 #define USBD_SIZE_CONFIG_DESC        88
 #elif USB_WORK_MODE_BRIDGE_NCM
-/* Mode 8 host-facing CDC-NCM NIC: 9(cfg) + 93(CDC-NCM) = 102 */
-#define USBD_SIZE_CONFIG_DESC        102
+/* Mode 8 host-facing CDC-NCM NIC: 9(cfg) + 85(CDC-NCM) = 94
+ * (the NCM functional descriptor is 6 bytes, not 14) */
+#define USBD_SIZE_CONFIG_DESC        94
 #else
 /* 9(cfg) + 66(CDC-ACM) = 75 */
 #define USBD_SIZE_CONFIG_DESC        75
