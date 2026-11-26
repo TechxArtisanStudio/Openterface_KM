@@ -23,6 +23,7 @@
 #include "../../include/acm_bridge.h"
 #include "../../include/ecm_bridge.h"
 #include "../../include/usb_mode_config.h"
+#include "../../include/mac_uid.h"
 
 uint8_t Request = 0;
 
@@ -283,7 +284,11 @@ void USBD_Status_Out(void)
 void USBD_init(void)
 {
   uint8_t	i;
-    
+
+  /* Fill the iMACAddress strings from the UID before the Host can enumerate
+   * us (the pull-up is only enabled at the end of this function). */
+  USBD_MacString_Init();
+
   pInformation->Current_Configuration = 0;
   PowerOn();
   for (i=0;i<8;i++) _SetENDPOINT(i,_GetENDPOINT(i) & 0x7F7F & EPREG_MASK);//all clear
@@ -968,12 +973,14 @@ static uint8_t *USBD_CDC_NCM_SetNtbInputSize(uint16_t Length)
 
 static uint8_t *USBD_CDC_NCM_GetNetAddress(uint16_t Length)
 {
-  /* Same address the iMACAddress string descriptor reports; the host adopts
-   * it as the interface MAC, the firmware keeps using .32/.33 on the wire. */
-  static const uint8_t mac[6] = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
+  /* Same address the iMACAddress string descriptor reports: both come from
+   * MacUid_Get(MAC_ROLE_HOST_NIC), so they cannot drift apart.  The host
+   * adopts it as its interface MAC; the firmware keeps sending frames with
+   * MAC_ROLE_HOST_PEER as the source. */
+  const uint8_t *mac = MAC_HOST_NIC;
   if (Length == 0)
   {
-    pInformation->Ctrl_Info.Usb_wLength = sizeof(mac);
+    pInformation->Ctrl_Info.Usb_wLength = MAC_ADDR_LEN;
     return NULL;
   }
   return (uint8_t *)mac;

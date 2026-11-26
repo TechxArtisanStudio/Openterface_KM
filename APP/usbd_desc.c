@@ -17,6 +17,7 @@
 #include "include/Version_selection.h"
 #include "include/uac_desc.h"
 #include "include/usb_mode_config.h"
+#include "include/mac_uid.h"
 #include <string.h>
 
 /*******************************************************************************/
@@ -1575,8 +1576,12 @@ const uint8_t  MySerNumInfo[ ] =
     '1', 0
 };
 
-/* CDC ECM MAC address string: ASCII hex, no separators. */
-const uint8_t MyEcmMacInfo[ ] =
+/* CDC ECM MAC address string: ASCII hex, no separators.
+ *
+ * All three MAC strings below are rewritten from the chip UID by
+ * MyMacInfo_Init() before the USBFS pull-up is enabled; the literals are only
+ * the pre-init fallback (and document the legacy values). */
+uint8_t MyEcmMacInfo[ ] =
 {
     0x1A,
     0x03,
@@ -1586,13 +1591,13 @@ const uint8_t MyEcmMacInfo[ ] =
 
 /* Target CDC ECM MAC address string: ASCII hex, no separators.
  * This iMACAddress is the descriptor MAC macOS adopts as its OWN interface
- * address (e.g. en11 = 02:00:00:00:03:00). It must therefore DIFFER from
- * ECM_TARGET_DEV_MAC / g_dev_mac (02:00:00:00:03:32), the source MAC we put on
- * every ARP/GARP/ICMP/TCP frame: if the two match, macOS drops our frames as
- * self-MAC and the target can never be ARP-resolved (SSH CONNECT times out
- * with 0xE1). Same split as the host side (...00:02 descriptor vs ...00:32 peer).
- * Descriptor MAC: 02:00:00:00:03:00 */
-const uint8_t MyTargetEcmMacInfo[ ] =
+ * address. It must therefore DIFFER from the source MAC we put on every
+ * ARP/GARP/ICMP/TCP frame toward the Target (MAC_ROLE_TARGET_PEER): if the two
+ * match, macOS drops our frames as self-MAC and the target can never be
+ * ARP-resolved (SSH CONNECT times out with 0xE1). Same split as the host side
+ * (MAC_ROLE_HOST_NIC vs MAC_ROLE_HOST_PEER). At runtime this holds
+ * MAC_ROLE_TARGET_NIC. */
+uint8_t MyTargetEcmMacInfo[ ] =
 {
     0x1A,
     0x03,
@@ -1600,12 +1605,28 @@ const uint8_t MyTargetEcmMacInfo[ ] =
     '0', 0, '0', 0, '0', 0, '3', 0, '0', 0, '0', 0
 };
 
-/* CDC NCM MAC address string: ASCII hex, no separators.
- * MAC address: 02:00:00:00:00:01 */
-const uint8_t MyNcmMacInfo[ ] =
+/* CDC NCM MAC address string (target port): at runtime MAC_ROLE_TARGET_NIC,
+ * the same address USBFS answers for NCM GET_NET_ADDRESS. */
+uint8_t MyNcmMacInfo[ ] =
 {
     0x1A,
     0x03,
     '0', 0, '2', 0, '0', 0, '0', 0, '0', 0, '0', 0,
     '0', 0, '0', 0, '0', 0, '0', 0, '0', 0, '1', 0
 };
+
+/**
+ * Rewrites the USBFS-side iMACAddress strings from the UID-derived MACs.
+ * Must run before USBFS_Device_Init(ENABLE) connects the port; main() calls
+ * it right before that for exactly this reason.
+ */
+void MyMacInfo_Init(void)
+{
+#if USB_WORK_MODE_COMPILES_TARGET_CDC_ECM
+    MacUid_FormatString(MyEcmMacInfo,       MAC_HOST_NIC);
+    MacUid_FormatString(MyTargetEcmMacInfo, MAC_TARGET_NIC);
+#endif
+#if USB_WORK_MODE_COMPILES_BRIDGE_NCM
+    MacUid_FormatString(MyNcmMacInfo,       MAC_TARGET_NIC);
+#endif
+}

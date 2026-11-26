@@ -16,7 +16,9 @@
 #   sudo tools/setup_captive_portal.sh
 set -euo pipefail
 
-HOST_MAC="02:00:00:00:00:01"     # firmware host-facing NIC MAC
+# The NIC's MAC is UID-derived per unit (shape 02:xx:xx:xx:xx:01), so read it
+# off the plugged-in unit instead of hardcoding the old fixed address.
+HOST_MAC="$(sh "$(dirname "$0")/find_host_nic.sh" -m)"     # firmware host-facing NIC MAC
 HOST_IP="192.168.20.1"
 NGINX_CONF="/etc/nginx/conf.d/keymod-portal.conf"
 
@@ -85,7 +87,7 @@ systemctl enable --now nginx >/dev/null 2>&1 || true
 systemctl reload nginx
 
 echo "[3/3] Self test"
-IFACE="$(ip -o link | grep -i "$HOST_MAC" | sed -E 's/^[0-9]+: ([^:@]+).*/\1/')"
+IFACE="$(sh "$(dirname "$0")/find_host_nic.sh")"
 sleep 1
 curl -s --noproxy "*" -m 5 -o /dev/null \
     -w "NCSI probe: HTTP %{http_code} (expect 200)\n" \

@@ -30,6 +30,8 @@
 #include "include/pwm_led.h"
 #include "include/button.h"
 #include "include/ecm_ip_config.h"
+#include "include/usbd_desc.h"
+#include "include/mac_uid.h"
 
 /*********************************************************************
  * @fn      Systick_Init
@@ -287,6 +289,12 @@ int main(void) {
     SystemCoreClockUpdate();
     Delay_Init();
     Systick_Init();  /* Initialize 1ms timer early - needed by all modules */
+
+    /* Derive this unit's four Ethernet addresses from the chip UID before
+     * anything can format a descriptor or send a frame.  Cheap (twelve byte
+     * reads plus a hash) and idempotent, so module inits may call it again. */
+    MacUid_Init();
+
     USB_ModeConfig_Init();
     ECM_IPConfig_Init();  // Initialize ECM IP configuration (before dependent modules)
     DefaultTargetConfig_Init();  // Uses ECM target IP as its fallback
@@ -304,6 +312,8 @@ int main(void) {
     }
     //usbfs_init
     USBFS_RCC_Init();
+    /* iMACAddress strings must be filled before the port is connected. */
+    MyMacInfo_Init();
     USBFS_Device_Init(ENABLE);
     USB_Sleep_Wakeup_CFG();
 #ifdef USB_BRINGUP_DIAG

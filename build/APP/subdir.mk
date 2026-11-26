@@ -22,6 +22,7 @@ C_SRCS += \
 ../APP/iwdg_auto.c \
 ../APP/keyboard_handler.c \
 ../APP/km_ring.c \
+../APP/mac_uid.c \
 ../APP/mouse_handler.c \
 ../APP/ncm_bridge.c \
 ../APP/hid_launcher.c \
@@ -54,6 +55,7 @@ C_DEPS += \
 ./APP/iwdg_auto.d \
 ./APP/keyboard_handler.d \
 ./APP/km_ring.d \
+./APP/mac_uid.d \
 ./APP/mouse_handler.d \
 ./APP/ncm_bridge.d \
 ./APP/hid_launcher.d \
@@ -86,6 +88,7 @@ OBJS += \
 ./APP/iwdg_auto.o \
 ./APP/keyboard_handler.o \
 ./APP/km_ring.o \
+./APP/mac_uid.o \
 ./APP/mouse_handler.o \
 ./APP/ncm_bridge.o \
 ./APP/hid_launcher.o \

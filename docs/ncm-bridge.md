@@ -55,11 +55,21 @@ Defaults, stored in `ECM_IPConfig_t` (see §7) and overridable at runtime:
 the peer never confuses it with its uplink.
 
 Frame identity is by MAC, not by interface name (names such as
-`enp0s21f0u1u2` change on every re-enumeration). Both NCM functions advertise
-`02:00:00:00:00:01` in their `iMACAddress` string, so each peer adopts that as
-*its own* interface MAC. The source MAC the firmware puts on the frames it
-injects must not collide with it: `02:00:00:00:00:32` towards the host port,
-`02:00:00:00:00:33` towards the target port.
+`enp0s21f0u1u2` change on every re-enumeration). Each NCM function advertises
+a per-unit address in its `iMACAddress` string, so each peer adopts that as
+*its own* interface MAC. Since the addresses come from the chip UID, the
+predictable part is only the shape `02:xx:xx:xx:xx:rr`
+([cross-os-portability.md](cross-os-portability.md) §4.1):
+
+| Role | Shape | Who sees it |
+|---|---|---|
+| host NIC | `02:xx:xx:xx:xx:01` | host peer adopts it; also returned by `GET_NET_ADDRESS` |
+| host peer | `02:xx:xx:xx:xx:32` | source MAC of frames we inject toward the host |
+| target NIC | `02:xx:xx:xx:xx:00` | target peer adopts it |
+| target peer | `02:xx:xx:xx:xx:33` | source MAC of frames we inject toward the target |
+
+The peer MAC must never equal the NIC MAC of the same link; an OS drops frames
+whose source is its own address.
 
 ---
 
@@ -323,8 +333,9 @@ These are consequences of the design, not bugs to file:
   and `\\192.168.20.1` work normally.
 * **WS-Discovery needs a rename-proof listener.** `wsdd` binds the interface
   *name*; a replug changes it (`u1u2` → `u5u2`) and the daemon dies with
-  `Bad file descriptor`. Resolve the interface by MAC (`02:00:00:00:00:01`)
-  and restart on change.
+  `Bad file descriptor`. Resolve the interface by MAC shape
+  (`02:xx:xx:xx:xx:01`) and restart on change;
+  `tools/find_host_nic.sh` does exactly that.
 * **No internet through the bridge.** There is no NAT and no upstream. After
   the greeting, names that the host resolver cannot answer simply fail.
 * **Five-minute leases.** Intentional; expect a renewal every 5 minutes.
@@ -357,7 +368,7 @@ Link and lease:
 
 ```bash
 ip -br addr show | grep 192.168.20          # host side holds .1/24
-ip neigh show | grep 192.168.20             # peer at .2, MAC 02:00:00:00:00:32
+ip neigh show | grep 192.168.20             # peer at .2, MAC 02:xx:xx:xx:xx:32
 ```
 
 DHCP option check on a peer (Windows): `ipconfig /all` must show an address in

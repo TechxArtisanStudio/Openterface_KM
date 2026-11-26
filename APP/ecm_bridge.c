@@ -2,6 +2,7 @@
 #include "include/Version_selection.h"
 #include "include/usb_mode_config.h"
 #include "include/ecm_ip_config.h"
+#include "include/mac_uid.h"
 
 #if USB_WORK_MODE_COMPILES_BRIDGE_ECM
 
@@ -111,18 +112,20 @@ static uint8_t ecm_subnet_mask[4];
 static uint8_t ecm_target_host_ip[4];
 static uint8_t ecm_target_dev_ip[4];
 
-/* Firmware-side peer identity on the CDC ECM link. The descriptor MAC
-   02:00:00:00:00:02 becomes macOS's interface MAC, so ARP replies must use a
-   distinct peer MAC or macOS ignores them as self-MAC replies. */
-static const uint8_t ECM_DEV_MAC[6] = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x32 };
+/* Firmware-side peer identity on the CDC ECM link. The iMACAddress descriptor
+   string becomes the Host's interface MAC, so ARP replies must use a distinct
+   peer MAC or the Host ignores them as self-MAC replies.  Both addresses now
+   come from the chip UID (mac_uid.h): role 0x32 for the peer, 0x01 for the
+   address the Host adopts, same 4-byte prefix either way. */
+#define ECM_DEV_MAC          MAC_HOST_PEER
 
 /* Firmware-side peer identity on the Target CDC ECM link (USBFS side).
- * Must DIFFER from the target descriptor MAC (MyTargetEcmMacInfo =
- * 02:00:00:00:03:00): macOS adopts that descriptor MAC as its own interface
- * address, so any ARP/GARP/ICMP frame we emit with the same source MAC is
- * dropped as a self-MAC frame and the target can never be ARP-resolved.
- * Mirrors the host-side ECM_DEV_MAC (...00:32 vs descriptor ...00:02). */
-static const uint8_t ECM_TARGET_DEV_MAC[6] = { 0x02, 0x00, 0x00, 0x00, 0x03, 0x32 };
+ * Must DIFFER from the target descriptor MAC served by MyTargetEcmMacInfo:
+ * the Target OS adopts that descriptor MAC as its own interface address, so
+ * any ARP/GARP/ICMP frame we emit with the same source MAC is dropped as a
+ * self-MAC frame and the target can never be ARP-resolved.  Role 0x33 vs 0x00
+ * guarantees that split per unit. */
+#define ECM_TARGET_DEV_MAC   MAC_TARGET_PEER
 
 typedef struct {
     uint8_t data[ECM_BRIDGE_MTU_FRAME_SIZE];

@@ -78,10 +78,11 @@ extern uint8_t USBD_StringSerial [USBD_SIZE_STRING_SERIAL];
 extern const uint8_t USBD_StringAudioFunction[USBD_SIZE_STRING_AUDIO_FUNC];
 extern const uint8_t USBD_StringSpeaker[USBD_SIZE_STRING_SPEAKER];
 extern const uint8_t USBD_StringMicrophone[USBD_SIZE_STRING_MICROPHONE];
-extern const uint8_t USBD_StringEcmMac[USBD_SIZE_STRING_ECM_MAC];
+extern uint8_t USBD_StringEcmMac[USBD_SIZE_STRING_ECM_MAC];
 extern const uint8_t USBD_StringTargetEcmMac[USBD_SIZE_STRING_TARGET_ECM_MAC];
-extern const uint8_t USBD_StringNcmMac[USBD_SIZE_STRING_NCM_MAC];
+extern uint8_t USBD_StringNcmMac[USBD_SIZE_STRING_NCM_MAC];
 const uint8_t *USBD_GetActiveConfigDescriptorData(uint16_t *len);
+void USBD_MacString_Init(void);
 uint8_t USBD_GetActiveConfigAttributes(void);
 
 #ifdef __cplusplus

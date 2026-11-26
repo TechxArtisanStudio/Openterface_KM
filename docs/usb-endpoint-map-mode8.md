@@ -220,7 +220,7 @@ its peer's driver actually sends:
 | Host port (USBLIB) | Code | Reply |
 |---|---|---|
 | `GET_NTB_PARAMETERS` | `0x80` | the same 28-byte structure |
-| `GET_NET_ADDRESS` / `SET_NET_ADDRESS` | `0x81` / `0x82` | 6-byte MAC (`02:00:00:00:00:01`) / accepted, ignored |
+| `GET_NET_ADDRESS` / `SET_NET_ADDRESS` | `0x81` / `0x82` | 6-byte MAC, host port = `iMACAddress` value (`02:xx:xx:xx:xx:01`) / accepted, ignored |
 | `GET_NTB_FORMAT` / `SET_NTB_FORMAT` | `0x83` / `0x84` | 0 / accepted (0 only) |
 | `GET_NTB_INPUT_SIZE` / `SET_NTB_INPUT_SIZE` | `0x85` / `0x86` | 2048 in, 2048 out (8 bytes) / accepted |
 | `GET_MAX_DATAGRAM_SIZE` / `SET_MAX_DATAGRAM_SIZE` | `0x87` / `0x88` | 1514 / accepted |
@@ -336,10 +336,10 @@ relaying first would consume it and the target would fall back to `169.254.x.x`
 exercises it — the host-side NIC is configured statically in the current
 deployment.
 
-MAC identity (see [ncm-bridge.md](ncm-bridge.md) §2): both NICs advertise
-`02:00:00:00:00:01` in their `iMACAddress` string, so each peer adopts that as
-*its own* interface MAC. Frames the firmware injects carry
-`02:00:00:00:00:32` towards the host port and `02:00:00:00:00:33` towards the
+MAC identity (see [ncm-bridge.md](ncm-bridge.md) §2): each NIC advertises a
+UID-derived `02:xx:xx:xx:xx:01` in its `iMACAddress` string, so each peer
+adopts that as *its own* interface MAC. Frames the firmware injects carry
+`02:xx:xx:xx:xx:32` towards the host port and `02:xx:xx:xx:xx:33` towards the
 target port. The two must not collide, or the peer filters our frames as
 loopback.
 
@@ -368,7 +368,7 @@ Check both ports:
 ```bash
 lsusb -t                       # two NCM functions, one per controller
 ip -br addr show | grep 192.168.20     # host side holds .1/24
-ip neigh show  | grep 192.168.20       # peer at .2, MAC 02:00:00:00:00:32
+ip neigh show  | grep 192.168.20       # peer at .2, MAC 02:xx:xx:xx:xx:32
 ```
 
 On the target, `ipconfig /all` must show an address in `192.168.20.0/24`, an

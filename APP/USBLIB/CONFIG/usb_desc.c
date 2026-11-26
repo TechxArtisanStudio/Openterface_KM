@@ -12,6 +12,7 @@
 #include "../../include/Version_selection.h"
 #include "../../include/uac_desc.h"
 #include "../../include/usb_mode_config.h"
+#include "../../include/mac_uid.h"
 #include <string.h>
 
 /* USB Device Descriptors */
@@ -1070,7 +1071,14 @@ const uint8_t USBD_StringMicrophone[USBD_SIZE_STRING_MICROPHONE] = {
     'A', 0, '-', 0, 'I', 0, 'N', 0
 };
 
-const uint8_t USBD_StringEcmMac[USBD_SIZE_STRING_ECM_MAC] = {
+/* Host-facing CDC ECM MAC address string.
+ *
+ * The initialiser is only a fallback for a read that happens before
+ * USBD_MacString_Init() (it is the pre-UID constant).  At every real
+ * enumeration the digits are rewritten from MacUid_Get(MAC_ROLE_HOST_NIC),
+ * which is also what CDC NCM GET_NET_ADDRESS answers, so the descriptor and
+ * the class request can never disagree. */
+uint8_t USBD_StringEcmMac[USBD_SIZE_STRING_ECM_MAC] = {
     USBD_SIZE_STRING_ECM_MAC,
     USB_STRING_DESCRIPTOR_TYPE,
     '0', 0, '2', 0, '0', 0, '0', 0, '0', 0, '0', 0,
@@ -1085,12 +1093,31 @@ const uint8_t USBD_StringTargetEcmMac[USBD_SIZE_STRING_TARGET_ECM_MAC] = {
     '0', 0, '0', 0, '0', 0, '0', 0, '0', 0, '3', 0
 };
 
-/* NCM MAC string descriptor */
-const uint8_t USBD_StringNcmMac[USBD_SIZE_STRING_NCM_MAC] = {
+/* NCM MAC string descriptor (iMACAddress=4 in the mode 8 descriptor). */
+uint8_t USBD_StringNcmMac[USBD_SIZE_STRING_NCM_MAC] = {
     USBD_SIZE_STRING_NCM_MAC,
     USB_STRING_DESCRIPTOR_TYPE,
     '0', 0, '2', 0, '0', 0, '0', 0, '0', 0, '0', 0,
     '0', 0, '0', 0, '0', 0, '0', 0, '0', 0, '1', 0
 };
+
+/**
+ * Rewrites the iMACAddress string descriptors from the UID-derived MACs.
+ *
+ * Called from USBD_init() before the D+ pull-up is enabled, i.e. before the
+ * Host can ask for a descriptor, so the constants above never reach the wire.
+ * Both ECM and NCM reference string index 4 depending on which mode is
+ * compiled; the two buffers exist side by side because only one of them is
+ * reachable in a given image.
+ */
+void USBD_MacString_Init(void)
+{
+#if USB_WORK_MODE_COMPILES_HOST_CDC_ECM
+    MacUid_FormatString(USBD_StringEcmMac, MAC_HOST_NIC);
+#endif
+#if USB_WORK_MODE_BRIDGE_NCM
+    MacUid_FormatString(USBD_StringNcmMac, MAC_HOST_NIC);
+#endif
+}
 
 

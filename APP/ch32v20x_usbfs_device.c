@@ -26,6 +26,7 @@
 #include "include/ncm_bridge.h"
 #include "include/ble_eth_protocol.h"
 #include "include/usb_mode_config.h"
+#include "include/mac_uid.h"
 /*******************************************************************************/
 /* Variable Definition */
 
@@ -257,8 +258,11 @@ static uint8_t USBFS_CDC_NCM_NtbParams[28] = {
     0x04, 0x00,  /* wNdpOutAlignment: 4 */
     0x10, 0x00,  /* wNtbOutMaxDatagrams: 16 */
 };
-/* MAC address for NCM interface (locally administered) */
-static const uint8_t USBFS_CDC_NCM_MacAddr[6] = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
+/* MAC address for the NCM interface: the same UID-derived address the
+ * iMACAddress string descriptor reports (MAC_ROLE_TARGET_NIC), so a host that
+ * asks for the address by class request and the one that parses the
+ * descriptor cannot end up with two different MACs. */
+#define USBFS_CDC_NCM_MacAddr  MAC_TARGET_NIC
 #endif
 
 /* Endpoint Buffer */
@@ -1397,10 +1401,10 @@ void USBFS_IRQHandler( void )
                                     ( ( USBFS_SetupReqType & USB_REQ_RECIP_MASK ) == USB_REQ_RECIP_INTERF ) &&
                                     ( (uint8_t)( USBFS_SetupReqIndex & 0xFF ) == USBFS_CDC_NCM_IF_COMM ) )
                                 {
-                                    memcpy( USBFS_EP0_Buf, USBFS_CDC_NCM_MacAddr, sizeof( USBFS_CDC_NCM_MacAddr ) );
-                                    if( USBFS_SetupReqLen > sizeof( USBFS_CDC_NCM_MacAddr ) )
+                                    memcpy( USBFS_EP0_Buf, USBFS_CDC_NCM_MacAddr, MAC_ADDR_LEN );
+                                    if( USBFS_SetupReqLen > MAC_ADDR_LEN )
                                     {
-                                        USBFS_SetupReqLen = sizeof( USBFS_CDC_NCM_MacAddr );
+                                        USBFS_SetupReqLen = MAC_ADDR_LEN;
                                     }
                                     len = USBFS_SetupReqLen;
                                 }

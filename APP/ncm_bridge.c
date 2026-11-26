@@ -12,6 +12,7 @@
 #include "include/Version_selection.h"
 #include "include/usb_mode_config.h"
 #include "include/ecm_ip_config.h"
+#include "include/mac_uid.h"
 
 #if USB_WORK_MODE_COMPILES_BRIDGE_NCM
 
@@ -147,11 +148,15 @@ static uint8_t ncm_subnet_mask[4];
 static uint8_t ncm_target_host_ip[4];
 static uint8_t ncm_target_dev_ip[4];
 
-/* Firmware-side peer identity on the CDC NCM link */
-static const uint8_t NCM_DEV_MAC[6] = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x32 };
+/* Firmware-side peer identity on the CDC NCM link.  Derived from the chip UID
+ * (see mac_uid.h) so two units never share an address; distinct from the
+ * address the Host adopts from the descriptor, otherwise the Host drops our
+ * frames as self-MAC. */
+#define NCM_DEV_MAC          MAC_HOST_PEER
 
-/* Target-side MAC (different from host-side to avoid self-MAC filtering) */
-static const uint8_t NCM_TARGET_DEV_MAC[6] = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x33 };
+/* Target-side source MAC, likewise UID-derived and distinct from both the
+ * host-side peer and the address the Target adopts from the descriptor. */
+#define NCM_TARGET_DEV_MAC   MAC_TARGET_PEER
 
 /*******************************************************************************
  * Frame Queue Structures
@@ -1131,7 +1136,7 @@ static uint8_t handle_dhcp_packet(const uint8_t *frame, uint16_t frame_len)
      * time out -- omit it and let the peer keep its other interface's DNS. */
     {
         uint8_t p_enabled, p_mode, p_ip[4];
-        ECM_IPConfig_GetPortal(&p_enabled, &p_mode, &p_ip);
+        ECM_IPConfig_GetPortal(&p_enabled, &p_mode, p_ip);
         if (p_enabled && p_mode == 1u) {
             reply[off++] = NCM_DHCP_OPT_DNS;
             reply[off++] = 0x04;

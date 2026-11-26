@@ -9,12 +9,11 @@
 # and the systemd unit once, then restarts the services.
 set -euo pipefail
 
-# Default interface: auto-detect the firmware's host-facing NIC by MAC
-# (02:00:00:00:00:01). USB renames the enp* name on every replug, but the
-# MAC-stable altname enx020000000001 always works.
-HOST_MAC="02:00:00:00:00:01"
-IFACE="${1:-$(ip -o link | grep -i "$HOST_MAC" | sed -E 's/^[0-9]+: ([^:@]+).*/\1/' | head -1)}"
-IFACE="${IFACE:-enx020000000001}"
+# Default interface: auto-detect the firmware's host-facing NIC.  Its MAC is
+# derived from the chip UID, so the only stable part is the shape
+# 02:xx:xx:xx:xx:01 -- find_host_nic.sh matches that, which also covers units
+# still running the legacy fixed 02:00:00:00:00:01.
+IFACE="${1:-$(sh "$(dirname "$0")/find_host_nic.sh")}"
 SHARE_DIR="${SHARE_DIR:-/home/bbot/SharedWithTarget}"
 # Unique product identity: never use a generic name (e.g. FEDORA) — any
 # machine with the same hostname on an adjacent network steals name

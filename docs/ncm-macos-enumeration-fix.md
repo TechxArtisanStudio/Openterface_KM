@@ -82,7 +82,10 @@ Device: en23
 Ethernet Address: 02:00:00:00:00:01
 ```
 
-The MAC comes from the `iMACAddress` string, as intended. The interface has no
+The MAC comes from the `iMACAddress` string, as intended. This capture predates
+the UID derivation (`APP/mac_uid.c`): current builds answer
+`02:xx:xx:xx:xx:01`, which is the same role byte with a per-unit middle
+([cross-os-portability.md](cross-os-portability.md) §4.1). The interface has no
 IPv4 address yet: the firmware's DHCP server serves the **target** port, so the
 host side is configured statically, exactly as on the Fedora deployment:
 

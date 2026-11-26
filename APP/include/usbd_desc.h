@@ -115,10 +115,11 @@ extern const uint8_t MyLangDescr[ ];
 extern const uint8_t MyManuInfo[ ];
 extern const uint8_t MyProdInfo[ ];
 extern const uint8_t MySerNumInfo[ ];
-extern const uint8_t MyEcmMacInfo[ ];
+extern uint8_t MyEcmMacInfo[ ];
 extern const uint8_t MyHostEcmMacInfo[ ];
-extern const uint8_t MyTargetEcmMacInfo[ ];
-extern const uint8_t MyNcmMacInfo[ ];
+extern uint8_t MyTargetEcmMacInfo[ ];
+extern uint8_t MyNcmMacInfo[ ];
+void MyMacInfo_Init(void);
 const uint8_t *USBFS_GetActiveConfigDescriptorData(uint16_t *len);
 uint8_t USBFS_GetActiveConfigAttributes(void);
 
