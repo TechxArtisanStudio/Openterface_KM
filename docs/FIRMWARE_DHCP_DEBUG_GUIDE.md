@@ -1,64 +1,65 @@
-# 固件 DHCP 服务器调试指南
+# Firmware DHCP server debugging guide
 
 > **Superseded.** See §4 and §10 of [ncm-bridge.md](ncm-bridge.md) for the current DHCP behaviour and verification steps.
 
-## 问题描述
+## Problem description
 
-### 现象
-- Bot 设备通过以太网连接到 Openterface 的 Target 端口
-- Bot 设备配置为 DHCP 模式（自动获取 IP）
-- Bot 设备无法获取 IP 地址，日志显示 "no lease"
-- 手动配置静态 IP 192.168.11.2 后可以正常通信
+### Symptoms
+- A bot device connects to the Openterface Target port over Ethernet
+- The bot device is configured for DHCP (automatic IP configuration)
+- The bot device cannot obtain an IP address and logs "no lease"
+- Manually configuring the static IP 192.168.11.2 makes communication work
 
-### 预期行为
-固件应该实现 DHCP 服务器，为 Target 设备自动分配 IP 地址：
-1. Bot 设备发送 DHCP Discover
-2. Openterface 固件响应 DHCP Offer（IP: 192.168.11.2）
-3. Bot 设备发送 DHCP Request
-4. Openterface 固件响应 DHCP ACK
+### Expected behaviour
+The firmware should implement a DHCP server that automatically assigns an IP
+address to the Target device:
+1. The bot device sends DHCP Discover
+2. The Openterface firmware replies with DHCP Offer (IP: 192.168.11.2)
+3. The bot device sends DHCP Request
+4. The Openterface firmware replies with DHCP ACK
 
-### 实际行为
-- Bot 设备发送 DHCP Discover
-- 固件未响应 DHCP Offer
-- Bot 设备超时失败
+### Actual behaviour
+- The bot device sends DHCP Discover
+- The firmware does not reply with a DHCP Offer
+- The bot device times out
 
-## 代码分析
+## Code analysis
 
-### 关键文件
+### Key files
 
 #### 1. APP/ecm_bridge.c
-- **handle_target_dhcp_packet()** (第 705-1100 行)
-  - 处理来自 Target PC 的 DHCP Discover/Request
-  - 分配 IP 192.168.11.2
-  - 构建 DHCP Offer/ACK 响应
+- **handle_target_dhcp_packet()** (lines 705-1100)
+  - handles DHCP Discover/Request from the Target PC
+  - assigns the IP 192.168.11.2
+  - builds the DHCP Offer/ACK response
 
-- **handle_target_frame()** (第 1763-1780 行)
-  - 处理从 Target 端接收到的以太网帧
-  - 调用 handle_target_dhcp_packet() 处理 DHCP 请求
+- **handle_target_frame()** (lines 1763-1780)
+  - handles Ethernet frames received from the Target side
+  - calls handle_target_dhcp_packet() to handle DHCP requests
 
-- **ECM_Bridge_TargetRxDone()** (第 1754-1761 行)
-  - Target 端数据接收完成回调
-  - 将数据传递给 handle_target_frame()
+- **ECM_Bridge_TargetRxDone()** (lines 1754-1761)
+  - Target-side receive-complete callback
+  - passes the data to handle_target_frame()
 
 #### 2. APP/include/usb_work_mode.h
-- **USB_WORK_MODE_COMPILES_TARGET_CDC_ECM** (第 56 行)
-  - 控制是否编译 Target CDC ECM 功能
-  - 当前设置为：`(USB_WORK_MODE_HAS_TARGET_CDC_ECM || USB_WORK_MODE_RUNTIME_PROFILES)`
-  - 对于 USB_WORK_MODE=6 (HID_ACM_ECM)，此宏应该为真
+- **USB_WORK_MODE_COMPILES_TARGET_CDC_ECM** (line 56)
+  - controls whether the Target CDC ECM function is compiled
+  - currently set to: `(USB_WORK_MODE_HAS_TARGET_CDC_ECM || USB_WORK_MODE_RUNTIME_PROFILES)`
+  - for USB_WORK_MODE=6 (HID_ACM_ECM) this macro should be true
 
 #### 3. APP/include/ecm_ip_config.h
-- **ECM_IP_CONFIG_DEFAULT_TARGET_HOST_IP** (第 32 行)
-  - 默认值：{ 192, 168, 11, 2 }
-  - 这是分配给 Target PC 的 IP 地址
+- **ECM_IP_CONFIG_DEFAULT_TARGET_HOST_IP** (line 32)
+  - default: { 192, 168, 11, 2 }
+  - this is the IP address assigned to the Target PC
 
-### 数据流
+### Data flow
 
 ```
-Bot 设备 (DHCP Discover)
+Bot device (DHCP Discover)
     ↓
-Target 端口 (物理以太网)
+Target port (physical Ethernet)
     ↓
-USBFS 设备栈 (EP6 OUT)
+USBFS device stack (EP6 OUT)
     ↓
 ECM_Bridge_TargetRxDone()
     ↓
@@ -66,32 +67,32 @@ handle_target_frame()
     ↓
 handle_target_dhcp_packet()
     ↓
-构建 DHCP Offer
+build the DHCP Offer
     ↓
-ECM_Bridge_SendRawFrame() 或类似函数
+ECM_Bridge_SendRawFrame() or similar
     ↓
-USBFS 设备栈 (EP7 IN)
+USBFS device stack (EP7 IN)
     ↓
-Target 端口
+Target port
     ↓
-Bot 设备
+Bot device
 ```
 
-## 调试步骤
+## Debugging steps
 
-### 步骤 1：验证编译配置
+### Step 1: verify the build configuration
 
-检查固件是否正确编译了 Target CDC ECM 功能：
+Check whether the firmware actually compiled the Target CDC ECM function:
 
 ```bash
-# 检查编译时的 USB_WORK_MODE
+# check the USB_WORK_MODE used at build time
 grep -n "USB_WORK_MODE" build/makefile
 
-# 检查是否定义了 USB_WORK_MODE_COMPILES_TARGET_CDC_ECM
+# check whether USB_WORK_MODE_COMPILES_TARGET_CDC_ECM is defined
 grep -n "USB_WORK_MODE_COMPILES_TARGET_CDC_ECM" APP/include/usb_work_mode.h
 
-# 检查实际编译的值
-# 在 APP/ecm_bridge.c 中添加调试代码：
+# check the value actually compiled in
+# add debug code in APP/ecm_bridge.c:
 #if USB_WORK_MODE_COMPILES_TARGET_CDC_ECM
     USB_DEBUG("Target CDC ECM: ENABLED\r\n");
 #else
@@ -99,14 +100,14 @@ grep -n "USB_WORK_MODE_COMPILES_TARGET_CDC_ECM" APP/include/usb_work_mode.h
 #endif
 ```
 
-**预期输出**: "Target CDC ECM: ENABLED"
+**Expected output**: "Target CDC ECM: ENABLED"
 
-### 步骤 2：验证数据接收
+### Step 2: verify data reception
 
-检查 Target 端是否正确接收到 DHCP 请求：
+Check whether the Target side receives the DHCP request correctly:
 
 ```c
-// 在 APP/ecm_bridge.c 的 ECM_Bridge_TargetRxDone() 函数中添加：
+// add to ECM_Bridge_TargetRxDone() in APP/ecm_bridge.c:
 void ECM_Bridge_TargetRxDone(const uint8_t *data, uint16_t len)
 {
     USB_DEBUG("Target RX: len=%d\r\n", len);
@@ -118,18 +119,18 @@ void ECM_Bridge_TargetRxDone(const uint8_t *data, uint16_t len)
         USB_DEBUG("  EthType: 0x%02x%02x\r\n", data[12], data[13]);
     }
     
-    // ... 原有代码
+    // ... existing code
 }
 ```
 
-**预期输出**: 应该看到 DHCP 请求的数据包（EthType: 0x0800，协议: UDP，端口: 67）
+**Expected output**: the DHCP request packets should appear (EthType: 0x0800, protocol: UDP, port: 67)
 
-### 步骤 3：验证 DHCP 处理函数
+### Step 3: verify the DHCP handler
 
-检查 handle_target_dhcp_packet() 是否被调用：
+Check whether handle_target_dhcp_packet() is called:
 
 ```c
-// 在 APP/ecm_bridge.c 的 handle_target_frame() 函数中修改：
+// change handle_target_frame() in APP/ecm_bridge.c:
 static uint8_t handle_target_frame(const uint8_t *frame, uint16_t frame_len)
 {
     USB_DEBUG("Target frame: len=%d\r\n", frame_len);
@@ -140,50 +141,50 @@ static uint8_t handle_target_frame(const uint8_t *frame, uint16_t frame_len)
         return 1;
     }
     
-    // ... 原有代码
+    // ... existing code
 }
 ```
 
-**预期输出**: 应该看到 "DHCP response queued"
+**Expected output**: "DHCP response queued" should appear
 
-### 步骤 4：验证 DHCP 请求解析
+### Step 4: verify DHCP request parsing
 
-检查 DHCP 请求是否正确解析：
+Check whether the DHCP request is parsed correctly:
 
 ```c
-// 在 APP/ecm_bridge.c 的 handle_target_dhcp_packet() 函数中添加：
+// add to handle_target_dhcp_packet() in APP/ecm_bridge.c:
 static uint8_t handle_target_dhcp_packet(const uint8_t *frame, uint16_t frame_len)
 {
     USB_DEBUG("DHCP handler entered, frame_len=%d\r\n", frame_len);
     
-    // 在解析 Ethernet header 后：
+    // after parsing the Ethernet header:
     USB_DEBUG("  EthType: 0x%04X\r\n", eth_type);
     
-    // 在解析 IP header 后：
+    // after parsing the IP header:
     USB_DEBUG("  IP proto: %d\r\n", ip[9]);
     
-    // 在解析 UDP header 后：
+    // after parsing the UDP header:
     USB_DEBUG("  UDP dst port: %d\r\n", get_be16(&udp[2]));
     
-    // 在解析 DHCP message type 后：
+    // after parsing the DHCP message type:
     USB_DEBUG("  DHCP msg type: %d\r\n", dhcp_msg_type);
     
-    // ... 原有代码
+    // ... existing code
 }
 ```
 
-**预期输出**: 
+**Expected output**:
 - EthType: 0x0800
 - IP proto: 17 (UDP)
 - UDP dst port: 67
-- DHCP msg type: 1 (Discover) 或 3 (Request)
+- DHCP msg type: 1 (Discover) or 3 (Request)
 
-### 步骤 5：验证 DHCP 响应构建
+### Step 5: verify DHCP response construction
 
-检查 DHCP 响应是否正确构建：
+Check whether the DHCP response is built correctly:
 
 ```c
-// 在 handle_target_dhcp_packet() 的响应构建部分添加：
+// add to the response construction part of handle_target_dhcp_packet():
 USB_DEBUG("Building DHCP response:\r\n");
 USB_DEBUG("  yiaddr: %d.%d.%d.%d\r\n", 
           reply[yiaddr_offset], reply[yiaddr_offset+1], 
@@ -193,34 +194,34 @@ USB_DEBUG("  dst IP: %d.%d.%d.%d\r\n",
           reply[dst_ip_offset+2], reply[dst_ip_offset+3]);
 ```
 
-**预期输出**: 
+**Expected output**:
 - yiaddr: 192.168.11.2
-- dst IP: 255.255.255.255 (Discover) 或 192.168.11.2 (Request)
+- dst IP: 255.255.255.255 (Discover) or 192.168.11.2 (Request)
 
-### 步骤 6：验证响应发送
+### Step 6: verify response transmission
 
-检查 DHCP 响应是否正确发送：
+Check whether the DHCP response is sent correctly:
 
 ```c
-// 在 handle_target_dhcp_packet() 返回前添加：
+// add before handle_target_dhcp_packet() returns:
 USB_DEBUG("DHCP response ready, len=%d\r\n", reply_len);
 
-// 在 ECM_Bridge_SendRawFrame() 或类似函数中添加：
+// add to ECM_Bridge_SendRawFrame() or similar:
 void ECM_Bridge_SendRawFrame(const uint8_t *data, uint16_t len)
 {
     USB_DEBUG("Sending raw frame: len=%d\r\n", len);
-    // ... 原有代码
+    // ... existing code
 }
 ```
 
-**预期输出**: 应该看到 "Sending raw frame" 和正确的长度
+**Expected output**: "Sending raw frame" with the correct length should appear
 
-### 步骤 7：验证 USBFS 端点配置
+### Step 7: verify the USBFS endpoint configuration
 
-检查 Target 端的 USBFS 端点是否正确配置：
+Check whether the USBFS endpoints on the Target side are configured correctly:
 
 ```c
-// 在 APP/ch32v20x_usbfs_device.c 的 USBFS_Device_Endp_Init() 中添加：
+// add to USBFS_Device_Endp_Init() in APP/ch32v20x_usbfs_device.c:
 #if USB_WORK_MODE_HAS_HOST_ACM_AND_ECM
     USB_DEBUG("USBFS endpoints:\r\n");
     USB_DEBUG("  EP3: ECM data OUT (RX)\r\n");
@@ -230,56 +231,56 @@ void ECM_Bridge_SendRawFrame(const uint8_t *data, uint16_t len)
 #endif
 ```
 
-**预期输出**: 端点配置正确
+**Expected output**: the endpoint configuration is correct
 
-### 步骤 8：验证 MAC 地址
+### Step 8: verify the MAC address
 
-检查 Target 端的 MAC 地址配置：
+Check the MAC address configuration on the Target side:
 
 ```c
-// 在 APP/ecm_bridge.c 中检查：
+// check in APP/ecm_bridge.c:
 USB_DEBUG("Target device MAC: %02x:%02x:%02x:%02x:%02x:%02x\r\n",
           ECM_TARGET_DEV_MAC[0], ECM_TARGET_DEV_MAC[1], ECM_TARGET_DEV_MAC[2],
           ECM_TARGET_DEV_MAC[3], ECM_TARGET_DEV_MAC[4], ECM_TARGET_DEV_MAC[5]);
 ```
 
-**预期输出**: 02:00:00:00:03:00（或其他配置的 MAC）
+**Expected output**: 02:00:00:00:03:00 (or whatever MAC is configured)
 
-## 可能的原因
+## Possible causes
 
-### 原因 1：Target CDC ECM 未编译
-- **症状**: USB_DEBUG 显示 "Target CDC ECM: DISABLED"
-- **解决**: 检查 USB_WORK_MODE 配置，确保为 6 (HID_ACM_ECM)
+### Cause 1: Target CDC ECM not compiled
+- **Symptom**: USB_DEBUG prints "Target CDC ECM: DISABLED"
+- **Fix**: check the USB_WORK_MODE configuration and make sure it is 6 (HID_ACM_ECM)
 
-### 原因 2：数据未到达 Target 端
-- **症状**: ECM_Bridge_TargetRxDone() 未被调用
-- **解决**: 检查 USBFS 端点配置，确保 EP6 OUT 正确配置
+### Cause 2: data never reaches the Target side
+- **Symptom**: ECM_Bridge_TargetRxDone() is never called
+- **Fix**: check the USBFS endpoint configuration and make sure EP6 OUT is configured correctly
 
-### 原因 3：DHCP 请求未正确解析
-- **症状**: handle_target_dhcp_packet() 返回 0
-- **解决**: 检查以太网帧格式，确保符合 DHCP 规范
+### Cause 3: the DHCP request is not parsed correctly
+- **Symptom**: handle_target_dhcp_packet() returns 0
+- **Fix**: check the Ethernet frame format and make sure it conforms to the DHCP specification
 
-### 原因 4：DHCP 响应未正确构建
-- **症状**: DHCP 响应数据错误
-- **解决**: 检查 DHCP 响应构建逻辑，确保字段正确
+### Cause 4: the DHCP response is not built correctly
+- **Symptom**: the DHCP response data is wrong
+- **Fix**: check the DHCP response construction logic and make sure the fields are correct
 
-### 原因 5：DHCP 响应未发送
-- **症状**: 响应构建成功但未发送
-- **解决**: 检查 ECM_Bridge_SendRawFrame() 或类似函数
+### Cause 5: the DHCP response is not sent
+- **Symptom**: the response is built successfully but never sent
+- **Fix**: check ECM_Bridge_SendRawFrame() or similar
 
-### 原因 6：USBFS 端点配置错误
-- **症状**: 端点未正确初始化
-- **解决**: 检查 USBFS_Device_Endp_Init() 中的端点配置
+### Cause 6: wrong USBFS endpoint configuration
+- **Symptom**: the endpoints are not initialised correctly
+- **Fix**: check the endpoint configuration in USBFS_Device_Endp_Init()
 
-### 原因 7：MAC 地址不匹配
-- **症状**: DHCP 请求被过滤
-- **解决**: 检查 MAC 地址过滤逻辑
+### Cause 7: MAC address mismatch
+- **Symptom**: DHCP requests are filtered out
+- **Fix**: check the MAC address filtering logic
 
-## 修复方案
+## Fix approaches
 
-### 方案 A：启用调试日志
+### Approach A: enable debug logging
 
-在 APP/ecm_bridge.c 中添加详细的调试日志：
+Add detailed debug logging in APP/ecm_bridge.c:
 
 ```c
 #define USB_DEBUG_ENABLED 1
@@ -291,123 +292,123 @@ USB_DEBUG("Target device MAC: %02x:%02x:%02x:%02x:%02x:%02x\r\n",
 #endif
 ```
 
-然后在关键位置添加 USB_DEBUG() 调用。
+Then add USB_DEBUG() calls at the key points.
 
-### 方案 B：检查数据包流
+### Approach B: inspect the packet flow
 
-使用 USB 分析仪或逻辑分析仪捕获 Target 端的数据包：
-1. 检查 Bot 设备是否发送了 DHCP Discover
-2. 检查 Openterface 设备是否接收到数据包
-3. 检查 Openterface 设备是否发送了 DHCP Offer
-4. 检查 Bot 设备是否接收到 DHCP Offer
+Capture packets on the Target side with a USB analyser or a logic analyser:
+1. check whether the bot device sent a DHCP Discover
+2. check whether the Openterface device received the packet
+3. check whether the Openterface device sent a DHCP Offer
+4. check whether the bot device received the DHCP Offer
 
-### 方案 C：手动测试 DHCP 响应
+### Approach C: test a DHCP response manually
 
-临时修改代码，强制发送 DHCP 响应：
+Temporarily modify the code to force a DHCP response:
 
 ```c
-// 在 ECM_Bridge_Init() 中添加测试代码：
+// add test code in ECM_Bridge_Init():
 void ECM_Bridge_Init(void)
 {
-    // ... 原有代码
+    // ... existing code
     
-    // 测试：发送一个假的 DHCP Offer
+    // test: send a fake DHCP Offer
     uint8_t test_dhcp_offer[300];
-    // ... 构建测试 DHCP Offer
+    // ... build the test DHCP Offer
     ECM_Bridge_SendRawFrame(test_dhcp_offer, sizeof(test_dhcp_offer));
 }
 ```
 
-### 方案 D：检查固件版本
+### Approach D: check the firmware version
 
-确保使用最新版本的固件：
+Make sure the latest firmware is in use:
 
 ```bash
-# 检查固件版本
+# check the firmware version
 python3 check_firmware_version.py
 
-# 如果需要，重新编译固件
+# rebuild the firmware if needed
 cd build
 make clean
 make USB_WORK_MODE=6
 ```
 
-## 验证步骤
+## Verification steps
 
-修复后，验证 DHCP 服务器是否正常工作：
+After fixing, verify that the DHCP server works:
 
-1. **重新编译固件**
+1. **Rebuild the firmware**
    ```bash
    cd build
    make clean
    make USB_WORK_MODE=6
    ```
 
-2. **烧录固件**
+2. **Flash the firmware**
    ```bash
-   # 使用适当的烧录工具
+   # use the appropriate flashing tool
    ```
 
-3. **重启 Bot 设备**
+3. **Restart the bot device's networking**
    ```bash
-   # 在 Bot 设备上重启网络
+   # restart networking on the bot device
    sudo systemctl restart NetworkManager
    ```
 
-4. **检查 Bot 设备日志**
+4. **Check the bot device's logs**
    ```bash
    journalctl -u NetworkManager --since "1 minute ago" | grep dhcp
    ```
 
-5. **验证 IP 地址**
+5. **Verify the IP address**
    ```bash
    ip addr show enp0s20f0u4u1i4
-   # 应该显示 inet 192.168.11.2/24
+   # should show inet 192.168.11.2/24
    ```
 
-6. **测试连接**
+6. **Test connectivity**
    ```bash
-   ping 192.168.11.3  # Openterface 设备
-   ping 192.168.11.1  # 主机
+   ping 192.168.11.3  # the Openterface device
+   ping 192.168.11.1  # the host
    ```
 
-## 参考文档
+## References
 
 - RFC 2131: Dynamic Host Configuration Protocol
 - RFC 2132: DHCP Options and BOOTP Vendor Extensions
-- CH32V20x USBFS 设备控制器用户手册
-- CDC ECM 类规范
+- CH32V20x USBFS device controller user manual
+- CDC ECM class specification
 
-## 附录
+## Appendix
 
-### A. DHCP 消息类型
+### A. DHCP message types
 
-| 类型 | 值 | 描述 |
+| Type | Value | Description |
 |------|-----|------|
-| DHCP Discover | 1 | 客户端发现 DHCP 服务器 |
-| DHCP Offer | 2 | 服务器响应 Discover |
-| DHCP Request | 3 | 客户端请求 IP |
-| DHCP Decline | 4 | 客户端拒绝 IP |
-| DHCP ACK | 5 | 服务器确认 Request |
-| DHCP NAK | 6 | 服务器拒绝 Request |
-| DHCP Release | 7 | 客户端释放 IP |
-| DHCP Inform | 8 | 客户端请求配置参数 |
+| DHCP Discover | 1 | client discovers a DHCP server |
+| DHCP Offer | 2 | server responds to Discover |
+| DHCP Request | 3 | client requests an IP |
+| DHCP Decline | 4 | client declines an IP |
+| DHCP ACK | 5 | server confirms the Request |
+| DHCP NAK | 6 | server rejects the Request |
+| DHCP Release | 7 | client releases the IP |
+| DHCP Inform | 8 | client requests configuration parameters |
 
-### B. DHCP 选项
+### B. DHCP options
 
-| 选项 | 值 | 描述 |
+| Option | Value | Description |
 |------|-----|------|
-| Subnet Mask | 1 | 子网掩码 |
-| Router | 3 | 默认网关 |
-| DNS Server | 6 | DNS 服务器 |
-| Domain Name | 15 | 域名 |
-| Requested IP | 50 | 请求的 IP 地址 |
-| Lease Time | 51 | IP 租期 |
-| Message Type | 53 | DHCP 消息类型 |
-| Server ID | 54 | DHCP 服务器标识 |
-| End | 255 | 选项结束 |
+| Subnet Mask | 1 | subnet mask |
+| Router | 3 | default gateway |
+| DNS Server | 6 | DNS server |
+| Domain Name | 15 | domain name |
+| Requested IP | 50 | requested IP address |
+| Lease Time | 51 | IP lease duration |
+| Message Type | 53 | DHCP message type |
+| Server ID | 54 | DHCP server identifier |
+| End | 255 | end of options |
 
-### C. 网络拓扑
+### C. Network topology
 
 ```
 ┌─────────────┐
@@ -425,24 +426,24 @@ make USB_WORK_MODE=6
        │
 ┌──────┴──────┐
 │  Bot Device │
-│ 192.168.11.2│ (期望)
+│ 192.168.11.2│ (expected)
 └─────────────┘
 ```
 
-### D. 关键变量
+### D. Key variables
 
-| 变量 | 位置 | 值 | 描述 |
+| Variable | Location | Value | Description |
 |------|------|-----|------|
-| ecm_host_ip | ecm_bridge.c | 192.168.11.1 | 主机 IP |
-| ecm_dev_ip | ecm_bridge.c | 192.168.11.3 | 设备 IP |
+| ecm_host_ip | ecm_bridge.c | 192.168.11.1 | host IP |
+| ecm_dev_ip | ecm_bridge.c | 192.168.11.3 | device IP |
 | ecm_target_host_ip | ecm_bridge.c | 192.168.11.2 | Target PC IP |
-| ecm_target_dev_ip | ecm_bridge.c | 192.168.11.5 | 设备 Target 侧 IP |
-| ECM_TARGET_DEV_MAC | ecm_bridge.c | 02:00:00:00:03:00 | Target 设备 MAC |
+| ecm_target_dev_ip | ecm_bridge.c | 192.168.11.5 | device IP on the Target side |
+| ECM_TARGET_DEV_MAC | ecm_bridge.c | 02:00:00:00:03:00 | Target device MAC |
 | ECM_TARGET_HOST_MAC | ecm_bridge.c | 02:00:00:00:00:20 | Target PC MAC |
 
 ---
 
-**文档版本**: 1.0  
-**创建日期**: 2026-10-20  
-**最后更新**: 2026-10-20  
-**作者**: Claude Code
+**Document version**: 1.0  
+**Created**: 2026-10-20  
+**Last updated**: 2026-10-20  
+**Author**: Claude Code

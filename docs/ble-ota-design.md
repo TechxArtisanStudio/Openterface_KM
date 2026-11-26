@@ -1,237 +1,237 @@
-# KeyMod / KVM-GO BLE OTA 升级设计方案
+# KeyMod / KVM-GO BLE OTA update design
 
-- 日期：2026-11-11
-- 基线：`feature/ble-pairing-security` @ `bf30ece`
-- 适用固件：KeyMod（`BOARD_VERSION=3`）、KVM-GO（`BOARD_VERSION=1`）等 `ENABLE_BLE` 机型
-- 状态：**方案阶段，未实现**。里程碑见 §12，全部未开始
-- 依赖：BLE 配对安全方案（[ble-pairing-design.md](ble-pairing-design.md)）的加密准入先落地；OTA 建议在其之后开新分支 `feature/ble-ota`
-- 决策沿革：2026-11-11 完成可行性核查（Flash/RAM/库体积实测），否决"boot 带 BLE 栈"与"迁移 ROM 库"两条路线，选定 **App 侧接收 + 压缩暂存 + 无 BLE 最小 boot**
+- Date: 2026-11-11
+- Baseline: `feature/ble-pairing-security` @ `bf30ece`
+- Applies to: `ENABLE_BLE` boards such as KeyMod (`BOARD_VERSION=3`) and KVM-GO (`BOARD_VERSION=1`)
+- Status: **design stage, not implemented**. Milestones in §12, all not started
+- Depends on: the encryption admission from the BLE pairing security design ([ble-pairing-design.md](ble-pairing-design.md)) landing first; OTA should start on a new branch `feature/ble-ota` after it
+- Decision history: 2026-11-11 completed the feasibility check (measured flash/RAM/library size), rejected both "BLE stack in the bootloader" and "migrate to the ROM library", and chose **app-side reception + compressed staging + a minimal BLE-free bootloader**
 
 ---
 
-## 1. 结论
+## 1. Conclusion
 
-**可以实现**。推荐路线：固件正常运行时通过 BLE 接收压缩镜像写入暂存区，重启后由一个**不含 BLE 协议栈**的最小 bootloader 校验、解压、覆盖 app 区并跳转。全程断电容错，USB ISP 兜底恢复。
+**It can be done.** Recommended route: while the firmware runs normally, receive a compressed image over BLE into a staging area; after a reboot a minimal bootloader **with no BLE stack** verifies, decompresses, overwrites the app region and jumps to it. Every stage is power-loss tolerant, with USB ISP as the fallback recovery path.
 
-不需要迁移 BLE 库、不需要改 RAM 布局、不需要 boot 支持 BLE。代价是引入压缩（必须，见 §3 空间账）和一个新的 boot 工程。
+No BLE library migration, no RAM layout change, no BLE in the bootloader. The cost is introducing compression (mandatory, see the space arithmetic in §3) and a new boot project.
 
-## 2. 现状事实（已逐条核实）
+## 2. Current facts (each verified)
 
-| 项 | 数值 | 证据 |
+| Item | Value | Evidence |
 |---|---|---|
-| Flash 总量 | **480K** = 448K 代码区（0x00000–0x6FFFF）+ 32K 数据区（0x70000–0x77FFF） | Flash 驱动 `ValidAddrEnd = FLASH_BASE + 0x78000`，[ch32v20x_flash.c:66](file:///Users/txa/project/Openterface_KM/SRC/Peripheral/src/ch32v20x_flash.c#L66) |
-| 现行分区 | app 区 440K + 3×4K 配置页（BLENAMECFG 0x6D000 / DEFTCFG 0x6E000 / USBMODECFG 0x6F000） | [HAL/Link.ld:29-33](file:///Users/txa/project/Openterface_KM/HAL/Link.ld#L29-L33) |
-| 当前固件 | 219,292 B ≈ **214.2K**（2026-11-10 构建） | `build/openterface-km-firmware.bin` |
-| 其中 BLE 协议栈 | **198.1K**（202,812 B .text，`libwchble.a` Flash 版库，链接进 app 镜像） | map 文件逐段求和 |
-| 应用自身代码 | ≈ 16K | 214.2K − 198.1K |
-| bond 存储（SNV） | 数据区 **0x08077C00**，3×256B 块，`BLE_SNV=TRUE` | [config.h:103](file:///Users/txa/project/Openterface_KM/HAL/include/config.h#L103)、[MCU.c:110](file:///Users/txa/project/Openterface_KM/HAL/MCU.c#L110) |
-| RAM | data+bss 50,924 B / 64K，空闲堆隙 ≈ 14.6K | [internal-memory-usage.md](internal-memory-usage.md) |
-| Flash 写 API | 4K 页擦除 + 256B 页快速编程，SNV 已在用 | `Lib_Write_Flash`，[MCU.c:64-72](file:///Users/txa/project/Openterface_KM/HAL/MCU.c#L64-L72) |
-| 向量表重定位 | startup 用链接符号 `_vector_base` 写 `mtvec`（模式 3），**改链接偏移即自动重定位**，无需额外代码 | [startup_ch32v20x_D8W.S:266-269](file:///Users/txa/project/Openterface_KM/SRC/Startup/startup_ch32v20x_D8W.S#L266-L269) |
-| BLE 吞吐上限 | MTU 60、每连接事件 1 包 ≈ 36.5 kbit/s ≈ 4.5 KB/s | 台架实测（见记忆/隧道文档） |
-| DFU 准入基础 | FFF2 已要求 `GATT_PERMIT_ENCRYPT_WRITE`（配对方案成果） | [ble_usb_service.c:138](file:///Users/txa/project/Openterface_KM/Profile/ble_usb_service.c#L138) |
-| ROM 版 BLE 库 | 仓库带 `wchble_rom.hex`，占 0x40000–0x6CFFF（187.3K 含配置页初值）+ **16K RAM**（0x20000000–0x20003FFF）；当前构建**未使用** | [wchble_rom.h:1-15](file:///Users/txa/project/Openterface_KM/LIB/wchble_rom.h#L1-L15)，hex 地址实测 |
+| Total flash | **480K** = 448K code region (0x00000–0x6FFFF) + 32K data region (0x70000–0x77FFF) | flash driver `ValidAddrEnd = FLASH_BASE + 0x78000`, [ch32v20x_flash.c:66](file:///Users/txa/project/Openterface_KM/SRC/Peripheral/src/ch32v20x_flash.c#L66) |
+| Current partition | 440K app + 3×4K config pages (BLENAMECFG 0x6D000 / DEFTCFG 0x6E000 / USBMODECFG 0x6F000) | [HAL/Link.ld:29-33](file:///Users/txa/project/Openterface_KM/HAL/Link.ld#L29-L33) |
+| Current firmware | 219,292 B ≈ **214.2K** (built 2026-11-10) | `build/openterface-km-firmware.bin` |
+| Of which the BLE stack | **198.1K** (202,812 B of .text from `libwchble.a`, the flash variant linked into the app image) | summed section by section from the map file |
+| Application's own code | ≈ 16K | 214.2K − 198.1K |
+| Bond storage (SNV) | data region **0x08077C00**, 3×256B blocks, `BLE_SNV=TRUE` | [config.h:103](file:///Users/txa/project/Openterface_KM/HAL/include/config.h#L103), [MCU.c:110](file:///Users/txa/project/Openterface_KM/HAL/MCU.c#L110) |
+| RAM | data+bss 50,924 B of 64K, free heap gap ≈ 14.6K | [internal-memory-usage.md](internal-memory-usage.md) |
+| Flash write API | 4K page erase + 256B page fast program, SNV already uses it | `Lib_Write_Flash`, [MCU.c:64-72](file:///Users/txa/project/Openterface_KM/HAL/MCU.c#L64-L72) |
+| Vector table relocation | startup writes `mtvec` (mode 3) from the linker symbol `_vector_base`, so **changing the link offset relocates it automatically** with no extra code | [startup_ch32v20x_D8W.S:266-269](file:///Users/txa/project/Openterface_KM/SRC/Startup/startup_ch32v20x_D8W.S#L266-L269) |
+| BLE throughput ceiling | MTU 60, 1 packet per connection event ≈ 36.5 kbit/s ≈ 4.5 KB/s | measured on the bench (see the memory/tunnel documents) |
+| DFU admission foundation | FFF2 already requires `GATT_PERMIT_ENCRYPT_WRITE` (a pairing-design result) | [ble_usb_service.c:138](file:///Users/txa/project/Openterface_KM/Profile/ble_usb_service.c#L138) |
+| ROM BLE library | the repo ships `wchble_rom.hex`, occupying 0x40000–0x6CFFF (187.3K including config-page initial values) + **16K RAM** (0x20000000–0x20003FFF); the current build **does not use it** | [wchble_rom.h:1-15](file:///Users/txa/project/Openterface_KM/LIB/wchble_rom.h#L1-L15), measured from the hex addresses |
 
-**关键推论：BLE 栈占 198K，任何"boot 里跑 BLE"的方案都会让 boot 膨胀到 ~200K**，这是路线选择的决定因素。
+**Key inference: the BLE stack is 198K, so any "run BLE in the bootloader" route inflates the bootloader to ~200K** — that is what decides the route.
 
-## 3. 候选路线对比
+## 3. Route comparison
 
-| 路线 | 描述 | 否决/采纳理由 |
+| Route | Description | Rejection / adoption rationale |
 |---|---|---|
-| **A. App 接收 + 压缩暂存 + 最小 boot（采纳）** | app 用现有 BLE 栈收镜像 → 暂存区；boot 无 BLE，只做校验/解压/拷贝/跳转 | boot ≈ 6K；不动 BLE 库、不动 RAM；每个阶段断电都可恢复；压缩后传输 ~30s |
-| B. 迁移 ROM 库 + 真 A/B 双区 | 栈固定在 0x40000，app 缩到 ~20K，boot/app 共享栈 | 长期最干净，但：① 库迁移需重新验证配对/SNV 全部行为；② ROM 库预留 16K RAM，app 只剩 48K，当前用 50.9K，**RAM 不够**，需削 `MEM_BUF` 等；③ 工作量与风险远大于 A。留作远期演进 |
-| C. boot 带 BLE 栈直写 app 区 | boot 链接第二份 `libwchble.a`，收完直接覆盖 app | boot ≈ 206K + app 214K + 配置 12K = 432K，app 增长余量仅 ~16K；无暂存无回退，传输中断期间设备不可用；boot 体积是 A 的 30 倍。否决 |
+| **A. App reception + compressed staging + minimal boot (adopted)** | the app receives the image with the existing BLE stack → staging area; the bootloader has no BLE and only verifies/decompresses/copies/jumps | bootloader ≈ 6K; no change to the BLE library or RAM; every stage is power-loss recoverable; ~30 s transfer when compressed |
+| B. Migrate to the ROM library + true A/B dual region | the stack is fixed at 0x40000, the app shrinks to ~20K, boot and app share the stack | cleanest long term, but: ① migration requires re-verifying all pairing/SNV behaviour; ② the ROM library reserves 16K RAM, leaving 48K for the app while it currently uses 50.9K — **not enough RAM**, so `MEM_BUF` etc. would have to be cut; ③ far more work and risk than A. Keep as a long-term evolution |
+| C. BLE stack in the bootloader writing the app region directly | the bootloader links a second copy of `libwchble.a` and overwrites the app once the image arrives | bootloader ≈ 206K + app 214K + config 12K = 432K, leaving only ~16K of app growth headroom; no staging and no rollback, and the device is unusable during an interrupted transfer; the bootloader is 30× the size of A's. Rejected |
 
-A 的空间账（为什么必须压缩）：不压缩需要 app 214K + 暂存 214K + boot 8K + 配置 12K = 448K，**恰好占满且零余量**；压缩后暂存只需 ~130K，还能留出 40K 备用区。
+Space arithmetic for A (why compression is mandatory): uncompressed needs app 214K + staging 214K + boot 8K + config 12K = 448K, which **exactly fills the region with zero headroom**; compressed, staging needs only ~130K and still leaves a 40K spare area.
 
-## 4. Flash 分区（路线 A）
+## 4. Flash partition (route A)
 
-代码区 448K 重新划分，配置页与数据区**完全不动**：
+The 448K code region is redivided; the config pages and the data region are **untouched**:
 
-| 区域 | 地址 | 大小 | 用途 |
+| Region | Address | Size | Purpose |
 |---|---|---|---|
-| `BOOT` | 0x00000–0x01FFF | 8K | bootloader，无 BLE，运行时永不写 |
-| `APP` | 0x02000–0x39FFF | 224K | 应用镜像（当前 214.2K，余量 ~10K） |
-| `STAGING` | 0x3A000–0x61FFF | 160K | 压缩镜像暂存 |
-| `META` | 0x62000–0x62FFF | 4K | 升级状态日志（§8） |
-| `SPARE` | 0x63000–0x6CFFF | 40K | 备用，日后可划给 APP 或 STAGING |
-| `BLENAMECFG` | 0x6D000 | 4K | 不变 |
-| `DEFTCFG` | 0x6E000 | 4K | 不变 |
-| `USBMODECFG` | 0x6F000 | 4K | 不变 |
-| 数据区 | 0x70000–0x77FFF | 32K | SNV bond @0x77C00，**OTA 任何路径不得触碰** |
+| `BOOT` | 0x00000–0x01FFF | 8K | bootloader, no BLE, never written at runtime |
+| `APP` | 0x02000–0x39FFF | 224K | application image (currently 214.2K, ~10K headroom) |
+| `STAGING` | 0x3A000–0x61FFF | 160K | compressed image staging |
+| `META` | 0x62000–0x62FFF | 4K | update state log (§8) |
+| `SPARE` | 0x63000–0x6CFFF | 40K | spare, can later be given to APP or STAGING |
+| `BLENAMECFG` | 0x6D000 | 4K | unchanged |
+| `DEFTCFG` | 0x6E000 | 4K | unchanged |
+| `USBMODECFG` | 0x6F000 | 4K | unchanged |
+| data region | 0x70000–0x77FFF | 32K | SNV bond @0x77C00, **no OTA path may touch it** |
 
-约束：
-- 压缩镜像 ≤ 160K（打包工具强制检查）。heatshrink 对 RISC-V 固件典型压缩率 50–65%，214K → 110–140K，留有余量；M0 实测确认。
-- app 余量 10K 偏紧，是已知取舍；需要时把 SPARE 划给 APP（改两个链接脚本常量，boot 逻辑不变）。
-- boot 8K 预算：startup + flash 驱动 + heatshrink 解码器（~1K）+ CRC32 + meta 逻辑 + LED ≈ 5–6K。若 M4 加签名验证需扩到 16K（从 SPARE 借）。
+Constraints:
+- Compressed image ≤ 160K (enforced by the packaging tool). heatshrink typically achieves 50–65% on RISC-V firmware, so 214K → 110–140K, leaving headroom; M0 confirms by measurement.
+- 10K of app headroom is tight, a known trade-off; when needed, give SPARE to APP (two linker-script constants, boot logic unchanged).
+- 8K bootloader budget: startup + flash driver + heatshrink decoder (~1K) + CRC32 + meta logic + LED ≈ 5–6K. If M4 adds signature verification it needs 16K (borrowed from SPARE).
 
-## 5. 镜像格式与压缩
+## 5. Image format and compression
 
-### 5.1 OTA 包（.ota 文件）
+### 5.1 OTA package (the .ota file)
 
 ```
-[ 64B 头部 ][ heatshrink 压缩数据 ][ 可选 64B Ed25519 签名（M4） ]
+[ 64B header ][ heatshrink compressed data ][ optional 64B Ed25519 signature (M4) ]
 ```
 
-头部（小端）：
+Header (little-endian):
 
-| 偏移 | 字段 | 说明 |
+| Offset | Field | Notes |
 |---|---|---|
 | 0 | magic `KMOT` | 4B |
-| 4 | hdr_ver | 1B，当前 1 |
-| 5 | hw_id | 1B，`BOARD_VERSION`（KeyMod=3 / KVM-GO=1），不匹配拒收 |
-| 6 | flags | 2B，bit0=签名存在 |
-| 8 | fw_version | u32，**单调递增**，防回滚依据 |
-| 12 | raw_size | u32，解压后字节数（= app 镜像长） |
-| 16 | comp_size | u32，压缩数据长 |
-| 20 | raw_crc32 | u32，解压后全量 CRC32 |
-| 24 | comp_crc32 | u32，压缩数据全量 CRC32 |
-| 28 | hdr_crc32 | u32，头部前 28 字节 CRC32 |
-| 32–63 | reserved | 置 0 |
+| 4 | hdr_ver | 1B, currently 1 |
+| 5 | hw_id | 1B, `BOARD_VERSION` (KeyMod=3 / KVM-GO=1), mismatch is rejected |
+| 6 | flags | 2B, bit0 = signature present |
+| 8 | fw_version | u32, **monotonically increasing**, the basis for rollback prevention |
+| 12 | raw_size | u32, decompressed size (= app image length) |
+| 16 | comp_size | u32, compressed data length |
+| 20 | raw_crc32 | u32, CRC32 over the decompressed image |
+| 24 | comp_crc32 | u32, CRC32 over the compressed data |
+| 28 | hdr_crc32 | u32, CRC32 over the first 28 header bytes |
+| 32–63 | reserved | zero |
 
-app 镜像本身不需要特殊尾部：校验用的 CRC 全部在 OTA 头部和 META 里，USB 直烧的裸 bin 不受影响（§7 boot 对无 META 记录的出厂态直接放行）。
+The app image needs no special trailer: all verification CRCs live in the OTA header and META, so a raw bin flashed over USB is unaffected (in §7 the bootloader passes straight through a factory state with no META record).
 
-### 5.2 压缩算法
+### 5.2 Compression algorithm
 
-选 **heatshrink**（LZ77 变体，嵌入式取向）：解码器 ~1K 代码、窗口 RAM 可配（取 2^10 窗口 + 2^4 前瞻，~1.3K RAM），编码只在主机工具里跑。备选 LZ4（解码更快、压缩率略差、RAM 更多），M0 用当前 bin 实测两者压缩率后定案。不选 zlib：解码器体积与 RAM 都大一个量级。
+Choose **heatshrink** (an LZ77 variant aimed at embedded): the decoder is ~1K of code with a configurable window and lookahead (using a 2^10 window + 2^4 lookahead, ~1.3K RAM), and encoding runs only in the host tool. Alternative LZ4 (faster decode, slightly worse ratio, more RAM); M0 measures both on the current bin and then decides. zlib is out: decoder size and RAM are an order of magnitude larger.
 
-## 6. App 侧改动
+## 6. App-side changes
 
-1. **链接偏移**：app 链接脚本 `FLASH ORIGIN=0x02000 LENGTH=224K`，RAM 布局不变。向量表无需手动重定位——startup 已用链接符号写 `mtvec`（§2 已核实）。
-2. **DFU GATT 特征**（挂在现有 ble_usb 服务下，复用配对方案的加密准入）：
-   - `FFF3` DFU_CTRL：write + notify，权限 `GATT_PERMIT_READ | GATT_PERMIT_WRITE | GATT_PERMIT_ENCRYPT_WRITE`（与 FFF2 一致）
-   - `FFF4` DFU_DATA：write without response，权限 `GATT_PERMIT_ENCRYPT_WRITE`
-   - 不新建服务、不改广播；未配对设备连特征都写不进，准入压在协议栈层（与配对方案同一原则）。
-3. **DFU 模式**：收到 START 后暂停 HID/CH9329/ECM/ACM/UAC 转发（升级期间设备不做 KVM 工作），只保留 BLE 连接与 TMOS 调度；每写若干页 notify 一次进度。Flash 编程会短暂 stall 总线，暂停其他通路可避免丢包与连接事件超时。
-4. **写暂存**：按 256B 页调 `FLASH_ProgramPage_Fast`（与 SNV 同一套 API，已验证可用），擦除以 4K 页为单位。写入地址**硬编码限定在 STAGING 区间**，越界即拒绝——这是防止误写 boot/配置/SNV 的唯一屏障，必须做。
-5. **RAM 预算**：块缓冲 256B + 页缓冲 256B + 状态机/头部 ≈ 1.5K，空闲堆隙 14.6K 足够。
-6. **版本上报**：INFO 命令返回现有固件版本（devinfo/devinfoservice 口径）+ OTA fw_version。
+1. **Link offset**: the app linker script becomes `FLASH ORIGIN=0x02000 LENGTH=224K`, RAM layout unchanged. The vector table needs no manual relocation — startup already writes `mtvec` from a linker symbol (verified in §2).
+2. **DFU GATT characteristics** (under the existing ble_usb service, reusing the pairing design's encrypted admission):
+   - `FFF3` DFU_CTRL: write + notify, permissions `GATT_PERMIT_READ | GATT_PERMIT_WRITE | GATT_PERMIT_ENCRYPT_WRITE` (same as FFF2)
+   - `FFF4` DFU_DATA: write without response, permissions `GATT_PERMIT_ENCRYPT_WRITE`
+   - No new service, no advertising change; an unpaired device cannot even write the characteristic, so admission sits at the protocol stack (the same principle as the pairing design).
+3. **DFU mode**: after START, suspend HID/CH9329/ECM/ACM/UAC forwarding (the device does no KVM work while updating) and keep only the BLE connection and TMOS scheduling; notify progress every few pages. Flash programming briefly stalls the bus, and suspending the other paths avoids packet loss and connection-event timeouts.
+4. **Writing the staging area**: call `FLASH_ProgramPage_Fast` per 256B page (the same API family as SNV, already verified), erasing in 4K pages. The write address is **hard-limited to the STAGING range** and rejected otherwise — this is the only barrier against accidentally writing the bootloader, config pages or SNV, and it is mandatory.
+5. **RAM budget**: a 256B block buffer + 256B page buffer + state machine/header ≈ 1.5K, well within the 14.6K free heap gap.
+6. **Version reporting**: the INFO command returns the existing firmware version (devinfo/devinfoservice wording) plus the OTA fw_version.
 
-## 7. Bootloader 设计
+## 7. Bootloader design
 
-无 BLE、无 USB、无 TMOS，裸机循环，只做四件事：读 META → 校验 → （按需）应用镜像 → 跳转。
+No BLE, no USB, no TMOS; a bare-metal loop that does four things: read META → verify → (if needed) apply the image → jump.
 
 ```
-上电
- ├─ 读 META 最新有效记录
- ├─ state == PENDING？
- │    ├─ 校验 STAGING comp_crc32 ── 失败 → 置 FAIL，走"无可用镜像"
- │    ├─ 擦除 APP 区（4K/页）
- │    ├─ heatshrink 解压 STAGING → APP
- │    ├─ 校验 APP raw_crc32 ── 失败 → 保持 PENDING，下次上电重试
- │    └─ 写 META state=OK（含新 fw_version/raw_crc32）
- ├─ 校验 APP：META 有 OK 记录 → 按记录的 raw_crc32 校验；
- │            META 为空（出厂 USB 直烧态）→ 直接信任放行
- ├─ APP 有效 → 关全局中断，跳转 APP 复位向量（mtvec 由 app startup 自行重设）
- └─ APP 无效且无 PENDING → LED 错误闪烁，停在 boot，等待 USB ISP 恢复
+power on
+ ├─ read the latest valid META record
+ ├─ state == PENDING?
+ │    ├─ verify STAGING comp_crc32 ── fail → set FAIL, go to "no usable image"
+ │    ├─ erase the APP region (4K/page)
+ │    ├─ heatshrink-decompress STAGING → APP
+ │    ├─ verify APP raw_crc32 ── fail → stay PENDING, retry on the next power-up
+ │    └─ write META state=OK (with the new fw_version/raw_crc32)
+ ├─ verify APP: if META has an OK record → verify against the recorded raw_crc32;
+ │              if META is empty (factory USB-flashed state) → trust and pass through
+ ├─ APP valid → disable interrupts, jump to the APP reset vector (mtvec is set again by the app's own startup)
+ └─ APP invalid and no PENDING → LED error blink, stay in the bootloader, wait for USB ISP recovery
 ```
 
-设计要点：
-- **boot 永不自我更新**，DFU 写路径与 boot 拷贝路径都不写 0x00000–0x01FFF。boot 损坏只能靠 USB ISP，而 boot 逻辑简单到可以一次写对。
-- PENDING 状态下每次上电都**重新校验 STAGING 再动手**，不信任上次中途的状态，所以拷贝中断电无限次都安全。
-- 全量 CRC32 校验 214K 在 144MHz 下约 10–20ms（表驱动），每次上电都做，启动延迟可忽略。
-- 应用阶段耗时（擦 224K + 写 224K + 解压）估计 2–5s，M0 实测；期间 LED 常亮/慢闪指示"升级中勿断电"。
-- 恢复路径与现在完全一致：`build/wchisp` USB ISP 烧录。boot 阶段设备不响应 BLE 是**有意设计**——恢复通道是 USB，不是再来一套 BLE boot。
+Design points:
+- **The bootloader never updates itself**: neither the DFU write path nor the boot copy path writes 0x00000–0x01FFF. A corrupt bootloader can only be recovered over USB ISP, and the boot logic is simple enough to get right in one pass.
+- In the PENDING state every power-up **re-verifies STAGING before doing anything**, never trusting the previous in-progress state, so an interrupted copy is safe any number of times.
+- A full CRC32 over 214K takes about 10–20 ms at 144MHz (table-driven); it runs on every boot, so the startup delay is negligible.
+- The apply stage (erase 224K + write 224K + decompress) is estimated at 2–5 s, to be measured in M0; the LED stays on or blinks slowly to signal "updating, do not remove power".
+- The recovery path is exactly as today: `build/wchisp` USB ISP flashing. The device not answering BLE while in the bootloader is **deliberate** — the recovery channel is USB, not a second BLE bootloader.
 
-## 8. META 日志（4K 页）
+## 8. META log (4K page)
 
-记录 32B，顺序追加写（flash 可不擦除重复编程直到位用尽），页满才擦除重写最新记录：
+A record is 32B, appended in order (flash can be reprogrammed repeatedly without erasing until the bits are exhausted); the page is erased and rewritten with the latest record only when full:
 
-| 字段 | 说明 |
+| Field | Notes |
 |---|---|
-| magic / seq | seq 单调递增，boot 取 seq 最大且 CRC 有效的记录 |
+| magic / seq | seq increases monotonically; the bootloader takes the record with the highest seq and a valid CRC |
 | state | IDLE / PENDING / OK / FAIL |
-| fw_version / comp_size / raw_size / raw_crc32 | PENDING/OK 时携带镜像信息 |
-| rec_crc32 | 本记录校验 |
+| fw_version / comp_size / raw_size / raw_crc32 | carry the image information in PENDING/OK |
+| rec_crc32 | checksum for this record |
 
-- **防回滚**：START 时 app 检查 `新 fw_version ≥ META 最近 OK 的 fw_version`，boot 应用前再查一次。版本号只增不减，由发布流程保证。
-- 双份最新记录冗余不需要：追加写天然保留历史，任何时刻断电最多丢失最后一条未写完的记录，boot 回退到上一条有效记录。
+- **Rollback prevention**: on START the app checks `new fw_version ≥ the latest OK fw_version in META`, and the bootloader checks again before applying. The version number only ever increases, guaranteed by the release process.
+- No redundant double copy of the latest record is needed: append-only writing preserves history naturally, and a power loss at any moment loses at most the last unfinished record, so the bootloader falls back to the previous valid one.
 
-## 9. GATT DFU 协议
+## 9. GATT DFU protocol
 
-CTRL（FFF3）命令字 1B，应答/事件走 notify；DATA（FFF4）走 write-no-response _bulk_ 通道，与 HID 命令通道（FFF2）物理隔离。
+CTRL (FFF3) uses 1B command words with responses/events over notify; DATA (FFF4) is a write-no-response _bulk_ channel, physically separate from the HID command channel (FFF2).
 
-| 命令 | 载荷 | 行为 |
+| Command | Payload | Behaviour |
 |---|---|---|
-| 0x01 INFO | — | notify：boot_ver、app_ver、hw_id、max_image(160K)、META state |
-| 0x02 START | 64B 头部 | 校验 hw_id/防回滚/comp_size≤160K/hdr_crc → 擦 STAGING → ACK 或 ERR |
-| 0x03 DATA | FFF4：[seq u16][crc16][payload] | 顺序写入；payload 默认 244B（MTU 247），本机 MTU 60 时协商为 ~55B；CRC 错/乱序 → ERR + notify 期望 seq，主机从断点重传 |
-| 0x04 VERIFY | — | 全量 comp_crc32 → ACK/ERR |
-| 0x05 APPLY | — | 写 META PENDING → notify OK → 延迟 100ms 复位 |
-| 0x06 ABORT | — | META 置 IDLE，退出 DFU 模式，恢复正常转发 |
+| 0x01 INFO | — | notify: boot_ver, app_ver, hw_id, max_image(160K), META state |
+| 0x02 START | 64B header | verify hw_id / rollback / comp_size≤160K / hdr_crc → erase STAGING → ACK or ERR |
+| 0x03 DATA | FFF4: [seq u16][crc16][payload] | write in order; payload defaults to 244B (MTU 247), negotiated to ~55B at this device's MTU 60; on CRC error or out-of-order → ERR + notify the expected seq, and the host retransmits from that point |
+| 0x04 VERIFY | — | full comp_crc32 → ACK/ERR |
+| 0x05 APPLY | — | write META PENDING → notify OK → reset after a 100 ms delay |
+| 0x06 ABORT | — | set META to IDLE, leave DFU mode, resume normal forwarding |
 
-notify 事件：进度（每 4K 一次：已写字节/总字节）、错误码（HW_MISMATCH / ROLLBACK / TOO_LARGE / CRC / FLASH / STATE）。
+Notify events: progress (every 4K: bytes written / total) and error codes (HW_MISMATCH / ROLLBACK / TOO_LARGE / CRC / FLASH / STATE).
 
-传输耗时估算：按实测上限 4.5 KB/s，压缩后 130K ≈ **30s**；MTU 协商到 247 后可再快数倍（取决于手机与连接参数，不在本方案承诺范围）。
+Transfer time estimate: at the measured ceiling of 4.5 KB/s, 130K compressed ≈ **30 s**; once MTU negotiates to 247 it can be several times faster (depending on the phone and connection parameters, outside what this design promises).
 
-升级完成后主机重连，读 INFO 确认 fw_version 已更新，作为端到端成功判据。
+After the update the host reconnects and reads INFO to confirm fw_version changed, which is the end-to-end success criterion.
 
-## 10. 安全性
+## 10. Security
 
-| 层 | 措施 |
+| Layer | Measure |
 |---|---|
-| 准入 | DFU 特征要求 bonded + 加密链路（继承配对方案，PIN 信任根）；未配对连 START 都发不出 |
-| 完整性 | 每块 CRC16 + 压缩全量 CRC32 + 解压全量 CRC32，三级 |
-| 防回滚 | fw_version 单调，app 与 boot 双查 |
-| 防误写 | DFU 写路径地址区间硬限制；boot 区运行时不可写；SNV/配置页不在任何 OTA 路径内 |
-| 签名（M4 可选） | Ed25519（monocypher，~5K 代码），主机签名、boot 验签后才应用；基线不做，理由：威胁模型主要是路人无凭证访问（配对已挡）与意外损坏（CRC 已挡），定向伪造固件需要物理接触或已破解配对，属残留风险，与配对方案 §2 口径一致 |
+| Admission | the DFU characteristics require a bonded, encrypted link (inherited from the pairing design, PIN as root of trust); an unpaired device cannot even send START |
+| Integrity | CRC16 per block + full CRC32 over the compressed data + full CRC32 over the decompressed data, three levels |
+| Rollback prevention | fw_version is monotonic, checked by both the app and the bootloader |
+| Write protection | the DFU write path is hard-limited to an address range; the boot region is unwritable at runtime; SNV and the config pages are outside every OTA path |
+| Signature (M4, optional) | Ed25519 (monocypher, ~5K of code), signed on the host and verified by the bootloader before applying; not in the baseline, because the threat model is mainly credential-less access by passers-by (already blocked by pairing) and accidental corruption (already blocked by CRC), while forging a targeted image requires physical access or a broken pairing — a residual risk, consistent with §2 of the pairing design |
 
-## 11. 断电容错分析
+## 11. Power-loss tolerance analysis
 
-| 断电时刻 | 上电后状态 | 结果 |
+| Moment of power loss | State after power-up | Result |
 |---|---|---|
-| 下载中（任意进度） | META=IDLE，APP 完好 | 正常启动，主机重传 |
-| VERIFY 后、写 PENDING 前 | 同上 | 同上 |
-| PENDING 已写、擦除/拷贝任意时刻 | boot 见 PENDING，STAGING 完好 | 重新应用，无限次安全 |
-| 拷贝完成、写 OK 前 | boot 校验 APP CRC 通过 → 补写 OK | 正常 |
-| 新固件本身有 bug 能启动但功能坏 | 无自动回退（基线） | USB ISP 恢复；M4 可选回滚 |
-| boot 区损坏 | 运行时任何路径不写 boot | 物理排除；兜底 USB ISP |
+| during download (any progress) | META=IDLE, APP intact | boots normally, host retransmits |
+| after VERIFY, before writing PENDING | same as above | same as above |
+| PENDING written, at any moment of erase/copy | bootloader sees PENDING, STAGING intact | applies again, safe any number of times |
+| copy finished, before writing OK | bootloader verifies the APP CRC, passes → writes OK | normal |
+| the new firmware itself has a bug that boots but misbehaves | no automatic rollback (baseline) | recover over USB ISP; optional rollback in M4 |
+| boot region corrupted | no runtime path writes the bootloader | physically excluded; USB ISP as the fallback |
 
-唯一"设备不可用"窗口是应用阶段的 2–5s（boot 正在拷贝），断电不会变砖，只会重来。
+The only "device unusable" window is the 2–5 s apply stage (the bootloader copying); a power loss never bricks it, it only means starting over.
 
-## 12. 里程碑与检查清单
+## 12. Milestones and checklists
 
-### M0 台架可行性验证（先于一切代码改动）
-- [ ] 实测 4K 擦除 + 256B 快速编程耗时（擦 224K / 写 224K 总时长）
-- [ ] heatshrink 与 LZ4 对当前 214K bin 的压缩率、解压速度对比，定算法
-- [ ] 最小实验：hello 固件链接到 0x2000，boot 跳转验证 mtvec 自动重定位
-- [ ] 确认 SNV（0x77C00）与配置页在实验擦写后完好（读回 bond 记录）
+### M0 Bench feasibility (before any code change)
+- [ ] measure 4K erase + 256B fast program timing (total time to erase 224K / write 224K)
+- [ ] compare compression ratio and decode speed of heatshrink vs LZ4 on the current 214K bin, then fix the algorithm
+- [ ] minimal experiment: a hello firmware linked at 0x2000, bootloader jump to verify automatic mtvec relocation
+- [ ] confirm SNV (0x77C00) and the config pages survive the experimental erase/write (read the bond record back)
 
-### M1 分区与 boot
-- [ ] app 链接脚本改 0x2000/224K；新建 boot 工程与链接脚本（8K）
-- [ ] `build.sh` 增加 boot 目标与 boot+app 合并烧录产物（wchisp 一次烧全片）
-- [ ] boot 状态机（无 PENDING 路径）+ LED 状态定义
-- [ ] 台架：USB 烧录后正常启动，全部现有功能回归（HID/ECM/配对）
+### M1 Partition and bootloader
+- [ ] change the app linker script to 0x2000/224K; create the boot project and linker script (8K)
+- [ ] add a boot target and a boot+app combined image to `build.sh` (wchisp flashes the whole chip in one go)
+- [ ] boot state machine (the no-PENDING path) + LED state definitions
+- [ ] bench: boots normally after a USB flash, full regression of existing features (HID/ECM/pairing)
 
-### M2 DFU 端到端
-- [ ] FFF3/FFF4 特征 + 加密权限 + DFU 模式（暂停转发）
-- [ ] STAGING 写入 + 地址硬限制 + META 日志
-- [ ] `tools/ota_pack.py`（压缩+头部+尺寸检查）、`tools/ota_upload.py`（bleak，按完整 CoreBluetooth 地址连接，避免 keymod-test 的名字子串误匹配陷阱）
-- [ ] 台架：首次 BLE OTA 成功，INFO 版本确认
+### M2 DFU end to end
+- [ ] FFF3/FFF4 characteristics + encryption permissions + DFU mode (suspend forwarding)
+- [ ] STAGING writes + hard address limits + META log
+- [ ] `tools/ota_pack.py` (compress + header + size check), `tools/ota_upload.py` (bleak, connecting by full CoreBluetooth address to avoid keymod-test's name-substring false-match trap)
+- [ ] bench: first successful BLE OTA, version confirmed through INFO
 
-### M3 健壮性
-- [ ] 断电注入矩阵：下载中/擦除中/拷贝中/写 META 中随机断电 × 各 3 次
-- [ ] 防回滚、hw_id 不匹配、超尺寸、ABORT、断点重传
-- [ ] 升级后 bond/配置页/USB 模式完好性检查
-- [ ] 传输耗时与进度通知实测记录
+### M3 Robustness
+- [ ] power-loss injection matrix: random cuts during download/erase/copy/META write, × 3 each
+- [ ] rollback prevention, hw_id mismatch, oversize, ABORT, resume from a break point
+- [ ] post-update integrity check of bond / config pages / USB mode
+- [ ] record the measured transfer time and progress notifications
 
-### M4 可选加固（默认不做，另行决策）
-- [ ] Ed25519 签名（boot 扩 16K）
-- [ ] 回滚：应用前把旧 app 压缩回 STAGING，新固件确认失败可退回
+### M4 Optional hardening (not done by default, decide separately)
+- [ ] Ed25519 signature (bootloader grows to 16K)
+- [ ] rollback: compress the old app back into STAGING before applying, so a new firmware that fails to confirm can be reverted
 
-## 13. 测试方式
+## 13. How testing runs
 
-沿用台架分工：我给出每轮烧录的命令批次与片内计数器/读回命令，用户执行烧录与 sudo/主机侧操作。M3 断电注入需要可程控断电或手拔 USB 供电配合倒计时脚本，M0 时一并定方案。
+Keep the bench division of labour: I provide the command batches and on-chip counter/read-back commands for each flash round, and the user performs the flashing and host-side/sudo operations. The M3 power-loss injection needs switchable power or manual USB unplugging coordinated with a countdown script; settle the method during M0.
 
-## 14. 风险与开放问题
+## 14. Risks and open questions
 
-1. **app 余量仅 10K**：固件还在长（配对、隧道后续）。SPARE 40K 是缓冲，但重分区要动 boot 常量，宜早不宜迟——M1 时可直接把 APP 定 240K / STAGING 144K（压缩率需 ≤67%，M0 数据说话）。
-2. **压缩率最坏情况**：若实测 >160K，打包工具拒收；对策是削 app 体积或扩 STAGING，不存在"压不下就砖"的路径。
-3. **Flash 编程 stall 与 BLE 连接事件**：SNV 写入已证明可行，但 DFU 是持续密集写，M2 需盯连接断开率；必要时每页之间显式让出 TMOS。
-4. **配对分支未合并**：DFU 权限依赖加密准入，分支顺序不能反。
-5. **ROM 库迁移（路线 B）是远期方向**：若日后 app 代码大涨或需要真 A/B，再评估；届时 RAM 48K 上限是硬约束（需削 `MEM_BUF` 10K → 8K 等）。
-6. **KeyCmd iOS/Android 集成**：本方案先交付 Python 工具链，App 集成协议照 §9 实现，不在本期范围。
+1. **Only 10K of app headroom**: the firmware keeps growing (pairing, later the tunnel). The 40K SPARE is a buffer, but repartitioning changes boot constants, so earlier is better — at M1 APP could simply be set to 240K / STAGING 144K (requiring a ratio ≤67%; M0 data decides).
+2. **Worst-case compression ratio**: if the measured result exceeds 160K the packaging tool refuses it; the remedy is trimming the app or enlarging STAGING, and there is no "cannot compress, therefore bricked" path.
+3. **Flash programming stalls vs BLE connection events**: SNV writes have proven feasible, but DFU writes continuously and densely, so M2 must watch the disconnect rate; if needed, explicitly yield to TMOS between pages.
+4. **The pairing branch is not merged**: DFU permissions depend on encryption admission, so the branch order cannot be reversed.
+5. **ROM library migration (route B) is a long-term direction**: re-evaluate if the app grows sharply or true A/B is needed; the 48K RAM ceiling is then a hard constraint (requiring cuts such as `MEM_BUF` 10K → 8K).
+6. **KeyCmd iOS/Android integration**: this design delivers the Python toolchain first; app integration follows §9 and is out of scope here.
 
-## 15. 决策记录
+## 15. Decision record
 
-- 2026-11-11：实测确认 BLE 栈 198K、Flash 480K（448K+32K）、SNV 在 0x77C00、ROM 库未启用且 RAM 预留 16K。据此否决路线 B/C，采纳路线 A；压缩定为必选项；签名与回滚降级为 M4 可选。
+- 2026-11-11: measurement confirmed a 198K BLE stack, 480K flash (448K+32K), SNV at 0x77C00, the ROM library unused with 16K RAM reserved. On that basis routes B and C were rejected and route A adopted; compression became mandatory; signing and rollback were demoted to optional M4.

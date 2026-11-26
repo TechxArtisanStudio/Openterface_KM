@@ -1,31 +1,34 @@
-# CH9329 命令响应失败问题分析报告
+# CH9329 command response failure analysis report
 
-**日期**: 2026-09-11  
-**固件版本**: openterface-km-firmware-kvmgo  
-**问题**: 设备无法响应 CH9329 命令（Get Info 0x01 等）
+**Date**: 2026-09-11  
+**Firmware build**: openterface-km-firmware-kvmgo  
+**Problem**: the device does not respond to CH9329 commands (Get Info 0x01 and so on)
 
-## 问题描述
+## Problem description
 
-设备烧录固件后，能够正常枚举为 USB CDC ACM 设备，但无法响应任何 CH9329 命令。鼠标键盘数据正常工作，说明 USB 连接本身是正常的。
+After flashing the firmware the device enumerates correctly as a USB CDC ACM
+device, but does not respond to any CH9329 command. Mouse and keyboard data work
+normally, which shows the USB connection itself is fine.
 
-## 错误修复过程
+## Troubleshooting process
 
-### 第一次尝试（失败）
+### First attempt (failed)
 
-**假设**: 端点状态切换冲突
+**Hypothesis**: endpoint state toggle conflict
 
-认为 `SetEPTxStatus` 的 toggle 行为导致端点状态混乱，修改了以下代码：
+I assumed the toggle behaviour of `SetEPTxStatus` was leaving the endpoint state
+inconsistent, and changed the following code:
 
-1. **usb_endp.c** - 使用直接寄存器写入替代 `SetEPTxStatus`
+1. **usb_endp.c** - use a direct register write instead of `SetEPTxStatus`
    ```c
-   // 修改前
+   // before
    SetEPTxStatus(ENDP3, EP_TX_VALID);
    
-   // 修改后
+   // after
    USBFSD->UEP3_TX_CTRL = (USBFSD->UEP3_TX_CTRL & ~USBFS_UEP_T_RES_MASK) | USBFS_UEP_T_RES_ACK;
    ```
 
-2. **usb_prop.c** - 在 HID_ACM 模式下立即启用 EP3
+2. **usb_prop.c** - enable EP3 immediately in HID_ACM mode
    ```c
    if (USB_ModeConfig_ActiveModeHasHostCdcAcm() && !USB_ModeConfig_ActiveModeBridgeAcm())
    {
@@ -33,86 +36,92 @@
    }
    ```
 
-3. **km_ring.c** - 添加双重忙标志检查
+3. **km_ring.c** - add a double busy-flag check
    ```c
    if (USBFS_Endp_Busy[DEF_UEP3] == 0 && 
        USBD_ENDPx_DataUp(ENDP3, pkt->data, pkt->len) == 0)
    ```
 
-**结果**: 设备仍然无法响应 CH9329 命令
+**Result**: the device still did not respond to CH9329 commands
 
-### 第二次尝试（失败）
+### Second attempt (failed)
 
-**假设**: 条件编译错误
+**Hypothesis**: a conditional-compilation error
 
-认为 `EP5_OUT_Callback` 的条件编译没有包含 HID_ACM 模式，添加了 `USB_WORK_MODE_HAS_HOST_CDC_ACM` 条件。
+I assumed the conditional compilation around `EP5_OUT_Callback` did not cover
+HID_ACM mode, and added a `USB_WORK_MODE_HAS_HOST_CDC_ACM` condition.
 
-**结果**: 设备仍然无法响应
+**Result**: the device still did not respond
 
-### 根本原因分析
+### Root cause analysis
 
-用户指出 merge commit `bf0a4b5` 的版本是可以正常工作的。通过比较发现：
+The user pointed out that the merge commit `bf0a4b5` worked. Comparing the two
+revealed these differences:
 
-**关键差异**:
+**Key differences**:
 
-1. **USB Endpoint Busy Timeout Recovery 机制**
-   - 当前代码（c9f1cb8 commit）添加了端点忙超时恢复机制
-   - merge commit 版本没有这个机制
-   - 这个机制可能在某些情况下干扰端点状态
+1. **USB Endpoint Busy Timeout Recovery mechanism**
+   - the current code (commit c9f1cb8) added an endpoint busy-timeout recovery mechanism
+   - the merge commit version has no such mechanism
+   - that mechanism can interfere with the endpoint state under some conditions
 
-2. **EP3 初始化时机**
-   - merge commit 版本：EP3 在 USBD_Reset 中初始化为 `EP_TX_DIS`
-   - 然后在 SET_LINE_CODING 命令处理时才启用为 `EP_TX_NAK`
-   - 修改版本：在 USBD_Reset 中直接启用 EP3
+2. **When EP3 is initialised**
+   - merge commit version: EP3 is initialised to `EP_TX_DIS` in USBD_Reset
+   - and only enabled as `EP_TX_NAK` when SET_LINE_CODING is handled
+   - modified version: EP3 is enabled directly in USBD_Reset
 
-3. **数据流路径**
-   - HID_ACM 模式下，EP5_OUT_Callback 走 `#else` 分支
-   - 数据被放入 `UART2_Tx_Buf`
-   - 通过 `USB_DataRx_To_KMHandle()` 处理
-   - 调用 `CH9329_RxBuffer_Add()` 解析命令
-   - 响应通过 EP3 发送
+3. **Data flow path**
+   - in HID_ACM mode `EP5_OUT_Callback` takes the `#else` branch
+   - the data goes into `UART2_Tx_Buf`
+   - it is processed through `USB_DataRx_To_KMHandle()`
+   - which calls `CH9329_RxBuffer_Add()` to parse the command
+   - the response is sent through EP3
 
-## 根本原因
+## Root cause
 
-**USB Endpoint Busy Timeout Recovery 机制干扰了正常的端点状态管理**
+**The USB Endpoint Busy Timeout Recovery mechanism interfered with normal endpoint
+state management**
 
-这个机制在 `ch32v20x_usbfs_device.c` 中添加了：
-- `USBFS_Endp_Busy_StartTime[]` - 记录端点忙开始时间
-- `USBFS_CheckEndpointBusyTimeout()` - 检查并恢复超时的端点
+That mechanism added the following in `ch32v20x_usbfs_device.c`:
+- `USBFS_Endp_Busy_StartTime[]` - records when an endpoint became busy
+- `USBFS_CheckEndpointBusyTimeout()` - checks for and recovers timed-out endpoints
 
-在主循环中调用 `USBFS_CheckEndpointBusyTimeout()`，可能会在不合适的时候清除忙标志，导致端点状态混乱。
+`USBFS_CheckEndpointBusyTimeout()` is called from the main loop and can clear a
+busy flag at the wrong moment, leaving the endpoint state inconsistent.
 
-## 解决方案
+## Solution
 
-恢复到 merge commit `bf0a4b5` 的版本，移除 USB Endpoint Busy Timeout Recovery 机制：
+Revert to the merge commit `bf0a4b5` version and remove the USB Endpoint Busy
+Timeout Recovery mechanism:
 
-1. 恢复 `usb_endp.c` 到原始版本
-2. 恢复 `usb_prop.c` 到原始版本
-3. 移除 `USBFS_CheckEndpointBusyTimeout()` 相关代码
+1. restore `usb_endp.c` to the original version
+2. restore `usb_prop.c` to the original version
+3. remove the code related to `USBFS_CheckEndpointBusyTimeout()`
 
-## 验证结果
+## Verification result
 
-恢复到 merge commit 版本后，设备能够正常响应 CH9329 命令。
+After reverting to the merge commit version, the device responds to CH9329
+commands normally.
 
-## 经验教训
+## Lessons learned
 
-1. **不要过度优化**: 原有的端点状态管理已经足够稳定，不需要添加额外的超时恢复机制
+1. **Do not over-optimise**: the existing endpoint state management was already stable enough; it did not need an extra timeout-recovery mechanism
 
-2. **理解现有代码**: 在修改之前，需要充分理解现有代码的工作流程和数据流路径
+2. **Understand the existing code**: before changing anything, fully understand how the existing code and its data flow work
 
-3. **增量修改**: 应该一次只修改一个方面，而不是同时修改多个地方
+3. **Change incrementally**: change one aspect at a time rather than several places at once
 
-4. **参考工作版本**: 当遇到问题时，应该先找到一个已知的工作版本作为参考
+4. **Refer to a working version**: when something breaks, first find a known-good version to compare against
 
-## 相关文件
+## Related files
 
-- `APP/USBLIB/CONFIG/usb_endp.c` - 端点处理
-- `APP/USBLIB/CONFIG/usb_prop.c` - USB 属性配置
-- `APP/ch32v20x_usbfs_device.c` - USB 设备驱动
-- `APP/usbd_compostie_km.c` - CH9329 命令处理
-- `APP/km_ring.c` - 键盘鼠标数据队列管理
+- `APP/USBLIB/CONFIG/usb_endp.c` - endpoint handling
+- `APP/USBLIB/CONFIG/usb_prop.c` - USB property configuration
+- `APP/ch32v20x_usbfs_device.c` - USB device driver
+- `APP/usbd_compostie_km.c` - CH9329 command handling
+- `APP/km_ring.c` - keyboard/mouse data queue management
 
-## Commit 信息
+## Commit information
 
-- **问题引入**: `c9f1cb8` - feat: implement USB endpoint busy timeout recovery mechanism
-- **工作版本**: `bf0a4b5` - Merge branch 'fix/p0-stability-issues'
+- **Problem introduced**: `c9f1cb8` - feat: implement USB endpoint busy timeout recovery mechanism
+- **Working version**: `bf0a4b5` - Merge branch 'fix/p0-stability-issues'

@@ -1,352 +1,352 @@
-# 通用 IP-over-BLE 隧道设计方案
+# Generic IP-over-BLE tunnel design
 
-- 分支：`fix/stability-p0-p1`
-- 基线：`main` @ `19ef5c8`
-- 适用固件：KeyMod Mini（mode 4）、KeyMod Plus / KVM-GO（mode 7）、MiniKVM（含 Target ECM 的模式）
-- 状态：技术设计完整，但**建议搁置**。控制端确定为手机后（第 1 节核实：iOS/Android 都靠 App 内置 SSH 客户端 + BLE-Eth TCP 代理，均无 raw-IP 地基），本方案不解决当前痛点；第 11 节给出替代优先级
+- Branch: `fix/stability-p0-p1`
+- Baseline: `main` @ `19ef5c8`
+- Applies to: KeyMod Mini (mode 4), KeyMod Plus / KVM-GO (mode 7), MiniKVM (modes with Target ECM)
+- Status: technically complete, but **recommended to be parked**. Once the controller was confirmed to be a phone (§1 verification: iOS and Android both rely on an in-app SSH client plus the BLE-Eth TCP proxy, neither has any raw-IP foundation), this design does not solve the current pain. §11 gives the alternative priorities.
 
 ---
 
-## 1. 调查结论：以前没有做过 IP 隧道
+## 1. Investigation: no IP tunnel has ever existed
 
-先把事实钉住，避免后面的方案建立在错误前提上。
+Pin the facts down first, so the rest of the design is not built on a false premise.
 
-**搜索范围与结果：**
+**Search scope and results:**
 
-| 位置 | 搜索内容 | 结果 |
+| Location | Searched for | Result |
 |------|----------|------|
-| `APP/`、`main.c` | `utun` / `tuntap` / `forward` / `route` / `nat` / `conntrack` / IP 分片重组 | 无命中。固件不存在任何形式的 IP 转发或虚拟网卡概念 |
-| `docs/ble-eth-ssh-usage.md:48` | 协议能力边界 | 原文即已声明：`The BLE-Eth tunnel carries TCP only. It does not forward ICMP.` |
-| `tools/ble_eth_tunnel.py`（1870 行）、`tools/ssh_through_ble_eth.py`（627 行） | host 侧隧道实现 | 有 `BleTcpProxy`（`ble_eth_tunnel.py:1663`），做的是 **TCP socket ↔ BLE-Eth 的应用层代理**：本地监听一个端口，把字节流送进隧道。完全不碰 IP 层，不建网卡，不改路由表 |
-| `keymod-test`（PyQt 端） | tunnel / route / 网卡 | 无 |
-| `Openterface_KeyCmd_iOS` | `NEPacketTunnelProvider`、Network Extension target、`com.apple.developer.networking.networkextension` entitlement | 三者都不存在。`KeyCmd/KeyCmd.entitlements` 只有 `com.apple.security.app-sandbox` 与 user-selected files |
-| `Openterface_KeyCmd_Android` | `VpnService`、`BIND_VPN_SERVICE`、`ParcelFileDescriptor`、`tun2socks` | 全部不存在。`AndroidManifest.xml` 只声明一个 `BluetoothService`，无 VPN 服务、无 VPN 权限 |
+| `APP/`, `main.c` | `utun` / `tuntap` / `forward` / `route` / `nat` / `conntrack` / IP fragment reassembly | No hits. The firmware has no IP forwarding or virtual-interface concept of any kind |
+| `docs/ble-eth-ssh-usage.md:48` | protocol capability boundary | Already stated in the document itself: `The BLE-Eth tunnel carries TCP only. It does not forward ICMP.` |
+| `tools/ble_eth_tunnel.py` (1870 lines), `tools/ssh_through_ble_eth.py` (627 lines) | host-side tunnel implementation | Contains `BleTcpProxy` (`ble_eth_tunnel.py:1663`), which is an **application-layer proxy between a TCP socket and BLE-Eth**: it listens on a local port and pushes the byte stream into the tunnel. It never touches the IP layer, creates no interface, and does not modify the routing table |
+| `keymod-test` (PyQt side) | tunnel / route / interface | None |
+| `Openterface_KeyCmd_iOS` | `NEPacketTunnelProvider`, Network Extension target, `com.apple.developer.networking.networkextension` entitlement | None of the three exist. `KeyCmd/KeyCmd.entitlements` only has `com.apple.security.app-sandbox` and user-selected files |
+| `Openterface_KeyCmd_Android` | `VpnService`, `BIND_VPN_SERVICE`, `ParcelFileDescriptor`, `tun2socks` | None of them exist. `AndroidManifest.xml` declares a single `BluetoothService`; no VPN service, no VPN permission |
 
-**但手机端确实早就有可用的 SSH，只是它不走 IP 层：**
+**But the phones have had usable SSH for a long time — it simply never goes through the IP layer:**
 
 | | iOS | Android |
 |---|-----|---------|
-| SSH 客户端 | **libssh2**（`import CSSH`，来自 `Libssh2Prebuild` XCFramework）[SSHClient.swift:3,89](file:///Users/txa/project/Openterface_KeyCmd_iOS/KeyCmd/Services/SSH/SSHClient.swift#L89) | **JSch** `com.github.mwiede:jsch:0.2.17`（`app/build.gradle:204`，`SshClient.java`） |
-| 套到 BLE 上的手法 | `socketpair(AF_UNIX, SOCK_STREAM)` 桥，libssh2 以为自己在读写一个普通 fd（[SSHClient.swift:385-407](file:///Users/txa/project/Openterface_KeyCmd_iOS/KeyCmd/Services/SSH/SSHClient.swift#L399)） | `session.setSocketFactory(...)` + 自定义 `BleEthSocket extends Socket`，其 `connect()` 直接抛异常 |
-| 实际字节通路 | `BleEthTransport` 造 `CONNECT 0x10` + `DATA 0x11` 分片帧 | 同一套协议，Java 版 `BleEthTransport.java` |
+| SSH client | **libssh2** (`import CSSH`, from the `Libssh2Prebuild` XCFramework) [SSHClient.swift:3,89](file:///Users/txa/project/Openterface_KeyCmd_iOS/KeyCmd/Services/SSH/SSHClient.swift#L89) | **JSch** `com.github.mwiede:jsch:0.2.17` (`app/build.gradle:204`, `SshClient.java`) |
+| How it is grafted onto BLE | `socketpair(AF_UNIX, SOCK_STREAM)` bridge, so libssh2 believes it is reading and writing an ordinary fd ([SSHClient.swift:385-407](file:///Users/txa/project/Openterface_KeyCmd_iOS/KeyCmd/Services/SSH/SSHClient.swift#L399)) | `session.setSocketFactory(...)` plus a custom `BleEthSocket extends Socket` whose `connect()` throws |
+| Actual byte path | `BleEthTransport` builds `CONNECT 0x10` + `DATA 0x11` fragment frames | The same protocol, Java version `BleEthTransport.java` |
 
-也就是说：**手机 SSH = App 内置 SSH 客户端 + BLE-Eth TCP 代理，与 IP 层完全无关。** 这正好解释了"0.0.4 / 0.0.5 就能用"：`0b666f8`（2026-05-22，support ble-ecm path）已引入 `0x10/0x11/0x1F`，`a11973c`（2026-06-05，add SSH over BLE-Eth functionality）与 `5211f03`（2026-06-18，`SET_DEFAULT 0x20`）都在 tag `v0.0.4`（33f4ed5，2026-07-25）之前，`v0.0.5`（321d4e4，2026-09-24）之后同理。隧道那套 4 元组匹配逻辑在 `v0.0.4:ble_eth_protocol.c:1282` 与今天 `:1714` **逐字段相同**——手机 SSH 依赖的固件语义这一年来没变过。
+In other words: **phone SSH = an in-app SSH client plus the BLE-Eth TCP proxy, entirely independent of the IP layer.** That is exactly why "it worked on 0.0.4 / 0.0.5": `0b666f8` (2026-05-22, support ble-ecm path) already introduced `0x10/0x11/0x1F`, and `a11973c` (2026-06-05, add SSH over BLE-Eth functionality) and `5211f03` (2026-06-18, `SET_DEFAULT 0x20`) both predate tag `v0.0.4` (33f4ed5, 2026-07-25), as does `v0.0.5` (321d4e4, 2026-09-24). The tunnel's 4-tuple matching logic is **field-for-field identical** between `v0.0.4:ble_eth_protocol.c:1282` and today's `:1714` — the firmware semantics phone SSH depends on have not changed in a year.
 
-**所以记忆中"以前做过的"是两件事**：`tools/ble_eth_tunnel.py:1663` 的 `BleTcpProxy`（PC 侧代理）和两个手机 App 的内置 SSH 客户端（App 侧代理）。两者都是**应用层逐协议手工适配**，不碰 IP 层、不建网卡、不改路由表。通用 IP-over-BLE 是另一件事，确实从未做过。
+**So "we did this before" refers to two things**: the `BleTcpProxy` at `tools/ble_eth_tunnel.py:1663` (a PC-side proxy) and the in-app SSH clients in the two phone apps (app-side proxies). Both are **per-protocol, hand-written adaptation at the application layer**; neither touches the IP layer, creates an interface, or modifies the routing table. A generic IP-over-BLE tunnel is a different thing, and it genuinely has never been done.
 
-本方案要交付的**增量价值**因此收窄成一句话：让**没有内置适配的**程序（`ping`、UDP、mDNS、任意第三方 App）不改代码就能走蓝牙。**已经适配好的 SSH 一点好处都得不到。**
-
----
-
-## 2. 目标与非目标
-
-### 目标
-
-1. BLE 链路成为设备的**第三条 IP 通路**（现有两条：Host USB ECM、Target USB ECM），且优先级不依赖 USB 插入。
-2. host 侧 `ping <target_host_ip>` 与 `ssh <target_host_ip>` 直接可用，无需 `-p`、无需代理配置。
-3. 默认关闭，一条命令开、一条命令关；关闭时行为与今天的固件逐字节一致。
-4. 不破坏 HID 键鼠实时性（这是本产品的主业，隧道是附加功能）。
-
-### 非目标
-
-1. 不追求带宽。BLE 链路做不了高吞吐，也不该替代 USB ECM 走大文件。
-2. IPv6、多跳路由、TLS offload、DHCP server over BLE —— 全部不做。
-3. Phase 1 不支持 iOS（前提条件在第 8 节，缺 entitlement）。
-4. 不修 Host ECM ↔ Target ECM 的 L2 桥（第 5.5 节解释为什么它和本方案无关，以及为什么它是另一个独立 bug）。
+The **incremental value** of this design therefore narrows to a single sentence: it lets programs with **no built-in adaptation** (`ping`, UDP, mDNS, any third-party app) run over Bluetooth without code changes. **SSH, which is already adapted, gains nothing at all.**
 
 ---
 
-## 3. 现有可复用资产
+## 2. Goals and non-goals
 
-方案不需要新的底层管道，所有钩子都已存在并在硬件上跑通过：
+### Goals
 
-| 能力 | 位置 | 用途 |
+1. The BLE link becomes the device's **third IP path** (the existing two are Host USB ECM and Target USB ECM), with a priority that does not depend on whether USB is plugged in.
+2. On the host, `ping <target_host_ip>` and `ssh <target_host_ip>` work directly, with no `-p` and no proxy configuration.
+3. Off by default, one command to enable, one to disable; when disabled, behaviour is byte-for-byte identical to today's firmware.
+4. Do not break HID keyboard/mouse real-time behaviour (that is this product's main job; the tunnel is an add-on).
+
+### Non-goals
+
+1. No bandwidth ambitions. BLE cannot do high throughput and should not replace USB ECM for large files.
+2. IPv6, multi-hop routing, TLS offload, DHCP server over BLE — none of it.
+3. Phase 1 does not support iOS (prerequisite in §8: the entitlement is missing).
+4. Do not fix the Host ECM ↔ Target ECM L2 bridge (§5.5 explains why it is unrelated to this design and why it is a separate bug).
+
+---
+
+## 3. Existing assets that can be reused
+
+The design needs no new low-level pipe; every hook already exists and has run on hardware:
+
+| Capability | Location | Use |
 |------|------|------|
-| 向 Target 链路注入裸以太网帧 | `ECM_Bridge_SendRawFrame()` [APP/ecm_bridge.c:2592](file:///Users/txa/project/Openterface_KM/APP/ecm_bridge.c#L2592) | IP 转发的出口。BLE-Eth 已在用它：[`ecm_bridge_tx_handler()` APP/peripheral.c:537](file:///Users/txa/project/Openterface_KM/APP/peripheral.c#L537) |
-| 收 Target 侧以太网帧 | `handle_target_frame()` [APP/ecm_bridge.c:2651](file:///Users/txa/project/Openterface_KM/APP/ecm_bridge.c#L2651) | IP 转发的入口；`:2686` 处已在把帧交给 `BLE_Eth_HandleTargetFrame()` |
-| 从以太网帧里提取 IPv4 并按协议分派 | `BLE_Eth_HandleTargetFrame()` [APP/ble_eth_protocol.c:1714](file:///Users/txa/project/Openterface_KM/APP/ble_eth_protocol.c#L1714) | 本方案的天然泛化点：现在的逻辑是"取 IPv4 头 → 只认 proto==6(TCP)，其余 return false"，只需把"只认 TCP"换成"交给 IP router" |
-| 帧重组 + 分片 + ACK 状态机 | `g_reassembly`（1536 B）、`BLE_Eth_PushTargetData()` [APP/ble_eth_protocol.c:1238](file:///Users/txa/project/Openterface_KM/APP/ble_eth_protocol.c#L1238) | 承载 IP 包，不需要新写传输层 |
-| BLE 写帧路由白名单 | `Peripheral_IsBleEthCommandByte()` [APP/peripheral.c:239](file:///Users/txa/project/Openterface_KM/APP/peripheral.c#L239) | 新增控制命令必须在此登记，否则会被 CH9329/HID 路径二次消费（`STABILITY_FIX_PLAN` P0-2 的成因） |
-| Target 链路 ARP / GARP | `handle_arp_frame()` [APP/ecm_bridge.c:293](file:///Users/txa/project/Openterface_KM/APP/ecm_bridge.c#L293)、`g_target_garp_sent` | 转发前需要解析 `target_host_ip` 的 MAC，机制已有 |
-| ICMP 请求/应答（两侧） | `handle_icmp_packet()`（host 侧）、`handle_target_icmp_packet()` [APP/ecm_bridge.c:967](file:///Users/txa/project/Openterface_KM/APP/ecm_bridge.c#L967) | 隧道打开后 ICMP 会自然流经转发路径，这两个 handler 只在"目的就是我自己的 IP"时兜底，不冲突 |
-| ECM IP 配置页 | `ECM_IPConfig` [APP/include/ecm_ip_config.h:29-42](file:///Users/txa/project/Openterface_KM/APP/include/ecm_ip_config.h#L29) | 提供 `dev_ip` / `target_dev_ip` 等现成地址；SNAT 出口直接取 `target_dev_ip` |
+| Inject a raw Ethernet frame into the Target link | `ECM_Bridge_SendRawFrame()` [APP/ecm_bridge.c:2592](file:///Users/txa/project/Openterface_KM/APP/ecm_bridge.c#L2592) | The egress of IP forwarding. BLE-Eth already uses it: [`ecm_bridge_tx_handler()` APP/peripheral.c:537](file:///Users/txa/project/Openterface_KM/APP/peripheral.c#L537) |
+| Receive Ethernet frames from the Target side | `handle_target_frame()` [APP/ecm_bridge.c:2651](file:///Users/txa/project/Openterface_KM/APP/ecm_bridge.c#L2651) | The ingress of IP forwarding; at `:2686` it already hands frames to `BLE_Eth_HandleTargetFrame()` |
+| Extract IPv4 from an Ethernet frame and dispatch by protocol | `BLE_Eth_HandleTargetFrame()` [APP/ble_eth_protocol.c:1714](file:///Users/txa/project/Openterface_KM/APP/ble_eth_protocol.c#L1714) | The natural generalisation point: today the logic is "parse the IPv4 header → accept only proto==6 (TCP), return false otherwise"; only the "TCP only" step needs to become "hand it to the IP router" |
+| Frame reassembly + fragmentation + ACK state machine | `g_reassembly` (1536 B), `BLE_Eth_PushTargetData()` [APP/ble_eth_protocol.c:1238](file:///Users/txa/project/Openterface_KM/APP/ble_eth_protocol.c#L1238) | Carries IP packets; no new transport layer needed |
+| BLE write-frame routing allow-list | `Peripheral_IsBleEthCommandByte()` [APP/peripheral.c:239](file:///Users/txa/project/Openterface_KM/APP/peripheral.c#L239) | Any new control command must be registered here, otherwise the CH9329/HID path consumes it a second time (the cause of `STABILITY_FIX_PLAN` P0-2) |
+| Target-link ARP / GARP | `handle_arp_frame()` [APP/ecm_bridge.c:293](file:///Users/txa/project/Openterface_KM/APP/ecm_bridge.c#L293), `g_target_garp_sent` | Forwarding needs the MAC of `target_host_ip`; the mechanism already exists |
+| ICMP request/reply (both sides) | `handle_icmp_packet()` (host side), `handle_target_icmp_packet()` [APP/ecm_bridge.c:967](file:///Users/txa/project/Openterface_KM/APP/ecm_bridge.c#L967) | Once the tunnel is up, ICMP flows through the forwarding path naturally; these two handlers only stand in when "the destination is my own IP", so they do not conflict |
+| ECM IP config page | `ECM_IPConfig` [APP/include/ecm_ip_config.h:29-42](file:///Users/txa/project/Openterface_KM/APP/include/ecm_ip_config.h#L29) | Supplies ready-made addresses such as `dev_ip` / `target_dev_ip`; the SNAT egress takes `target_dev_ip` directly |
 
 ---
 
-## 4. 硬约束（全部已在代码/构建产物中核实）
+## 4. Hard constraints (all verified in code or build artefacts)
 
-| 约束 | 数值 | 位置 | 对方案的影响 |
+| Constraint | Value | Location | Impact on the design |
 |------|------|------|--------------|
-| **链路层单包上限** | `BLE_BUFF_MAX_LEN = 64` ⇒ **ATT_MTU 最大 60** | [HAL/include/config.h:115](file:///Users/txa/project/Openterface_KM/HAL/include/config.h#L115)、`ATT_MTU = BufMaxLen-4` [LIB/wchble.h:91](file:///Users/txa/project/Openterface_KM/LIB/wchble.h#L91)、`build/makefile:256` | **这是真正的第一瓶颈。** MTU 60 ⇒ 单次 notification 净数据最多 **57 B**，App 侧早就是按这个数写的（Android `SAFE_BLE_STREAM_CHUNK = 57`） |
-| **每个连接事件可发包数** | `BLE_TX_NUM_EVENT = 1` | [HAL/include/config.h:121](file:///Users/txa/project/Openterface_KM/HAL/include/config.h#L121)、`build/makefile:259` | 1 packet / interval，不是"多个"。第 4 节吞吐必须按 1 算 |
-| 控制器缓冲包数 | `BLE_BUFF_NUM = 5` | [HAL/include/config.h:118](file:///Users/txa/project/Openterface_KM/HAL/include/config.h#L118) | 与 `BufMaxLen` 一起决定 `BLE_MEMHEAP_SIZE` 需求 |
-| 代码里的 notification 上限 | 180 B —— **当前配置下永远取不到** | `BLE_ETH_SAFE_NOTIFY_LEN` [APP/peripheral.c:46](file:///Users/txa/project/Openterface_KM/APP/peripheral.c#L46)，`max_notify_len = min(peripheralMTU-3, 180)`（[APP/peripheral.c:697-707](file:///Users/txa/project/Openterface_KM/APP/peripheral.c#L697)） | `peripheralMTU-3 ≤ 57`，所以 `min()` 恒等于 57。180 这个数是**可达性上限，不是现状** |
-| 协议允许的单片净荷 | 246 B（`249-3`） | `BLE_ETH_MAX_PAYLOAD_LEN` [APP/include/ble_eth_protocol.h:41](file:///Users/txa/project/Openterface_KM/APP/include/ble_eth_protocol.h#L41)、`BLE_ETH_FRAG_HEADER_LEN=3` | 在 MTU 60 下，一个 246 B 片要吃 **5 个 notification**；`BLE_Eth_GetNextTxChunk`/`ConsumeTxChunk` 做的是保留余数的续传，不丢数据 |
-| TX notification 队列 | 8 槽 × 255 B | `BLE_ETH_TX_QUEUE_DEPTH` [APP/ble_eth_protocol.c:37](file:///Users/txa/project/Openterface_KM/APP/ble_eth_protocol.c#L37) | 突发即溢出，`tx_queue_full_drop` 计数可见 |
-| RX 重组缓冲 | **1536 B，且全局只有一份** | `g_reassembly.data` [APP/include/ble_eth_protocol.h:316](file:///Users/txa/project/Openterface_KM/APP/include/ble_eth_protocol.h#L316) | 单个 IP 包必须 ≤ 6×246=1476 B；**且 IP 通道与 TCP 隧道抢同一个重组器**（第 6.2 节） |
-| 分片计数只有 4 bit | ≤ 15 片 | `BLE_ETH_FRAG_COUNT_MASK 0x0FU` | 单消息硬上限 3690 B，够用 |
-| TCP/隧道连接槽 | **2** | `BLE_ETH_MAX_CONNECTIONS` [APP/include/ble_eth_protocol.h:103](file:///Users/txa/project/Openterface_KM/APP/include/ble_eth_protocol.h#L103) | 不能再走"每条连接一个槽"的路子，见第 6.1 节 |
-| ECM 每方向队列深度 | **2** 帧，帧缓冲 1514 B | `ECM_BRIDGE_QUEUE_DEPTH` / `ECM_BRIDGE_MTU_FRAME_SIZE` [APP/ecm_bridge.c:23-24](file:///Users/txa/project/Openterface_KM/APP/ecm_bridge.c#L23) | 转发必须做"队列满即丢包"，不能阻塞主循环 |
-| 空闲 RAM | **约 10.76 KB**（`_end`→`_heap_end` gap） | `docs/internal-memory-usage.md:86`；当前 keymod-mini 报告 RAM 77.95% | 新增静态必须逐字节预算，见第 7 节 |
-| BLE conn interval（申请值） | 10 × 1.25 ms = **12.5 ms** | `DEFAULT_DESIRED_MIN/MAX_CONN_INTERVAL` [APP/peripheral.c:65-68](file:///Users/txa/project/Openterface_KM/APP/peripheral.c#L65) | central 有权不采纳；实际 interval 须 Phase 0 实测 |
-| App 写路径 | iOS：128 B 块 + 10 ms 间隔 + 全部 `.withResponse`（[BLEManager.swift:19,424-477](file:///Users/txa/project/Openterface_KeyCmd_iOS/KeyCmd/Managers/BLEManager.swift#L19)）；Android：57 B 块 + 10 ms + `WRITE_TYPE_DEFAULT` | 两端注释都写明"固件需要 BLE 层 ACK 才转发" | **上行被 write-with-response 串化成一次一个往返**，这是 App 层能改的最大一笔，与固件无关 |
+| **Link-layer packet limit** | `BLE_BUFF_MAX_LEN = 64` ⇒ **ATT_MTU at most 60** | [HAL/include/config.h:115](file:///Users/txa/project/Openterface_KM/HAL/include/config.h#L115), `ATT_MTU = BufMaxLen-4` [LIB/wchble.h:91](file:///Users/txa/project/Openterface_KM/LIB/wchble.h#L91), `build/makefile:256` | **This is the real first bottleneck.** MTU 60 ⇒ at most **57 B** of net data per notification, and the apps have been written against that number for a long time (Android `SAFE_BLE_STREAM_CHUNK = 57`) |
+| **Packets per connection event** | `BLE_TX_NUM_EVENT = 1` | [HAL/include/config.h:121](file:///Users/txa/project/Openterface_KM/HAL/include/config.h#L121), `build/makefile:259` | 1 packet / interval, not "several". The §4 throughput budget must be computed on 1 |
+| Controller buffers | `BLE_BUFF_NUM = 5` | [HAL/include/config.h:118](file:///Users/txa/project/Openterface_KM/HAL/include/config.h#L118) | Together with `BufMaxLen` this determines the `BLE_MEMHEAP_SIZE` requirement |
+| Notification limit in code | 180 B — **unreachable under the current configuration** | `BLE_ETH_SAFE_NOTIFY_LEN` [APP/peripheral.c:46](file:///Users/txa/project/Openterface_KM/APP/peripheral.c#L46), `max_notify_len = min(peripheralMTU-3, 180)` ([APP/peripheral.c:697-707](file:///Users/txa/project/Openterface_KM/APP/peripheral.c#L697)) | `peripheralMTU-3 ≤ 57`, so `min()` is always 57. The 180 is a **reachability ceiling, not the status quo** |
+| Per-fragment payload the protocol allows | 246 B (`249-3`) | `BLE_ETH_MAX_PAYLOAD_LEN` [APP/include/ble_eth_protocol.h:41](file:///Users/txa/project/Openterface_KM/APP/include/ble_eth_protocol.h#L41), `BLE_ETH_FRAG_HEADER_LEN=3` | At MTU 60, one 246 B fragment costs **5 notifications**; `BLE_Eth_GetNextTxChunk`/`ConsumeTxChunk` resume with a retained remainder, so no data is lost |
+| TX notification queue | 8 slots × 255 B | `BLE_ETH_TX_QUEUE_DEPTH` [APP/ble_eth_protocol.c:37](file:///Users/txa/project/Openterface_KM/APP/ble_eth_protocol.c#L37) | A burst overflows it; visible in the `tx_queue_full_drop` counter |
+| RX reassembly buffer | **1536 B, and only one in the whole system** | `g_reassembly.data` [APP/include/ble_eth_protocol.h:316](file:///Users/txa/project/Openterface_KM/APP/include/ble_eth_protocol.h#L316) | A single IP packet must be ≤ 6×246=1476 B; **and the IP channel competes with the TCP tunnel for the same reassembler** (§6.2) |
+| Fragment counter is only 4 bit | ≤ 15 fragments | `BLE_ETH_FRAG_COUNT_MASK 0x0FU` | Hard ceiling of 3690 B per message, which is enough |
+| TCP/tunnel connection slots | **2** | `BLE_ETH_MAX_CONNECTIONS` [APP/include/ble_eth_protocol.h:103](file:///Users/txa/project/Openterface_KM/APP/include/ble_eth_protocol.h#L103) | Cannot take the "one slot per connection" route again, see §6.1 |
+| ECM queue depth per direction | **2** frames, frame buffer 1514 B | `ECM_BRIDGE_QUEUE_DEPTH` / `ECM_BRIDGE_MTU_FRAME_SIZE` [APP/ecm_bridge.c:23-24](file:///Users/txa/project/Openterface_KM/APP/ecm_bridge.c#L23) | Forwarding must be "drop when the queue is full", never block the main loop |
+| Free RAM | **about 10.76 KB** (`_end`→`_heap_end` gap) | `docs/internal-memory-usage.md:86`; the current keymod-mini report is RAM 77.95% | New statics must be budgeted byte by byte, see §7 |
+| BLE conn interval (requested) | 10 × 1.25 ms = **12.5 ms** | `DEFAULT_DESIRED_MIN/MAX_CONN_INTERVAL` [APP/peripheral.c:65-68](file:///Users/txa/project/Openterface_KM/APP/peripheral.c#L65) | The central may refuse it; the real interval must be measured in Phase 0 |
+| App write path | iOS: 128 B chunks + 10 ms spacing + all `.withResponse` ([BLEManager.swift:19,424-477](file:///Users/txa/project/Openterface_KeyCmd_iOS/KeyCmd/Managers/BLEManager.swift#L19)); Android: 57 B chunks + 10 ms + `WRITE_TYPE_DEFAULT` | Both comments state "the firmware needs a BLE-layer ACK before it forwards" | **The uplink is serialised by write-with-response into one round trip at a time** — this is the biggest win available at the app layer and is unrelated to the firmware |
 
-**吞吐预算（按当前实际配置，非理想配置）：** MTU 60 ⇒ 每 notification 最多 57 B 净数据；`BLE_TX_NUM_EVENT = 1` ⇒ 每 12.5 ms 一个包 ⇒ **单向裸上限 57 B / 12.5 ms ≈ 4.56 kB/s ≈ 36.5 kbit/s**（还未计协议头与 ACK）。
+**Throughput budget (current real configuration, not the ideal one):** MTU 60 ⇒ at most 57 B of net data per notification; `BLE_TX_NUM_EVENT = 1` ⇒ one packet per 12.5 ms ⇒ **raw one-way ceiling 57 B / 12.5 ms ≈ 4.56 kB/s ≈ 36.5 kbit/s** (before protocol headers and ACKs).
 
-落到 BLE-Eth 帧上：一个 246 B 的分片 = 255 B 帧 = 5 个 notification ≈ **62.5 ms**，且现在每个入向分片还回一条 DATA_ACK（[APP/ble_eth_protocol.c:590](file:///Users/txa/project/Openterface_KM/APP/ble_eth_protocol.c#L590)），ACK 又占掉出向的槽 ⇒ 双向对拍时实际有效吞吐再打折。这与"App 用 write-with-response"叠加，就是手机 SSH 能连上但用起来发涩的完整解释。
+Projected onto BLE-Eth frames: one 246 B fragment = a 255 B frame = 5 notifications ≈ **62.5 ms**, and today every inbound fragment also returns a DATA_ACK ([APP/ble_eth_protocol.c:590](file:///Users/txa/project/Openterface_KM/APP/ble_eth_protocol.c#L590)), which occupies an outbound slot ⇒ bidirectional traffic discounts the effective throughput further. Superimposed on "the app uses write-with-response", this fully explains why phone SSH connects but feels sticky.
 
-**本方案的第 4 节因此不能独立成立**：如果 `BLE_BUFF_MAX_LEN` / `BLE_TX_NUM_EVENT` 不先解决，无论走 IP 隧道还是走现有 TCP 代理，体验都卡在同一个 36.5 kbit/s 的墙上。**优先级应高于本方案**（见第 11.5 节）。
+**§4 therefore cannot stand on its own**: unless `BLE_BUFF_MAX_LEN` / `BLE_TX_NUM_EVENT` are addressed first, both an IP tunnel and the existing TCP proxy hit the same 36.5 kbit/s wall. **That work should be prioritised above this design** (see §11.5).
 
 ---
 
-## 5. 关键设计决策
+## 5. Key design decisions
 
-### 5.1 承载裸 IPv4，不承载以太网帧
+### 5.1 Carry raw IPv4, not Ethernet frames
 
-诱惑是把 Target ECM 的以太网帧原样搬到 BLE 上（"真·网桥"）。**不做**，理由：
+The temptation is to move the Target ECM Ethernet frames onto BLE verbatim (a "real bridge"). **No**, because:
 
-1. 一旦透传 L2，host 侧就必须对 Target 子网做 ARP。而设备在 host 侧的 ARP 只对**自己的 IP** 应答 —— `handle_arp_frame()` [APP/ecm_bridge.c:293](file:///Users/txa/project/Openterface_KM/APP/ecm_bridge.c#L293) 只匹配 `ecm_dev_ip` / `ecm_target_dev_ip`。透传 L2 就得实现 ARP 代理（对整段子网全部应答），复杂度立刻上一个台阶。
-2. `utun` 是点对点设备，OS 在 tun 层根本不做 ARP，直接给它 IP 包。**裸 IPv4 让 host 侧的 ARP 问题整体消失。**
-3. 省掉 14 B 以太网头 + 4 B FCS，等于每片白送 18 B 净荷。
-4. 帧内 MAC 地址在 BLE 这条链路上没有任何语义，透传等于把无关状态引入协议。
+1. Once L2 is passed through, the host has to ARP for the Target subnet. But on the host side the device only answers ARP for **its own IP** — `handle_arp_frame()` [APP/ecm_bridge.c:293](file:///Users/txa/project/Openterface_KM/APP/ecm_bridge.c#L293) matches only `ecm_dev_ip` / `ecm_target_dev_ip`. Passing L2 through means implementing proxy ARP (answering for the whole subnet), which raises complexity a notch immediately.
+2. `utun` is a point-to-point device; the OS does no ARP at the tun layer and hands it IP packets directly. **Raw IPv4 makes the host-side ARP problem disappear entirely.**
+3. It saves the 14 B Ethernet header and 4 B FCS — 18 B of payload free on every fragment.
+4. The MAC addresses inside the frame have no meaning on the BLE link; passing them through injects irrelevant state into the protocol.
 
-BLE 上只跑 IPv4 包（不含链路层），设备两端自己做 MAC 解析。
+Only IPv4 packets (without the link layer) travel over BLE; both ends do their own MAC resolution.
 
-### 5.2 隧道 MTU = 576
+### 5.2 Tunnel MTU = 576
 
-不是随便取的：
+Not an arbitrary choice:
 
-- `576` 是 RFC 791 要求所有 IPv4 实现必须能重组的最小数据报，任何目标机都不会拒绝。
-- 分片尺寸**保持协议现有的 246 B**，不要为了"一片一个 notification"去缩小它。在 MTU 60 的现实下 `246 B` 片本来就要 5 个 notification 发完，缩到 48 B 总 notification 数不变，但**每片一条 DATA_ACK 的开销会翻 5 倍**（ACK 逻辑见 [APP/ble_eth_protocol.c:590](file:///Users/txa/project/Openterface_KM/APP/ble_eth_protocol.c#L590)）。`ceil(576/246) = 3` 片，落在 `BLE_Eth_PushTargetData()` 的 6 片上限内（[APP/ble_eth_protocol.c:1246](file:///Users/txa/project/Openterface_KM/APP/ble_eth_protocol.c#L1246)），也在 1536 B 重组缓冲内 —— **两处上限都不用改**。
-- 一个 576 B 包在空中的代价：3 片 × 5 notification = 15 个 notification，按 1 packet / 12.5 ms ≈ **188 ms 单向**。这决定了隧道只能承载小报文交互，不承载吞吐。
-- TCP 侧把 MSS 夹到 `536`（576 − 20 IP − 20 TCP），`ssh` 从源头就不产生超限包，99% 流量天然合规。
-- 超限的 UDP 包：**不分片、直接丢**，并在 Phase 3 回 `ICMP Fragmentation Needed`。Phase 1 先丢 + 计数。
+- `576` is the minimum datagram every IPv4 implementation must be able to reassemble per RFC 791, so no target machine will refuse it.
+- Keep the fragment size **at the protocol's existing 246 B**; do not shrink it to get "one fragment per notification". At MTU 60 a `246 B` fragment already takes 5 notifications, and shrinking to 48 B keeps the notification count identical while **multiplying the per-fragment DATA_ACK overhead by five** (ACK logic at [APP/ble_eth_protocol.c:590](file:///Users/txa/project/Openterface_KM/APP/ble_eth_protocol.c#L590)). `ceil(576/246) = 3` fragments, inside `BLE_Eth_PushTargetData()`'s 6-fragment ceiling ([APP/ble_eth_protocol.c:1246](file:///Users/txa/project/Openterface_KM/APP/ble_eth_protocol.c#L1246)) and inside the 1536 B reassembly buffer — **neither limit needs changing**.
+- The cost of one 576 B packet on the air: 3 fragments × 5 notifications = 15 notifications, at 1 packet / 12.5 ms ≈ **188 ms one way**. That settles it: the tunnel can carry small request/response traffic, not throughput.
+- On the TCP side, clamp MSS to `536` (576 − 20 IP − 20 TCP) so `ssh` never produces oversized packets at the source and 99% of traffic is compliant by construction.
+- Oversized UDP packets: **drop, do not fragment**, and in Phase 3 return `ICMP Fragmentation Needed`. Phase 1 drops and counts.
 
-### 5.3 BLE 侧独立子网 + SNAT 出 Target 链路
+### 5.3 Separate subnet on the BLE side + SNAT out through the Target link
 
-BLE 隧道用**自己的**子网，绝不复用 `192.168.30.0/24`（那是 ECM 配置页的语义空间，且默认值里 host/target 两侧本就在同一个 /24，混用必然和物理 ECM 适配器的路由打架）。
+The BLE tunnel uses **its own** subnet and never reuses `192.168.30.0/24` (that is the ECM config page's semantic space, and by default both host and target sides sit in the same /24, so mixing them is guaranteed to fight the physical ECM adapter's routes).
 
 ```
-默认参数（全部可经 0x25 覆盖）：
+Defaults (all overridable via 0x25):
   tunnel subnet   10.88.0.0/24
-  host 侧 utun    10.88.0.2   ← OS 视角"我自己的地址"
-  device 侧网关   10.88.0.1   ← utun 的 default/next-hop
-  SNAT 出口 IP    = target_dev_ip（默认 192.168.30.5），取自 ECM_IPConfig
-  路由注入        route add -net 192.168.30.0/24 10.88.0.1   （只加这条，不动 default）
+  host-side utun  10.88.0.2   ← "my own address" from the OS's point of view
+  device-side gw  10.88.0.1   ← the utun's default / next hop
+  SNAT egress IP  = target_dev_ip (default 192.168.30.5), taken from ECM_IPConfig
+  route injection route add -net 192.168.30.0/24 10.88.0.1   (this route only, never default)
 ```
 
-转发规则只有两条：
+Only two forwarding rules:
 
-- **BLE → Target**：源 IP 是 `10.88.0.0/24` 的包 → 查/发 Target 链路 ARP 得 `target_host_ip` 的 MAC → 重写 `src_ip = target_dev_ip`、重算 IP 校验和 → `ECM_Bridge_SendRawFrame()`。
-- **Target → BLE**：`handle_target_frame()` 里 `dst_ip == target_dev_ip` 且 conntrack 命中的包 → 按表反向还原 `dst_ip` → 推入 BLE 通道。
+- **BLE → Target**: for packets whose source IP is in `10.88.0.0/24` → resolve the MAC of `target_host_ip` via the Target link's ARP → rewrite `src_ip = target_dev_ip`, recompute the IP checksum → `ECM_Bridge_SendRawFrame()`.
+- **Target → BLE**: inside `handle_target_frame()`, packets with `dst_ip == target_dev_ip` that hit conntrack → restore `dst_ip` from the table → push into the BLE channel.
 
-用 SNAT 而不是双向 NAT64 式的路由广播，是因为 **Target 机器不需要任何配置、不需要回程路由**——它眼里所有连接都来自隔壁 `192.168.30.5`。这是本方案"目标侧零侵入"的关键，也是 KVM 场景（那台机器是别人的，你不能要求它装驱动加路由）唯一现实的形态。
+SNAT rather than NAT64-style route advertisement, because **the Target machine needs no configuration and no return route** — from its point of view every connection comes from the neighbouring `192.168.30.5`. This is the key to "zero intrusion on the target side" and the only realistic shape for the KVM scenario (that machine belongs to someone else; you cannot ask them to install a driver and add routes).
 
-### 5.4 数据面复用 DATA(`0x11`)，用 `conn_id = 0xFE` 标识 IP 通道
+### 5.4 The data plane reuses DATA (`0x11`), with `conn_id = 0xFE` marking the IP channel
 
-分片头里的 `conn_id` 是独立一字节，而连接槽只有 `0..1`（`BLE_ETH_MAX_CONNECTIONS`），`0xFE` 是天然可保留的"虚拟通道号"。
+`conn_id` in the fragment header is a standalone byte, and connection slots only run `0..1` (`BLE_ETH_MAX_CONNECTIONS`), so `0xFE` is a naturally reserved "virtual channel number".
 
-选它、而不是新加命令字节或占 `frag_flags` 空闲 bit 的理由：
+Why this rather than a new command byte or a spare bit in `frag_flags`:
 
-1. 帧的构造、校验、ACK、重组、背压**一行都不用改**——`BLE_Eth_PushTargetData()` 和 RX 重组器只认 `conn_id`。
-2. 唯一改动是 dispatch 处加一个分支：`if (conn_id == BLE_ETH_IP_CONN_ID) → ip_router_input()`，不走 `g_connections[]`。
-3. `frag_flags` 的 bit5/bit4 虽然空闲，但占用旧 host 无法识别的 bit 会让 `FrameParser` 行为不可预期；`conn_id` 是 host 本来就要读的字段，改动面更小、可回退。
-4. `CONNECT(0x10)` / `DISCONNECT(0x12)` / `ALLOC` 等所有按 `conn_id < BLE_ETH_MAX_CONNECTIONS` 校验的路径，只需加一条 `!= 0xFE` 守卫（与已落地的 `!is_icmp` 守卫同一模式，见 [APP/ble_eth_protocol.c:502](file:///Users/txa/project/Openterface_KM/APP/ble_eth_protocol.c#L502)）。
+1. Frame construction, validation, ACK, reassembly and back-pressure **need not change by a single line** — `BLE_Eth_PushTargetData()` and the RX reassembler only look at `conn_id`.
+2. The only change is one branch at dispatch: `if (conn_id == BLE_ETH_IP_CONN_ID) → ip_router_input()`, bypassing `g_connections[]`.
+3. `frag_flags` bits 5/4 are free, but occupying a bit an older host cannot recognise makes `FrameParser` behaviour unpredictable; `conn_id` is a field the host already reads, so the change surface is smaller and reversible.
+4. Every path that validates `conn_id < BLE_ETH_MAX_CONNECTIONS` (`CONNECT(0x10)` / `DISCONNECT(0x12)` / `ALLOC`) only needs a `!= 0xFE` guard (the same pattern as the already-landed `!is_icmp` guard, see [APP/ble_eth_protocol.c:502](file:///Users/txa/project/Openterface_KM/APP/ble_eth_protocol.c#L502)).
 
-host 侧 `tools/ble_eth_tunnel.py` 的 `DataReassembler` / `FrameParser` 需同步放开 `conn_id` 取值校验，这是 Phase 2 的活。
+On the host, `DataReassembler` / `FrameParser` in `tools/ble_eth_tunnel.py` must relax their `conn_id` validation to match; that is Phase 2 work.
 
-### 5.5 控制面：新增 `0x25 SET_IP_MODE` / `0xA5`
+### 5.5 Control plane: add `0x25 SET_IP_MODE` / `0xA5`
 
-命令字节选择已核对过冲突：CH9329 占用 `0x22/0x23/0x26/0x27`（`CMD_BLE_SECURITY`、`CMD_BLE_SET_NAME`、`CMD_SET_ECM_IP_CONFIG`、`CMD_GET_ECM_IP_CONFIG`，见 [APP/include/usbd_composite_km.h:51-57](file:///Users/txa/project/Openterface_KM/APP/include/usbd_composite_km.h#L51)），BLE-Eth 已用 `0x10-0x12/0x1E/0x1F/0x20-0x24`。**`0x25` 在两个地址空间都干净**，`0xA5` 同理。不要再碰 `0x26/0x27`——那是历史遗留的撞号区。
+Command-byte collisions were checked: CH9329 occupies `0x22/0x23/0x26/0x27` (`CMD_BLE_SECURITY`, `CMD_BLE_SET_NAME`, `CMD_SET_ECM_IP_CONFIG`, `CMD_GET_ECM_IP_CONFIG`, see [APP/include/usbd_composite_km.h:51-57](file:///Users/txa/project/Openterface_KM/APP/include/usbd_composite_km.h#L51)), and BLE-Eth already uses `0x10-0x12/0x1E/0x1F/0x20-0x24`. **`0x25` is clean in both address spaces**, as is `0xA5`. Do not touch `0x26/0x27` again — that is the legacy collision zone.
 
 ```
-0x25 SET_IP_MODE 请求 payload：
+0x25 SET_IP_MODE request payload:
   [0]     enable            0=off, 1=on
-  [1-4]   tunnel_host_ip    （off 时忽略；默认 10.88.0.2）
-  [5-8]   tunnel_gw_ip      （默认 10.88.0.1）
-  [9-12]  tunnel_subnet     （默认 255.255.255.0）
-  [13-14] mtu               大端，仅接受 <= 576，其余拒绝为 PARAM_ERR
-  [15]    forward_icmp      0=只转 TCP/UDP，1=也转 ICMP
+  [1-4]   tunnel_host_ip    (ignored when off; default 10.88.0.2)
+  [5-8]   tunnel_gw_ip      (default 10.88.0.1)
+  [9-12]  tunnel_subnet     (default 255.255.255.0)
+  [13-14] mtu               big-endian, accepts only <= 576, anything else is PARAM_ERR
+  [15]    forward_icmp      0=TCP/UDP only, 1=ICMP too
 
-0xA5 响应 payload（8 B）：
+0xA5 response payload (8 B):
   [0] status  [1] active  [2] mtu  [3] fwd_icmp
   [4-5] fwd_pkts_out (BE16)  [6-7] fwd_pkts_in (BE16)
 ```
 
-`enable` 必须是**运行时开关，绝不写 Flash**（`STABILITY_FIX_PLAN` 已把"配置写入无意义擦 Flash"列为问题）。隧道状态是易失的，掉电即关。
+`enable` must be a **runtime switch and must never write flash** (`STABILITY_FIX_PLAN` already lists "meaningless flash erase on config write" as a problem). Tunnel state is volatile; power loss means off.
 
-### 5.6 conntrack：8 条静态表项，不做大而全
+### 5.6 conntrack: 8 static entries, not a general-purpose stack
 
 ```c
 typedef struct {
-    uint32_t orig_dst_ip;   /* host 侧看到的 Target IP */
-    uint32_t orig_src_ip;   /* utun 侧源 IP */
+    uint32_t orig_dst_ip;   /* Target IP as seen by the host */
+    uint32_t orig_src_ip;   /* source IP on the utun side */
     uint16_t orig_src_port;
-    uint16_t nat_src_port;  /* SNAT 分配的源端口 */
+    uint16_t nat_src_port;  /* source port allocated by SNAT */
     uint8_t  proto;         /* 6 / 17 / 1 */
-    uint16_t icmp_id;       /* proto==1 时复用 */
-    uint32_t last_ms;       /* 空闲 30 s 老化 */
+    uint16_t icmp_id;       /* reused when proto==1 */
+    uint32_t last_ms;       /* aged out after 30 s idle */
 } ip_ct_entry_t;            /* 24 B × 8 = 192 B */
 ```
 
-只做 5 元组对称匹配 + 端口回收，不做状态跟踪、不做 TCP 状态机（那是 `ble_eth_conn_t` 的事，这里用不上）。8 条对"一台 Mac 同时开 3 个 ssh + ping + scp"足够；打满即拒新流并计数，不静默丢。
+Only symmetric 5-tuple matching plus port recycling; no state tracking, no TCP state machine (that is `ble_eth_conn_t`'s job and is not needed here). Eight entries are enough for "one Mac running three ssh sessions, ping and scp at once"; when full, new flows are rejected and counted, never silently dropped.
 
 ---
 
-## 6. 架构与数据通路
+## 6. Architecture and data path
 
 ```
             ┌──────────────────────── host (Mac / Linux / Android) ──────────────────────┐
-            │  apps (ssh / ping / scp / 任意)                                            │
-            │        │ IP 路由: 192.168.30.0/24 → 10.88.0.1                              │
+            │  apps (ssh / ping / scp / anything)                                        │
+            │        │ IP routing: 192.168.30.0/24 → 10.88.0.1                            │
             │  utun / VpnService  (10.88.0.2)                                            │
-            │        │ 裸 IPv4 包                                                        │
-            │  tools/ble_ip_tunnel.py 或 Android VPN 服务                                 │
+            │        │ raw IPv4 packets                                                  │
+            │  tools/ble_ip_tunnel.py or the Android VPN service                          │
             └────────┼──────────────────────────────────────────────────────────────────┘
                      │  BLE GATT: FFF2 write / FFF1 notify
-                     │  BLE-Eth DATA(0x11), conn_id=0xFE, 分片≤171B, MTU 576
+                     │  BLE-Eth DATA(0x11), conn_id=0xFE, fragment<=171B, MTU 576
    ══════════════════╪═══════════════════════════════════════════════════════════════════
                      │  APP/ble_eth_protocol.c
-        RX: 重组完成 ─┤→ conn_id==0xFE? ─→ ip_router_input() ─→ conntrack ─→ 建以太网帧
+        RX: reassembly done ─┤→ conn_id==0xFE? ─→ ip_router_input() ─→ conntrack ─→ build Ethernet frame
                       │                          │                      └→ ECM_Bridge_SendRawFrame()
         TX: ip_router_output() ←──────────────────┤                         → g_host_to_target → EP7 IN
-                      │  handle_target_frame() 拦截 dst==target_dev_ip      → Target USB ECM
-                      └→ ecm_bridge.c:2651/2686                             → Target PC (192.168.30.2)
+                      │  handle_target_frame() intercepts dst==target_dev_ip        → Target USB ECM
+                      └→ ecm_bridge.c:2651/2686                                     → Target PC (192.168.30.2)
    ═══════════════════════════════════════════════════════════════════════════════════════
-        并存但互不影响： Host USB ECM (USBD)  |  HID 键鼠 (target 侧 EP)  |  CH9329 命令
+        Coexisting without interference: Host USB ECM (USBD) | HID keyboard/mouse (target-side EP) | CH9329 commands
 ```
 
-### 6.2 与现有 TCP 隧道 / 0x24 NET_PING 的关系（必须先讲的取舍）
+### 6.2 Relationship with the existing TCP tunnel and `0x24 NET_PING` (the trade-off that must be stated first)
 
-**全局只有一份 `g_reassembly`**，所以 IP 通道、TCP 隧道、`0x24` 三者**不可能并行接收大消息**。Phase 1 采取最诚实的做法：`SET_IP_MODE(enable=1)` 时**主动拆掉现有 TCP 隧道并拒绝新的 `CONNECT`**（返回 `CONN_FULL`），关闭后恢复。这不是偷懒，是把"共享重组器"这个既成事实显式化，而不是造一个会在并发下拼帧的隐藏状态机。
+**There is only one `g_reassembly` in the system**, so the IP channel, the TCP tunnel and `0x24` **cannot receive large messages in parallel**. Phase 1 takes the most honest route: when `SET_IP_MODE(enable=1)` is set, **actively tear down the existing TCP tunnel and refuse new `CONNECT`s** (returning `CONN_FULL`); restore on disable. This is not laziness — it makes the "shared reassembler" fact explicit instead of building a hidden state machine that would interleave frames under concurrency.
 
-隧道打开后 `ping` **免费可用**（ICMP 只是被转发的又一个 proto）。`0x24 NET_PING` 不废弃：它是**唯一不需要 host 侧任何特权**的探测手段（macOS 上 utun 要 `sudo`，`0x24` 不要），二者职责不重叠。
+Once the tunnel is up, `ping` **works for free** (ICMP is just another forwarded protocol). `0x24 NET_PING` is not retired: it is **the only probe that needs no host-side privilege** (utun on macOS needs `sudo`, `0x24` does not), so the two do not overlap in purpose.
 
 ---
 
-## 7. 内存与 Flash 预算
+## 7. Memory and flash budget
 
-| 项 | 字节 | 说明 |
+| Item | Bytes | Notes |
 |----|------|------|
-| `ip_ct_entry_t[8]` | 192 | 第 5.6 节 |
-| Target 链路 ARP 缓存 `4 × 12` | 48 | 复用现有 ARP 逻辑，只加缓存 |
-| 入向 IP 暂存 `576 × 1` | 576 | 出向可直接从 `g_reassembly.data` 偏移引用，不额外缓冲 |
-| 计数器 + 配置影子 + `ip_router` 状态 | ~96 | |
-| **合计** | **约 0.9 KB** | 空闲 10.76 KB 的 **8.5%** |
+| `ip_ct_entry_t[8]` | 192 | §5.6 |
+| Target-link ARP cache `4 × 12` | 48 | Reuses the existing ARP logic, only adds a cache |
+| Inbound IP staging `576 × 1` | 576 | Outbound can reference `g_reassembly.data` at an offset, no extra buffer |
+| Counters + config shadow + `ip_router` state | ~96 | |
+| **Total** | **about 0.9 KB** | **8.5%** of the 10.76 KB free |
 
-Phase 1 结束时必须在 4 个目标上重跑 `size` 复核（keymod-mini 现 RAM 77.95% / FLASH 48.63%；`build.sh` 一次只接受**一个** target，多 target 要循环调用）。**若 RAM 占用超 82%，优先砍掉入向暂存缓冲改为直接引用 ECM 帧缓冲，而不是扩大 `g_reassembly`。**
+At the end of Phase 1 `size` must be re-run on all four targets (keymod-mini currently RAM 77.95% / FLASH 48.63%; `build.sh` accepts **one** target per invocation, so multiple targets need a loop). **If RAM use exceeds 82%, cut the inbound staging buffer and reference the ECM frame buffer directly, rather than growing `g_reassembly`.**
 
-Flash 增量估算 < 2 KB（新增 `APP/ip_router.c` 一个文件 + dispatch 分支），当前 48.6% 无风险。
+Flash increment is estimated below 2 KB (one new file `APP/ip_router.c` plus a dispatch branch); 48.6% is currently safe.
 
 ---
 
-## 8. host 侧虚拟网卡：各平台权限现实
+## 8. Host-side virtual adapter: platform permission reality
 
-这是决定"能不能落地"的外部约束，比固件工作量更硬。
+This is the external constraint that decides whether the design can ship at all, and it is harder than the firmware work.
 
-| 平台 | 机制 | 权限 | 结论 |
+| Platform | Mechanism | Permission | Verdict |
 |------|------|------|------|
-| macOS | `utun`（`/dev/tun` 已废弃，走 `UTUNCONTROL` ioctl，或 `IPUtil` / NEPacketTunnelProvider） | **需要 root**；免 root 只有 `NEPacketTunnelProvider` 一条路，且要签名 App + entitlement | CLI helper + `sudo` 可接受；产品化必须走 NE |
-| Linux | `/dev/net/tun` + `TUNSETIFF` | root 或 `CAP_NET_ADMIN` | 最顺；可给 helper 二进制 setcap，不必长期 root |
-| Windows | Wintun（需管理员）/ tun2socks | **管理员** | 可行；`tools/` 里已有 Windows 脚本生态可挂 |
-| Android | `VpnService.establish()` | **无需 root**，仅一次系统授权弹窗 | 唯一免特权的正统通道，且 `VpnService` 天生就是"点对点拿裸 IP 包"，与本方案对齐。**但 KeyCmd_Android 今天一行 VPN 代码都没有**（第 1 节核实），要从零加 `VpnService` + 用户授权流 + 前后台生命周期 |
-| iOS | `NEPacketTunnelProvider` | 付费 Apple Developer + **Network Extension entitlement 审批** + 全新 app-extension target | KeyCmd 三者皆无（第 1 节）。**不是工作量问题，是准入问题**，属独立立项 |
+| macOS | `utun` (`/dev/tun` is deprecated; use the `UTUNCONTROL` ioctl, or `IPUtil` / NEPacketTunnelProvider) | **requires root**; the only root-free path is `NEPacketTunnelProvider`, which needs a signed app plus entitlement | A CLI helper with `sudo` is acceptable; shipping a product requires NE |
+| Linux | `/dev/net/tun` + `TUNSETIFF` | root or `CAP_NET_ADMIN` | Smoothest; the helper binary can be given setcap, so no permanent root |
+| Windows | Wintun (needs administrator) / tun2socks | **administrator** | Feasible; `tools/` already has a Windows script ecosystem to hang it on |
+| Android | `VpnService.establish()` | **no root**, just one system consent dialog | The only legitimate privilege-free channel, and `VpnService` is inherently "hand me raw IP packets point-to-point", which aligns with this design. **But KeyCmd_Android has no VPN code at all today** (§1 verification), so `VpnService` + consent flow + foreground/background lifecycle must be built from zero |
+| iOS | `NEPacketTunnelProvider` | Paid Apple Developer + **Network Extension entitlement approval** + a new app-extension target | KeyCmd has none of the three (§1). **This is an admission problem, not a workload problem**, and is a separate project |
 
-**这一节在本轮核实后权重上升了。** 控制端既然确定是手机，那么两个手机平台**都没有任何 raw-IP 基础设施**，本方案不是"接着做下去"而是"从零建两套"：Android 要新写 `VpnService`，iOS 要等 entitlement 审批 + 新建 extension target。与之对照，两个 App 都已经把 SSH 做到可用（libssh2 / JSch + BLE-Eth），**"手机能 ssh"这件事对 IP 隧道的需求是零**。
+**This section gained weight after this round of verification.** The controller is confirmed to be a phone, and **neither phone platform has any raw-IP infrastructure**, so this design is not "continue what exists" but "build two stacks from zero": Android needs a new `VpnService`, iOS needs entitlement approval plus a new extension target. By contrast, both apps already have working SSH (libssh2 / JSch + BLE-Eth), so **"the phone can ssh" creates zero demand for an IP tunnel.**
 
 ---
 
-## 9. 实施阶段
+## 9. Implementation phases
 
-### Phase 0 — 可行性实测（不动固件，0.5 天）
+### Phase 0 — Feasibility measurement (no firmware changes, 0.5 day)
 
-产出决定后续所有数字是否成立，**必须先做**：
+Its output decides whether every number below holds, so **it must come first**:
 
-1. macOS 连接后**实测协商到的 conn interval** 和实际 MTU（central 可以不采纳 12.5 ms；`peripheralMTU` 由 `exchangeMTUReq.clientRxMTU` 得来，[APP/peripheral.c:793](file:///Users/txa/project/Openterface_KM/APP/peripheral.c#L793)）。
-2. 用 `0x1E PING` / `0x11 DATA` 压测 notification/s，校准第 4 节吞吐预算，特别是**每片 ACK 吃掉一半槽位**这个折扣到底多大。
-3. 单独验证 `sudo` 下 utun 建接口 + 注路由 + 读写裸 IPv4 包的 Python 通路（不涉及设备）。
+1. **Measure the negotiated conn interval** and the real MTU after a macOS connection (the central may refuse 12.5 ms; `peripheralMTU` comes from `exchangeMTUReq.clientRxMTU`, [APP/peripheral.c:793](file:///Users/txa/project/Openterface_KM/APP/peripheral.c#L793)).
+2. Stress notifications/s with `0x1E PING` / `0x11 DATA` to calibrate the §4 throughput budget, in particular how large the discount is from **a per-fragment ACK eating half the slots**.
+3. Separately verify a pure Python path under `sudo` that creates a utun interface, injects a route and reads/writes raw IPv4 packets (no device involved).
 
-若实测净吞吐 < 20 kbit/s，Phase 1 应当降级为"只做 ICMP 转发（让 `ping` 通），SSH 继续走现有 TCP 代理"。
+If measured net throughput is under 20 kbit/s, Phase 1 should be downgraded to "forward ICMP only (make `ping` work); SSH keeps using the existing TCP proxy".
 
-### Phase 1 — 固件 IP 层（2–3 天）
+### Phase 1 — Firmware IP layer (2–3 days)
 
-| 改动 | 位置 |
+| Change | Location |
 |------|------|
-| 新增 `APP/ip_router.c` + `APP/include/ip_router.h`：`ip_router_input/output`、conntrack、target 链路 ARP 解析、校验和 | 新文件 |
-| IPv4 提取泛化：把 `BLE_Eth_HandleTargetFrame()` 的 `if (ip[9] != 6) return false` 改为 `else → ip_router_input()` | [APP/ble_eth_protocol.c:1714](file:///Users/txa/project/Openterface_KM/APP/ble_eth_protocol.c#L1714) |
-| RX 重组 dispatch 认 `conn_id == 0xFE` | `process_fragment()` 附近（[APP/ble_eth_protocol.c:584-604](file:///Users/txa/project/Openterface_KM/APP/ble_eth_protocol.c#L584)） |
-| `conn_id` 分配/`CONNECT`/`DISCONNECT` 加 `!= 0xFE` 守卫 | `BLE_Eth_AllocConnection()`、[APP/ble_eth_protocol.c:502](file:///Users/txa/project/Openterface_KM/APP/ble_eth_protocol.c#L502) |
-| `0x25` dispatch + `0xA5` 响应 + INFO feature bit 5 `BLE_ETH_FEAT_IP_TUNNEL 0x20U` | `ble_eth_protocol.c` + [APP/include/ble_eth_protocol.h:71-103](file:///Users/txa/project/Openterface_KM/APP/include/ble_eth_protocol.h#L71) |
-| `Peripheral_IsBleEthCommandByte()` 登记 `0x25` | [APP/peripheral.c:239](file:///Users/txa/project/Openterface_KM/APP/peripheral.c#L239) |
-| MSS 夹到 536 / MTU 通告 | `ip_router` 内 TCP MSS 改写（Phase 3 可先不做，576 已够 ssh） |
-| 模式门控：仅在 `USB_ModeConfig_ActiveModeHasTargetCdcEcm()` 为真时允许 enable | [APP/usb_mode_config.c:233](file:///Users/txa/project/Openterface_KM/APP/usb_mode_config.c#L233) |
-| 文档 | `docs/ble-eth-protocol.md` 加 `0x25` 章节 + feature bit；新增 `docs/ble-ip-tunnel-usage.md` |
+| Add `APP/ip_router.c` + `APP/include/ip_router.h`: `ip_router_input/output`, conntrack, Target-link ARP resolution, checksums | new files |
+| Generalise IPv4 extraction: turn `BLE_Eth_HandleTargetFrame()`'s `if (ip[9] != 6) return false` into `else → ip_router_input()` | [APP/ble_eth_protocol.c:1714](file:///Users/txa/project/Openterface_KM/APP/ble_eth_protocol.c#L1714) |
+| RX reassembly dispatch recognises `conn_id == 0xFE` | near `process_fragment()` ([APP/ble_eth_protocol.c:584-604](file:///Users/txa/project/Openterface_KM/APP/ble_eth_protocol.c#L584)) |
+| `!= 0xFE` guards in `conn_id` allocation / `CONNECT` / `DISCONNECT` | `BLE_Eth_AllocConnection()`, [APP/ble_eth_protocol.c:502](file:///Users/txa/project/Openterface_KM/APP/ble_eth_protocol.c#L502) |
+| `0x25` dispatch + `0xA5` response + INFO feature bit 5 `BLE_ETH_FEAT_IP_TUNNEL 0x20U` | `ble_eth_protocol.c` + [APP/include/ble_eth_protocol.h:71-103](file:///Users/txa/project/Openterface_KM/APP/include/ble_eth_protocol.h#L71) |
+| Register `0x25` in `Peripheral_IsBleEthCommandByte()` | [APP/peripheral.c:239](file:///Users/txa/project/Openterface_KM/APP/peripheral.c#L239) |
+| Clamp MSS to 536 / advertise MTU | TCP MSS rewrite inside `ip_router` (optional in Phase 3; 576 is enough for ssh) |
+| Mode gating: allow enable only when `USB_ModeConfig_ActiveModeHasTargetCdcEcm()` is true | [APP/usb_mode_config.c:233](file:///Users/txa/project/Openterface_KM/APP/usb_mode_config.c#L233) |
+| Documentation | add a `0x25` section plus the feature bit to `docs/ble-eth-protocol.md`; add `docs/ble-ip-tunnel-usage.md` |
 
-**构建门槛**：4 个 target 全绿 + `size` 在第 7 节预算内。
-**硬件门槛**：`ping` 0% loss、`ssh` 可交互、HID 键鼠无丢键（观察 HID queue overflow 计数不增长）。
+**Build gate**: all four targets green + `size` within the §7 budget.
+**Hardware gate**: `ping` 0% loss, `ssh` interactive, HID keyboard/mouse dropping no keys (watch that the HID queue overflow counter does not grow).
 
-### Phase 2 — host 侧 helper（1–2 天）
+### Phase 2 — Host-side helper (1–2 days)
 
-`tools/ble_ip_tunnel.py`：BLE 连接 → `0x25 enable` → 建 utun/TUN（`--interface` 交给 OS）→ 双向搬裸 IPv4 → `--routes` 注入 Target 子网 → 退出时 `0x25 disable` + 拆路由。macOS/Linux 一套，Windows 单独 `wintun` 分支。
+`tools/ble_ip_tunnel.py`: BLE connect → `0x25 enable` → create utun/TUN (`--interface` handed to the OS) → move raw IPv4 both ways → `--routes` injects the Target subnet → on exit `0x25 disable` and remove the routes. One implementation for macOS/Linux, a separate `wintun` branch for Windows.
 
-### Phase 3 — 稳定化（按 Phase 0/1 数据决定优先级）
+### Phase 3 — Stabilisation (priority decided by Phase 0/1 data)
 
-1. **分片 ACK 合批**（每消息一次 ACK 或按 rx_window 累积），这是吞吐最大的一笔免费收益。
-2. `ICMP Fragmentation Needed` 回给 host，让 PMTUD 工作。
-3. 与 TCP 隧道共享重组器的**串行化调度**（若产品要求二者并存，需给 IP 通道独立 1536 B 重组器，代价 +1.5 KB RAM —— 届时重新评估）。
-4. BLE 断连/重连、Target 重枚举后的隧道自动恢复。
-5. conntrack 满 / ECM 队列满 / TX 队列满三类丢弃的可观测统计（扩展 `0xA5` 或加 `0x28 GET_IP_STATS`）。
+1. **Batch fragment ACKs** (one ACK per message, or accumulate against an rx_window): the largest free throughput win.
+2. Return `ICMP Fragmentation Needed` to the host so PMTUD works.
+3. **Serialised scheduling** for sharing the reassembler with the TCP tunnel (if the product requires both to coexist, the IP channel needs its own 1536 B reassembler at +1.5 KB RAM — re-evaluate then).
+4. Automatic tunnel recovery after BLE disconnect/reconnect and after Target re-enumeration.
+5. Observability for the three drop classes — conntrack full / ECM queue full / TX queue full (extend `0xA5` or add `0x28 GET_IP_STATS`).
 
-### Phase 4 — Android `VpnService`（独立，未估）
-### Phase 5 — iOS Network Extension（前置：entitlement 审批 + 新 extension target，未估）
+### Phase 4 — Android `VpnService` (separate, not estimated)
+### Phase 5 — iOS Network Extension (prerequisite: entitlement approval + new extension target, not estimated)
 
 ---
 
-## 10. 风险与未决问题
+## 10. Risks and open questions
 
-| # | 风险 | 严重度 | 处置 |
+| # | Risk | Severity | Handling |
 |---|------|--------|------|
-| R1 | **安全面扩大**：BLE 配对一旦成为 IP 入口，任何配对成功的主机即获得 Target 内网入口，且 BLE 无链路层鉴权（当前是裸 GATT） | **高** | 默认关闭；`enable` 需要走 `0x22 CMD_BLE_SECURITY` 已建立的 bonded 会话；隧道设 10 分钟无流量自动关；只允许 `target_host_ip` 单主机，不做整段子网转发 |
-| R2 | 吞吐可能达不到 SSH 舒适线（Phase 0 才能确认） | 中 | Phase 0 是闸门；不达标就退回"仅 ICMP 转发" |
-| R3 | 单重组器导致 IP 隧道与 TCP 隧道互斥，用户会当成 bug 报 | 中 | 明确写进 `docs/ble-eth-protocol.md`；`0xA5` 回 `active`；UI 上开隧道即显示"TCP proxy 不可用" |
-| R4 | SNAT 后 Target 侧所有连接源都是 `192.168.30.5`，排障时不可追溯到人 | 中 | conntrack 表保留原始 `orig_src_ip`，经 `GET_IP_STATS` 导出映射关系 |
-| R5 | 每片一 ACK 的现有行为在 IP 通道上放大，可能表现为"ping 通但 scp 卡死" | 中 | Phase 3 第 1 项；Phase 1 明确不承诺大文件 |
-| R6 | 转发路径与 `handle_target_icmp_packet()`（目的为自己的兜底应答）在 `dst_ip==target_dev_ip` 时先后顺序若写错，会出现"设备替目标机应答 ping" | 中 | dispatch 顺序固定为：conntrack 命中 → 转发；未命中且 dst==本机 → 兜底。写进单元测试用例 |
-| R7 | macOS 上 `utun` 地址与真实 `en` 适配器路由打架 | 低 | 用独立 `10.88.0.0/24` + 只加 Target 子网明细路由，绝不设 default |
-| R8 | 已知的 Host ECM ↔ Target ECM L2 桥本身是坏的：`handle_arp_frame()` 只对本机 IP 应答，而 DHCP 发的是 /24，所以文档里"Host PC 与 Target PC 可互 ping"在 USB 路径上根本不成立 | — | **本方案不修它，也不依赖它**（BLE 走裸 IPv4，绕开 ARP）。但要单独立项，否则用户会拿 USB 桥的预期来评判隧道 |
+| R1 | **Wider attack surface**: once BLE pairing becomes an IP entry point, any successfully paired host gains entry to the Target's internal network, and BLE has no link-layer authentication (it is bare GATT today) | **High** | Off by default; `enable` requires a bonded session established via `0x22 CMD_BLE_SECURITY`; auto-disable after 10 minutes of no traffic; allow only the single `target_host_ip`, no whole-subnet forwarding |
+| R2 | Throughput may not reach the SSH comfort line (only Phase 0 can tell) | Medium | Phase 0 is the gate; if it fails, fall back to "ICMP forwarding only" |
+| R3 | The single reassembler makes the IP tunnel and the TCP tunnel mutually exclusive, which users will report as a bug | Medium | State it explicitly in `docs/ble-eth-protocol.md`; `0xA5` returns `active`; the UI shows "TCP proxy unavailable" as soon as the tunnel is on |
+| R4 | After SNAT, every connection on the Target side comes from `192.168.30.5`, so troubleshooting cannot trace back to a person | Medium | The conntrack table keeps `orig_src_ip`; export the mapping through `GET_IP_STATS` |
+| R5 | The existing one-ACK-per-fragment behaviour is amplified on the IP channel and may present as "ping works but scp hangs" | Medium | Phase 3 item 1; Phase 1 explicitly promises nothing about large files |
+| R6 | If the ordering between the forwarding path and `handle_target_icmp_packet()` (the stand-in reply for destinations that are ourselves) is wrong when `dst_ip==target_dev_ip`, the device will "answer ping on behalf of the target" | Medium | Fix the dispatch order: conntrack hit → forward; miss and dst==self → stand in. Add it to the unit-test cases |
+| R7 | On macOS, the `utun` address fights the real `en` adapter's routes | Low | Use the dedicated `10.88.0.0/24` and add only the Target subnet's specific route, never default |
+| R8 | The known Host ECM ↔ Target ECM L2 bridge is itself broken: `handle_arp_frame()` answers only for the device's own IP, while DHCP hands out a /24, so the documentation's "Host PC and Target PC can ping each other" simply does not hold on the USB path | — | **This design neither fixes nor depends on it** (BLE carries raw IPv4, bypassing ARP). But it needs its own project, otherwise users will judge the tunnel against their USB-bridge expectations |
 
 ---
 
-## 11. 作为工程师的判断：本方案建议**搁置**，先做三件更便宜的事
+## 11. Engineering judgement: park this and do three cheaper things first
 
-控制端已确定为手机（iOS + Android 双端都在，且都已核实）。这个事实把结论定死了。
+The controller is confirmed to be a phone (both iOS and Android exist and both were verified). That fact settles the conclusion.
 
-1. **手机 SSH 与 IP 隧道无关。** 两端各自内置了完整 SSH 客户端（iOS libssh2 + `socketpair` 桥，Android JSch + 自定义 `SocketFactory`），底下就是 BLE-Eth 的 `0x10/0x11/0x12`。**做完 IP 隧道，手机 SSH 一个字节都不会变好。** "0.0.4/0.0.5 能用"印证的是 BLE-Eth TCP 代理这条路一直通，不是一条待补的 IP 通路。
+1. **Phone SSH is unrelated to an IP tunnel.** Both apps ship a complete SSH client (iOS libssh2 + a `socketpair` bridge, Android JSch + a custom `SocketFactory`), and underneath it is BLE-Eth `0x10/0x11/0x12`. **Build the IP tunnel and phone SSH does not improve by a single byte.** "It works on 0.0.4/0.0.5" confirms that the BLE-Eth TCP proxy path has always worked, not that an IP path was missing.
 
-2. **两个手机平台都没有 raw-IP 地基，iOS 还卡在准入而非工作量。** Android 要从零加 `VpnService`；iOS 要 Network Extension entitlement 审批 + 新建 extension target。固件侧只要 0.9 KB RAM 和 2–3 天，**但方案的真实成本 90% 在 App 侧和账号侧**，这个账在本轮核实前我是估不准的，现在能确定：不对称，不值。
+2. **Neither phone platform has a raw-IP foundation, and iOS is blocked on admission rather than workload.** Android needs a `VpnService` built from zero; iOS needs Network Extension entitlement approval plus a new extension target. The firmware side needs only 0.9 KB RAM and 2–3 days, **but 90% of the real cost sits in the apps and in the account**, which I could not have estimated before this round of verification. Now it is certain: asymmetric, not worth it.
 
-3. **真正卡住手机体验的是链路层配置，不是协议层次。** `BLE_BUFF_MAX_LEN = 64` ⇒ ATT_MTU 只能到 60 ⇒ 单次 notification 净数据 57 B（Android 早就按 57 写死了），加上 `BLE_TX_NUM_EVENT = 1` ⇒ **每 12.5 ms 只能发一个包 ≈ 36.5 kbit/s 单向裸上限**。`BLE_ETH_SAFE_NOTIFY_LEN 180` 在当前配置下是永远取不到的死代码。SSH 之所以"能用但发涩"，根在这里。**换任何协议层次都绕不开这堵墙；把它抬上去，SSH、`0x24` ping、未来隧道同时受益。**
+3. **What actually holds the phone experience back is the link-layer configuration, not the protocol layer.** `BLE_BUFF_MAX_LEN = 64` ⇒ ATT_MTU can only reach 60 ⇒ 57 B of net data per notification (Android has hard-coded 57 for a long time), and with `BLE_TX_NUM_EVENT = 1` ⇒ **one packet per 12.5 ms ≈ 36.5 kbit/s raw one-way ceiling**. `BLE_ETH_SAFE_NOTIFY_LEN 180` is dead code that can never be reached under the current configuration. This is why SSH "works but feels sticky". **No protocol layer gets around that wall; raising it benefits SSH, `0x24` ping and any future tunnel at once.**
 
-### 建议的实际优先级
+### Suggested practical priorities
 
-| 顺位 | 事项 | 成本 | 收益 |
+| Rank | Item | Cost | Benefit |
 |------|------|------|------|
-| **1** | 试 `BLE_BUFF_MAX_LEN=251`（ATT_MTU 247）+ `BLE_TX_NUM_EVENT=4`。两者都是 `build/makefile:256,259` 的 `?=` 变量，改值即可，不动源码；**但要同步把 `BLE_ETH_SAFE_NOTIFY_LEN` 从 180 抬到 244**（[APP/peripheral.c:46](file:///Users/txa/project/Openterface_KM/APP/peripheral.c#L46)），否则 MTU 抬上去后 180 立刻变成新的封顶 | 0.5 天 + 一次 `BLE_MEMHEAP_SIZE`（现 7 KB，[HAL/include/config.h:112](file:///Users/txa/project/Openterface_KM/HAL/include/config.h#L112)）复核；WCH 库内部缓冲需求**未在源码可见**，必须实测连接稳定性 | 单次 notification 净数据从 57 B 到 235 B，再乘 4 包/event，理论上限从 36.5 kbit/s 抬到 ≈ **780 kbit/s**；即使只做到一半也是量级改善 |
-| **2** | App 侧把 write-with-response 的强制策略改成"仅控制帧用 withResponse，DATA 用 noResponse" | 两端各几行；**注意两端注释都记录了当初改成全 withResponse 是因为"handshake OK 但按键到不了服务端"**（`BLEManager.swift:438-467`，见 `docs/ble-eth-protocol-spec.md:277-298`），所以这条必须先复现那个故障再动 | 上行不再一次一个往返，与第 1 项叠加才有效 |
-| **3** | 手机端补 ping：固件 `0x24 NET_PING` 已实现（未提交），**两个 App 都还没有任何 ping 功能**（iOS 无 `0x24`；Android 连 `0x1E` 都没定义）。各加一个调用 + UI 即可，**零特权** | 每端约 0.5 天 | 直接满足"通过蓝牙 ping 通"的原始诉求 |
-| **4** | 修默认目标 IP 不一致：Android `DEFAULT_KEYCMD_HOST = 192.168.11.2`、iOS `defaultKeyCmdHost = 192.168.12.1` 且对话框默认 `192.168.11.2`、固件 fallback `192.168.11.2:22`，而现场 ECM 子网是 `192.168.30.0/24`（Target PC = `.30.2`）。`docs/ble-eth-ssh-usage.md` 与 `ble-eth-tunnel-examples.md` 自己就写了两个不同的 target IP | 小；或让 App 用 `0x23 GET_ECM_IP` 自动发现 | **这很可能是"手机 ssh 连不上"的真实原因**，而且它和 IP 隧道毫无关系 |
-| 5 | 本 IP-over-BLE 方案 | 固件 2–3 天 + 两套 App 的 raw-IP 地基 + iOS 账号审批 | 仅在出现"必须跑第三方未适配 App"的产品需求时才开工。届时从 Phase 0 重新校准第 4 节数字 |
+| **1** | Try `BLE_BUFF_MAX_LEN=251` (ATT_MTU 247) + `BLE_TX_NUM_EVENT=4`. Both are `?=` variables in `build/makefile:256,259`, so it is a value change with no source edits; **but `BLE_ETH_SAFE_NOTIFY_LEN` must move from 180 to 244 at the same time** ([APP/peripheral.c:46](file:///Users/txa/project/Openterface_KM/APP/peripheral.c#L46)), otherwise 180 instantly becomes the new ceiling | 0.5 day plus one `BLE_MEMHEAP_SIZE` review (currently 7 KB, [HAL/include/config.h:112](file:///Users/txa/project/Openterface_KM/HAL/include/config.h#L112)); the WCH library's internal buffer needs are **not visible in the source**, so connection stability must be measured | Net data per notification goes from 57 B to 235 B, multiplied by 4 packets/event: the theoretical ceiling rises from 36.5 kbit/s to ≈ **780 kbit/s**; even half of that is an order-of-magnitude improvement |
+| **2** | On the app side, change the blanket write-with-response policy to "withResponse for control frames only, noResponse for DATA" | A few lines per app; **note that both comments record that the switch to all-withResponse was made because "the handshake succeeded but key presses never reached the server"** (`BLEManager.swift:438-467`, see `docs/ble-eth-protocol-spec.md:277-298`), so that failure must be reproduced before touching this | The uplink stops costing one round trip per write; only pays off combined with item 1 |
+| **3** | Add ping to the phones: firmware `0x24 NET_PING` is already implemented (uncommitted), **neither app has any ping capability** (iOS has no `0x24`; Android has not even defined `0x1E`). One call plus UI each, **zero privilege** | about 0.5 day per app | Directly satisfies the original "ping over Bluetooth" request |
+| **4** | Fix the inconsistent default target IP: Android `DEFAULT_KEYCMD_HOST = 192.168.11.2`, iOS `defaultKeyCmdHost = 192.168.12.1` with the dialog defaulting to `192.168.11.2`, firmware fallback `192.168.11.2:22`, while the ECM subnet in the field is `192.168.30.0/24` (Target PC = `.30.2`). `docs/ble-eth-ssh-usage.md` and `ble-eth-tunnel-examples.md` themselves document two different target IPs | Small; or have the app auto-discover via `0x23 GET_ECM_IP` | **This is very likely the real reason "phone ssh cannot connect"**, and it has nothing to do with an IP tunnel |
+| 5 | This IP-over-BLE design | 2–3 days of firmware + raw-IP foundations in two apps + iOS account approval | Start only when a product requirement appears for "must run third-party apps that have no adaptation". Re-calibrate the §4 numbers from Phase 0 then |
 
-**一句话**：本方案的每一处技术设计都成立，但它在手机这个控制端上解决的不是用户此刻的痛。上面 1–4 项加起来不到一周，收益远大于隧道。
+**In one sentence**: every technical decision here holds, but on a phone it does not address the user's current pain. Items 1–4 above total under a week and deliver far more than the tunnel.
 
 ---
 
-## 12. 验收标准（Phase 1–2）
+## 12. Acceptance criteria (Phase 1–2)
 
-1. macOS：`sudo python3 tools/ble_ip_tunnel.py --name keymod` 起来后，`ping -c 4 192.168.30.2` **0% loss**，且**不需要**在 Target 机器上加任何配置。
-2. `ssh user@192.168.30.2` 交互可用，`exit` 后 `0x25 disable` 生效。
-3. 隧道开启时，键鼠 HID 无丢键、无卡顿（HID queue overflow 计数为 0）。
-4. `0x1F INFO` 的 feature bit 5 正确反映固件能力，旧 host 工具遇到不支持的固件能明确报错而非静默超时。
-5. BLE 断连 → 重连 → 重新 enable，隧道可用；Target 侧 `SET_INTERFACE(alt=1)` 重枚举后隧道可用。
-6. 4 个构建目标（keymod-mini / keymod-plus / kvmgo / minikvm）全绿，`size` 的 RAM/FLASH 增量在第 7 节预算内。
-7. `docs/ble-eth-protocol.md` 的 `0x25` 章节字段与实现逐字节一致，示例帧经 `tools/debug_ble_eth.py` 校验通过。
+1. macOS: after `sudo python3 tools/ble_ip_tunnel.py --name keymod` comes up, `ping -c 4 192.168.30.2` shows **0% loss**, with **no** configuration added on the Target machine.
+2. `ssh user@192.168.30.2` is interactive; after `exit`, `0x25 disable` takes effect.
+3. With the tunnel on, HID keyboard/mouse drop no keys and do not stutter (HID queue overflow counter is 0).
+4. Feature bit 5 of `0x1F INFO` correctly reflects firmware capability; an old host tool meeting unsupported firmware must fail loudly rather than time out silently.
+5. BLE disconnect → reconnect → re-enable leaves the tunnel usable; the tunnel is usable after `SET_INTERFACE(alt=1)` re-enumeration on the Target side.
+6. All four build targets (keymod-mini / keymod-plus / kvmgo / minikvm) are green, with `size` RAM/FLASH increments inside the §7 budget.
+7. The `0x25` section of `docs/ble-eth-protocol.md` matches the implementation byte for byte, and the example frames validate with `tools/debug_ble_eth.py`.

@@ -1,62 +1,66 @@
-# Firmware 稳定性修复计划
+# Firmware stability fix plan
 
-- 分支：`fix/stability-p0-p1`
-- 基线：`main` @ `19ef5c8`
-- 适用固件：KVM-GO（mode 7）、KeyMod Plus（mode 7）、KeyMod Mini（mode 4）
-- 状态：Phase 1 已实施（4 个产品模式构建通过；硬件验证待执行，见第 5 节）
-
----
-
-## 1. 目标与范围
-
-本轮修复只处理**会导致数据损坏、卡死、协议串扰或不可恢复状态**的问题，不改变 BLE-Eth / CH9329 的对外协议字节定义，不做无关重构。
-
-目标：
-
-1. 隧道数据在正常负载和中断并发下不再出现"拼帧"或静默损坏。
-2. BLE-Eth 帧不再被旧 CH9329/USB HID 路径二次消费。
-3. TCP 发送路径不再使用 1.5 KB 栈帧，失败时不再提前推进序号。
-4. BLE 断连、目标侧重枚举后，隧道状态可预测、可恢复。
-5. 配置写入不再无意义地擦写 Flash。
-
-不在本轮范围（见第 6 节 Phase 2）：TCP 重传/RTO、BLE-Eth ACK 端到端背压、重枚举看门狗、Flash 加载语义校验、链接脚本保留段。
+- Branch: `fix/stability-p0-p1`
+- Baseline: `main` @ `19ef5c8`
+- Applies to: KVM-GO (mode 7), KeyMod Plus (mode 7), KeyMod Mini (mode 4)
+- Status: Phase 1 implemented (all four product modes build; hardware verification pending, see §5)
 
 ---
 
-## 2. 问题总览
+## 1. Goals and scope
 
-| ID | 级别 | 问题 | 位置 | 后果 | Phase |
+This round only fixes problems **that cause data corruption, lock-ups, protocol
+cross-talk or unrecoverable states**. It does not change the external protocol byte
+definitions of BLE-Eth / CH9329 and does no unrelated refactoring.
+
+Goals:
+
+1. Tunnel data no longer suffers "frame splicing" or silent corruption under normal load and interrupt concurrency.
+2. BLE-Eth frames are no longer consumed a second time by the legacy CH9329/USB HID path.
+3. The TCP transmit path no longer uses a 1.5 KB stack frame, and no longer advances the sequence number on failure.
+4. After a BLE disconnect or a target-side re-enumeration, tunnel state is predictable and recoverable.
+5. Configuration writes no longer erase/write flash for nothing.
+
+Out of scope this round (see Phase 2 in §6): TCP retransmission/RTO, BLE-Eth ACK
+end-to-end back-pressure, re-enumeration watchdog, flash load semantic validation,
+linker-script reserved sections.
+
+---
+
+## 2. Problem overview
+
+| ID | Level | Problem | Location | Consequence | Phase |
 |----|------|------|------|------|-------|
-| P0-1 | P0 | ECM 队列被 USBFS/USBD 中断和主循环并发读写，无临界区；`queue_peek` 指针跨多次 32B 传输，队列满时被 flush 覆盖 | `APP/ecm_bridge.c` `queue_push/peek/pop/clear`、`poll_*_tx`、`ECM_Bridge_*RxDone` | 发出拼帧、rd/wr/count 竞争、对端丢包后隧道永久卡死 | 1 |
-| P0-2 | P0 | BLE-Eth 帧同时写入 `RingMemBLE`，被 `USBSendData()` 送到 EP2（HID 鼠标）并被 `CH9329_RxBuffer_Add()` 解析 | `APP/peripheral.c` `ble_usb_ServiceEvt` | 隧道字节被当成 HID 报文/串口噪声；CH9329 回 0xC0 错误帧 | 1 |
-| P0-3 | P0 | `send_tcp_frame()` 使用 1514B 栈缓冲；`g_ecm_tx_cb` 失败也返回成功并推进 `local_seq`；发送层无重传 | `APP/ble_eth_protocol.c` `send_tcp_frame`、`BLE_Eth_SendDataToEth` | ISR 上下文栈溢出；队列丢弃后序号永久错位 | 1 |
-| P1-1 | P1 | BLE 断连不清理 BLE-Eth（parser/reassembly/tx_queue/connections） | `APP/peripheral.c` `Peripheral_LinkTerminated` | 跨连接残留半帧、旧通知；重连后状态错乱 | 1 |
-| P1-2 | P1 | notify 失败立即重试，不检查连接句柄 | `APP/peripheral.c` `SBP_PROCESS_BLEETH_TX_EVT` | 断连后主循环空转 | 1 |
-| P1-3 | P1 | 目标侧重枚举后不重置 BLE-Eth 连接、不通知客户端 | `APP/ecm_bridge.c` `poll_target_reenum` | 客户端仍认为 ESTABLISHED，继续发旧 seq | 1 |
-| P1-4 | P1 | `BLE_Eth_HandleTargetFrame` 未校验 IP total length | `APP/ble_eth_protocol.c` | 无符号下溢，错误长度导致越界读 | 1 |
-| P1-5 | P1 | 重枚举状态机无超时/成功判据/重试；attach 后不验证枚举结果 | `APP/ecm_bridge.c` `poll_*_reenum` | 一次失败后需拔插；目标 HID 丢失约 1.1s | 2 |
-| P1-6 | P1 | 主机侧 `ECM_Bridge_Init()` 清 `g_host_to_target`，而隧道 seq 已推进 | `APP/ecm_bridge.c` `ECM_Bridge_Init` | USB 复位/睡眠唤醒时静默丢段 | 1（缓解）/2（根治） |
-| P2-1 | P2 | 每次 `ECM_IPConfig_Set()` 都擦写，不比较是否变化；加载时不语义校验 | `APP/ecm_ip_config.c` | 无谓磨损；非法记录可配死网络 | 1（比较）/2（校验） |
-| P2-2 | P2 | `txq_lock/unlock` 在中断里无条件 `__enable_irq()` | `APP/ble_eth_protocol.c` | 破坏调用者中断状态 | 1 |
-| P2-3 | P2 | 0x22/0x23 依赖 payload 形状区分，协议脆弱 | `APP/peripheral.c` | 后续扩展易回归 | 2 |
-| P2-4 | P2 | 链接脚本未显式保留 0x6B000/0x6C000 配置页 | `HAL/Link_440k.ld` | 代码增长后可能覆盖配置 | 2 |
+| P0-1 | P0 | The ECM queues are read and written concurrently by the USBFS/USBD interrupts and the main loop with no critical section; the `queue_peek` pointer spans several 32B transfers, and is overwritten by the flush when the queue fills | `APP/ecm_bridge.c` `queue_push/peek/pop/clear`, `poll_*_tx`, `ECM_Bridge_*RxDone` | spliced frames on the wire, rd/wr/count races, tunnel permanently stuck after the peer drops packets | 1 |
+| P0-2 | P0 | BLE-Eth frames are also written to `RingMemBLE`, sent to EP2 (HID mouse) by `USBSendData()` and parsed by `CH9329_RxBuffer_Add()` | `APP/peripheral.c` `ble_usb_ServiceEvt` | tunnel bytes treated as HID reports/serial noise; CH9329 replies with the 0xC0 error frame | 1 |
+| P0-3 | P0 | `send_tcp_frame()` uses a 1514B stack buffer; `g_ecm_tx_cb` failure still returns success and advances `local_seq`; the transmit layer has no retransmission | `APP/ble_eth_protocol.c` `send_tcp_frame`, `BLE_Eth_SendDataToEth` | stack overflow in ISR context; sequence permanently skewed after a queue drop | 1 |
+| P1-1 | P1 | A BLE disconnect does not clean up BLE-Eth (parser/reassembly/tx_queue/connections) | `APP/peripheral.c` `Peripheral_LinkTerminated` | half frames and stale notifications survive across connections; state is wrong after reconnecting | 1 |
+| P1-2 | P1 | notify failure retries immediately without checking the connection handle | `APP/peripheral.c` `SBP_PROCESS_BLEETH_TX_EVT` | the main loop spins after a disconnect | 1 |
+| P1-3 | P1 | A target-side re-enumeration does not reset BLE-Eth connections or notify the client | `APP/ecm_bridge.c` `poll_target_reenum` | the client still believes ESTABLISHED and keeps sending the old seq | 1 |
+| P1-4 | P1 | `BLE_Eth_HandleTargetFrame` does not validate the IP total length | `APP/ble_eth_protocol.c` | unsigned underflow, out-of-bounds read from a bogus length | 1 |
+| P1-5 | P1 | The re-enumeration state machine has no timeout, success criterion or retry; the enumeration result is not verified after attach | `APP/ecm_bridge.c` `poll_*_reenum` | after one failure a replug is needed; target HID lost for about 1.1 s | 2 |
+| P1-6 | P1 | Host-side `ECM_Bridge_Init()` clears `g_host_to_target` while the tunnel seq has already advanced | `APP/ecm_bridge.c` `ECM_Bridge_Init` | silent segment loss on USB reset or wake from sleep | 1 (mitigation) / 2 (proper fix) |
+| P2-1 | P2 | Every `ECM_IPConfig_Set()` erases and writes without comparing whether anything changed; no semantic validation on load | `APP/ecm_ip_config.c` | pointless wear; an illegal record can misconfigure the network | 1 (compare) / 2 (validate) |
+| P2-2 | P2 | `txq_lock/unlock` unconditionally call `__enable_irq()` inside an interrupt | `APP/ble_eth_protocol.c` | corrupts the caller's interrupt state | 1 |
+| P2-3 | P2 | 0x22/0x23 are distinguished by payload shape, which is fragile | `APP/peripheral.c` | future extensions easily regress | 2 |
+| P2-4 | P2 | The linker script does not explicitly reserve the 0x6B000/0x6C000 config pages | `HAL/Link_440k.ld` | code growth may overwrite the configuration | 2 |
 
 ---
 
-## 3. Phase 1 详细设计
+## 3. Phase 1 detailed design
 
-### 3.1 P0-1 ECM 队列并发保护
+### 3.1 P0-1 ECM queue concurrency protection
 
-**根因**
+**Root cause**
 
-- `ECM_Bridge_TargetRxDone()` / `ECM_Bridge_HostRxDone()` 在 USB 中断中调用，最终执行 `queue_push()` / `queue_clear()`。
-- 主循环的 `poll_host_tx()` / `poll_target_tx()` 执行 `queue_peek()` / `queue_pop()`。
-- `ECM_FrameQueue_t` 的 `rd/wr/count` 不是原子操作，没有临界区。
-- `queue_peek()` 返回的指针会跨多次 32 字节 `USBD_ENDPx_DataUp()` 使用；队列满时 `queue_push()` 执行 `rd = wr; count = 0`，同一 slot 被新帧覆盖，导致"前半旧帧 + 后半新帧"。
+- `ECM_Bridge_TargetRxDone()` / `ECM_Bridge_HostRxDone()` are called from the USB interrupts and end up in `queue_push()` / `queue_clear()`.
+- The main loop's `poll_host_tx()` / `poll_target_tx()` perform `queue_peek()` / `queue_pop()`.
+- `ECM_FrameQueue_t`'s `rd/wr/count` are not atomic and have no critical section.
+- The pointer returned by `queue_peek()` is used across several 32-byte `USBD_ENDPx_DataUp()` calls; when the queue fills, `queue_push()` does `rd = wr; count = 0`, overwriting the same slot and producing "old frame first half + new frame second half".
 
-**修复**
+**Fix**
 
-1. 增加基于 WCH CSR `0x800` bit3 的 save/restore 临界区（不能用 `__get_MSTATUS/__set_MSTATUS`，见 `docs/HID_QUEUE_RELIABILITY_FIX.md`）：
+1. Add a save/restore critical section based on WCH CSR `0x800` bit3 (do **not** use `__get_MSTATUS/__set_MSTATUS`, see `docs/HID_QUEUE_RELIABILITY_FIX.md`):
 
 ```c
 static inline uint32_t ecm_irq_save(void)
@@ -73,83 +77,85 @@ static inline void ecm_irq_restore(uint32_t state)
 }
 ```
 
-2. `ECM_FrameQueue_t` 增加 `volatile uint8_t in_flight` 和 `volatile uint16_t gen`。
-3. `queue_push()`：
-   - 长度越界直接返回 0。
-   - 队满时若 `in_flight`，**丢弃新帧并返回 0**，绝不覆盖正在发送的头帧。
-   - 队满且无在途帧时保留原有 flush 行为并 `gen++`。
-4. `queue_clear()`：加锁，清零 `in_flight`，`gen++`。
-5. 新增 `queue_tx_load()` / `queue_tx_complete()`：
-   - `queue_tx_load()` 在临界区内把当前头帧的下一段（≤32B）或 ZLP 标记复制到本地 chunk，并置 `in_flight = 1`。
-   - `queue_tx_complete()` 校验 `gen` 和头指针未变后再弹出；若中途发生 `queue_clear()` 则放弃弹出。
-   - `poll_*_tx()` 不再长期持有队列内指针，USB 写入使用本地 chunk。
-6. `ECM_Bridge_SendRawFrame()` 返回 `queue_push()` 结果，供 P0-3 使用。
+2. Add `volatile uint8_t in_flight` and `volatile uint16_t gen` to `ECM_FrameQueue_t`.
+3. `queue_push()`:
+   - return 0 immediately on an out-of-range length.
+   - when the queue is full and `in_flight` is set, **drop the new frame and return 0**, never overwriting the head frame currently being transmitted.
+   - when the queue is full with nothing in flight, keep the existing flush behaviour and `gen++`.
+4. `queue_clear()`: take the lock, clear `in_flight`, `gen++`.
+5. Add `queue_tx_load()` / `queue_tx_complete()`:
+   - `queue_tx_load()` copies the next segment (≤32B) of the current head frame, or the ZLP marker, into a local chunk inside the critical section, and sets `in_flight = 1`.
+   - `queue_tx_complete()` pops only after checking that `gen` and the head pointer are unchanged; if a `queue_clear()` happened in between it abandons the pop.
+   - `poll_*_tx()` no longer holds a pointer into the queue for long; the USB write uses the local chunk.
+6. `ECM_Bridge_SendRawFrame()` returns the `queue_push()` result, for use by P0-3.
 
-**验收**
+**Acceptance**
 
-- 高负载下 `overflow` 计数可以增长，但抓包不再出现以太网帧长度/校验异常。
-- 隧道 + HID 100Hz + USB 复位并发压测 1 小时无卡死。
+- Under heavy load the `overflow` counter may rise, but captures no longer show Ethernet frames with bad length/checksum.
+- Tunnel + 100 Hz HID + USB reset stress for 1 hour without lock-up.
 
-### 3.2 P0-2 BLE-Eth 与 CH9329 路径隔离
+### 3.2 P0-2 Isolate the BLE-Eth and CH9329 paths
 
-**根因**
+**Root cause**
 
-`ble_usb_ServiceEvt()` 只识别 CH9329 命令字节；0x10/0x11/0x12/0x1F/0x1E/0x20/0x21 落入 else 分支后，除了 `BLE_Eth_Parse()`，还被写入 `RingMemBLE`，由 `USBSendData()` 发到 EP2，并由 `USB_DataRx_To_KMHandle()` 喂给 CH9329 解析器。两套协议校验和算法相同，CH9329 会对未知命令回 `STATUS_ERR_CMD`。
+`ble_usb_ServiceEvt()` only recognises CH9329 command bytes; 0x10/0x11/0x12/0x1F/0x1E/0x20/0x21 fall into the else branch, where, besides calling `BLE_Eth_Parse()`, the data is also written to `RingMemBLE`, sent to EP2 by `USBSendData()`, and fed to the CH9329 parser by `USB_DataRx_To_KMHandle()`. Both protocols use the same checksum algorithm, so CH9329 answers the unknown command with `STATUS_ERR_CMD`.
 
-**修复**
+**Fix**
 
-1. 新增 `Peripheral_IsBleEthCommandByte(cmd)`：识别 0x10–0x12、0x1E、0x1F、0x20、0x21。
-2. `ble_usb_ServiceEvt()` 改为三分支：
-   - BLE-Eth（含 0x22/0x23 的 ECM IP 形状）→ 只调用 `BLE_Eth_Parse()` + 触发 TX 事件，**不写 RingMemBLE、不喂 CH9329**。
-   - CH9329 命令 → 维持现状。
-   - 其它非协议数据 → 保留原有 RingMemBLE 原始透传路径。
-3. 0x22/0x23 的 CH9329 帧（BLE security / set name）仍由 `Peripheral_IsBleEthEcmIpFrame()` 判为 false 后进入 CH9329 分支。
+1. Add `Peripheral_IsBleEthCommandByte(cmd)`: recognises 0x10–0x12, 0x1E, 0x1F, 0x20, 0x21.
+2. `ble_usb_ServiceEvt()` becomes three branches:
+   - BLE-Eth (including the 0x22/0x23 ECM IP shapes) → call only `BLE_Eth_Parse()` and trigger the TX event, **without writing RingMemBLE or feeding CH9329**.
+   - CH9329 commands → unchanged.
+   - other non-protocol data → keep the existing raw RingMemBLE pass-through.
+3. CH9329 frames on 0x22/0x23 (BLE security / set name) are still judged false by `Peripheral_IsBleEthEcmIpFrame()` and so enter the CH9329 branch.
 
-**验收**
+**Acceptance**
 
-- 发送 0x11 DATA 时，目标侧 EP2 不再出现 HID 报文。
-- 发送 0x10/0x11/0x12/0x1F 时，串口/USB 响应队列不再出现 0xC0 错误帧。
-- CH9329 键鼠、BLE 改名、BLE 配对查询回归通过。
+- When sending 0x11 DATA, no HID report appears on the target-side EP2.
+- When sending 0x10/0x11/0x12/0x1F, no 0xC0 error frame appears in the serial/USB response queue.
+- CH9329 keyboard/mouse, BLE renaming and BLE pairing queries all regress clean.
 
-### 3.3 P0-3 TCP 发送栈与失败语义
+### 3.3 P0-3 TCP transmit stack usage and failure semantics
 
-**修复**
+**Fix**
 
-1. `send_tcp_frame()` 的 1514 字节缓冲改为模块级 static。该函数既在 TMOS/BLE 任务（SYN/DATA）中执行，也会从 USBFS 中断（对目标数据的 ACK）进入，因此"组帧 + 入队"整个过程用 `txq_lock()`（CSR 0x800 bit3 保存/恢复）串行化，避免嵌套发送重写共享缓冲。
-2. `ble_eth_ecm_tx_cb_t` 与 `BLE_Eth_SetEcmtxCb()` 改为返回 `uint8_t`；`ECM_Bridge_SendRawFrame()` 返回入队结果。
-3. 仅当入队成功时推进 `local_seq`（SYN/FIN/数据统一规则），失败返回 0。
-4. `BLE_Eth_SendDataToEth()` 在失败时停止后续分段，并累加 `eth_tx_fail` 计数。
-5. `send_tcp_syn()` 保留原有失败回滚逻辑。
+1. Turn `send_tcp_frame()`'s 1514-byte buffer into a module-level static. That function runs both in the TMOS/BLE task (SYN/DATA) and from the USBFS interrupt (ACKs for target data), so the whole "build frame + enqueue" sequence is serialised with `txq_lock()` (CSR 0x800 bit3 save/restore) to prevent a nested send from rewriting the shared buffer.
+2. `ble_eth_ecm_tx_cb_t` and `BLE_Eth_SetEcmtxCb()` now return `uint8_t`; `ECM_Bridge_SendRawFrame()` returns the enqueue result.
+3. Advance `local_seq` only when the enqueue succeeds (one rule for SYN/FIN/data); on failure return 0.
+4. `BLE_Eth_SendDataToEth()` stops the remaining segments on failure and increments the `eth_tx_fail` counter.
+5. `send_tcp_syn()` keeps its existing failure-rollback logic.
 
-**验收**
+**Acceptance**
 
-- `-fstack-usage` 中 `send_tcp_frame` 栈用量从 ~1.5 KB 降到 < 100 B。
-- 人为把队列压满时，不再出现序号提前推进；`eth_tx_fail` 可观测。
+- In `-fstack-usage`, `send_tcp_frame` stack usage drops from ~1.5 KB to < 100 B.
+- When the queue is deliberately saturated, the sequence no longer advances early; `eth_tx_fail` is observable.
 
-> 注：本轮**不实现** TCP 重传。丢段仍是错误路径，但已从"静默 + 序号错位"变为"可观测 + 序号一致"。真正的端到端保证见 Phase 2。
+> Note: this round does **not** implement TCP retransmission. Losing a segment is
+> still an error path, but it has gone from "silent + skewed sequence" to
+> "observable + consistent sequence". Real end-to-end guarantees are Phase 2.
 
-### 3.4 P1-1 / P1-2 BLE 链路生命周期
+### 3.4 P1-1 / P1-2 BLE link lifecycle
 
-1. 新增 `BLE_Eth_OnLinkLost()`：
-   - 清 parser、分片重组、TX 队列；
-   - 将所有连接置为 CLOSED 并清 `active`；
-   - 复位最后 ACK 状态。
-2. `Peripheral_LinkTerminated()` 调用 `BLE_Eth_OnLinkLost()`，并 `tmos_stop_task(SBP_PROCESS_BLEETH_TX_EVT)`。
-3. `SBP_PROCESS_BLEETH_TX_EVT`：
-   - notify 前校验 `connHandle != GAP_CONNHANDLE_INIT`；
-   - 失败时用 `tmos_start_task(..., N)` 延迟重试，连续失败 3 次后停止本轮发送并保留队列。
+1. Add `BLE_Eth_OnLinkLost()`:
+   - clear the parser, fragment reassembly and TX queue;
+   - set every connection to CLOSED and clear `active`;
+   - reset the last-ACK state.
+2. `Peripheral_LinkTerminated()` calls `BLE_Eth_OnLinkLost()` and `tmos_stop_task(SBP_PROCESS_BLEETH_TX_EVT)`.
+3. `SBP_PROCESS_BLEETH_TX_EVT`:
+   - validate `connHandle != GAP_CONNHANDLE_INIT` before notify;
+   - on failure, retry after a delay with `tmos_start_task(..., N)`, and after three consecutive failures stop this round and keep the queue.
 
-### 3.5 P1-3 目标侧重枚举后的隧道处理
+### 3.5 P1-3 Tunnel handling after a target-side re-enumeration
 
-1. 新增 `BLE_Eth_ResetAllTunnels(uint8_t status)`：
-   - 对所有 active 连接发送 `BLE_ETH_CMD_CONN_CLOSED (0xD2)` 通知（payload: conn_id + status）；
-   - 清除连接状态。
-2. **实施位置调整**：在 `schedule_target_reenum()` 中调用 `BLE_Eth_ResetAllTunnels()`，而不是 detach 阶段。原因是排队帧要到 500 ms 后才 detach，在 detach 时再入队的 RST 根本来不及发出，且 attach 阶段会清空 `g_host_to_target`。在 schedule 时关闭隧道可让 RST 利用仍存活的 ECM 链路发往目标，同时 `CONN_CLOSED` 有充足时间送达 BLE 客户端。
-3. 主机侧重枚举（`ECM_Bridge_Init`）不关闭隧道；见 3.8。
+1. Add `BLE_Eth_ResetAllTunnels(uint8_t status)`:
+   - send a `BLE_ETH_CMD_CONN_CLOSED (0xD2)` notification to every active connection (payload: conn_id + status);
+   - clear the connection state.
+2. **Placement adjustment**: call `BLE_Eth_ResetAllTunnels()` in `schedule_target_reenum()` rather than in the detach stage. The reason is that queued frames are only detached after 500 ms, so a RST enqueued at detach time has no chance to be sent, and the attach stage clears `g_host_to_target`. Closing the tunnel at schedule time lets the RST travel to the target over the still-live ECM link, while `CONN_CLOSED` has ample time to reach the BLE client.
+3. A host-side re-enumeration (`ECM_Bridge_Init`) does not close tunnels; see 3.8.
 
-### 3.6 P1-4 IP 长度校验
+### 3.6 P1-4 IP length validation
 
-在 `BLE_Eth_HandleTargetFrame()` 中增加：
+Add the following in `BLE_Eth_HandleTargetFrame()`:
 
 ```c
 uint16_t ip_total = frame_get_be16(&ip[2]);
@@ -157,139 +163,148 @@ if (ip_total < ip_header_len) return false;
 if ((uint32_t)off + ip_total > len) return false;
 ```
 
-再用 `ip_total - ip_header_len` 计算 TCP 段长度，避免无符号下溢。
+Then compute the TCP segment length as `ip_total - ip_header_len`, avoiding an unsigned underflow.
 
-### 3.7 P2-1 / P2-2 细节修复
+### 3.7 P2-1 / P2-2 Detail fixes
 
-1. `ECM_IPConfig_Set()` 在参数校验后比较 RAM cache；完全相同则直接返回 `ECM_IP_CONFIG_OK`，不擦写、不触发重枚举。
-2. `txq_lock/txq_unlock` 改为与 `ecm_irq_save/restore` 相同的 CSR 0x800 bit3 保存/恢复。
+1. After parameter validation, `ECM_IPConfig_Set()` compares against the RAM cache; if identical it returns `ECM_IP_CONFIG_OK` directly, with no erase/write and no re-enumeration.
+2. `txq_lock/txq_unlock` switch to the same CSR 0x800 bit3 save/restore as `ecm_irq_save/restore`.
 
-### 3.8 P1-6 主机侧重枚举的静默丢段（Phase 1 缓解）
+### 3.8 P1-6 Silent segment loss on a host-side re-enumeration (Phase 1 mitigation)
 
-`ECM_Bridge_Init()` 由 Mac 侧 USBD 复位触发。该路径不影响目标侧 ECM 链路，因此当存在 active 或 pending 隧道时**不再清空 `g_host_to_target`**（该队列同时承载隧道帧与桥接帧）；只有在没有隧道时才 flush 旧会话帧。这样避免隧道帧在 `local_seq` 已推进的情况下被静默丢弃。彻底方案（区分队列来源）列入 Phase 2。
+`ECM_Bridge_Init()` is triggered by a USBD reset on the Mac side. That path does
+not affect the target-side ECM link, so while an active or pending tunnel exists it
+**no longer clears `g_host_to_target`** (that queue carries both tunnel frames and
+bridge frames); only when there is no tunnel are the old session frames flushed.
+This prevents tunnel frames from being silently dropped while `local_seq` has
+already advanced. The complete solution (distinguishing the queue's origin) is
+Phase 2.
 
 ---
 
-## 4. 涉及文件
+## 4. Files touched
 
-| 文件 | 改动 |
+| File | Change |
 |------|------|
-| `APP/ecm_bridge.c` | 队列临界区、in_flight/gen、TX chunk 复制、`SendRawFrame` 返回值、目标重枚举关闭隧道、主机重枚举保留隧道队列 |
-| `APP/include/ecm_bridge.h` | `ECM_Bridge_SendRawFrame` 返回类型 |
-| `APP/ble_eth_protocol.c` | static TX 缓冲、回调返回值、seq 推进规则、IP 长度校验、`BLE_Eth_OnLinkLost`、`BLE_Eth_ResetAllTunnels`、txq lock |
-| `APP/include/ble_eth_protocol.h` | 新 API 声明、回调签名、统计字段 |
-| `APP/peripheral.c` | BLE-Eth 命令白名单、断连清理、notify 重试退避、TX 回调返回值 |
-| `APP/ecm_ip_config.c` | 配置未变化时短路 |
+| `APP/ecm_bridge.c` | queue critical sections, in_flight/gen, TX chunk copy, `SendRawFrame` return value, close tunnels on target re-enumeration, keep the tunnel queue on host re-enumeration |
+| `APP/include/ecm_bridge.h` | `ECM_Bridge_SendRawFrame` return type |
+| `APP/ble_eth_protocol.c` | static TX buffer, callback return value, seq advancement rule, IP length validation, `BLE_Eth_OnLinkLost`, `BLE_Eth_ResetAllTunnels`, txq lock |
+| `APP/include/ble_eth_protocol.h` | new API declarations, callback signature, statistics fields |
+| `APP/peripheral.c` | BLE-Eth command allow-list, disconnect cleanup, notify retry back-off, TX callback return value |
+| `APP/ecm_ip_config.c` | short-circuit when the configuration is unchanged |
 
-### 4.1 实施与构建验证（2026-11-02）
+### 4.1 Implementation and build verification (2026-11-02)
 
-Phase 1 改动已全部落在 `fix/stability-p0-p1` 分支，四个产品模式构建通过且无编译警告：
+All Phase 1 changes are on the `fix/stability-p0-p1` branch; all four product modes
+build with no compiler warnings:
 
-| 模式 | FLASH | RAM |
+| Mode | FLASH | RAM |
 |------|-------|-----|
 | kvmgo (mode 7) | 219968 B / 48.82% | 51064 B / 77.92% |
-| minikvm (无 BLE) | 49924 B / 11.08% | 37704 B / 57.53% |
+| minikvm (no BLE) | 49924 B / 11.08% | 37704 B / 57.53% |
 | keymod-plus (mode 7) | 217864 B / 48.35% | 51048 B / 77.89% |
 | keymod-mini (mode 4) | 217784 B / 48.34% | 51048 B / 77.89% |
 
-静态发送缓冲把约 1.5 KB 栈占用转移到 BSS；RAM 余量约 22%，后续 Phase 2 增加重传缓冲前需先复核余量。
+The static transmit buffer moved about 1.5 KB of stack usage into BSS; RAM headroom
+is about 22%, so the headroom must be re-checked before Phase 2 adds retransmission
+buffers.
 
 ---
 
-## 5. 测试计划
+## 5. Test plan
 
-### 5.1 构建与静态检查
+### 5.1 Build and static checks
 
-1. 用 MounRiver 工具链构建 `kvmgo`（mode 7）与 `keymod-mini`（mode 4）：
+1. Build `kvmgo` (mode 7) and `keymod-mini` (mode 4) with the MounRiver toolchain:
 
 ```bash
 RISC_COMPILER_PATH="/Users/txa/MRS_Toolchain_MAC_V240/Toolchain/RISC-V Embedded GCC/bin" ./build.sh kvmgo
 RISC_COMPILER_PATH="/Users/txa/MRS_Toolchain_MAC_V240/Toolchain/RISC-V Embedded GCC/bin" ./build.sh keymod-mini
 ```
 
-2. 检查无新增 warning；`output/*.map` 中 `__stack_size` 仍为 2048，`_ebss` 余量不低于 12 KB。
-3. 生成 `-fstack-usage`，确认 `send_tcp_frame`、`BLE_Eth_Parse`、`ECM_Bridge_TargetRxDone` 调用链最坏栈 < 1.5 KB。
-4. 对 `APP/*.c` 跑 `cppcheck --enable=warning,performance`，确认无新增告警。
+2. Check that no new warnings appear; in `output/*.map`, `__stack_size` is still 2048 and the `_ebss` headroom is at least 12 KB.
+3. Generate `-fstack-usage` and confirm the worst-case stack along the `send_tcp_frame`, `BLE_Eth_Parse`, `ECM_Bridge_TargetRxDone` call chains is < 1.5 KB.
+4. Run `cppcheck --enable=warning,performance` over `APP/*.c` and confirm no new findings.
 
-### 5.2 协议隔离回归（无需额外硬件）
+### 5.2 Protocol isolation regression (no extra hardware needed)
 
-1. BLE 发 0x01/0x02/0x05：键鼠正常。
-2. BLE 发 0x22 单字节 0x01–0x03：BLE 配对查询正常。
-3. BLE 发 0x23 + 名称文本：改名 + 重启正常。
-4. BLE-Eth 发 0x10/0x11/0x12/0x1F：抓目标侧 EP2，确认无 HID 报文；串口无 0xC0 错误帧。
-5. `tools/ble_ecm_ip.py get` / `set` 反复 50 次：配置正确，设备不重启。
+1. Send 0x01/0x02/0x05 over BLE: keyboard and mouse behave normally.
+2. Send the single-byte 0x22 0x01–0x03 over BLE: BLE pairing queries work.
+3. Send 0x23 + name text over BLE: renaming + reboot work.
+4. Send 0x10/0x11/0x12/0x1F over BLE-Eth: capture the target-side EP2 and confirm no HID reports; no 0xC0 error frames on the serial port.
+5. `tools/ble_ecm_ip.py get` / `set` 50 times in a row: the configuration is correct and the device does not reboot.
 
-### 5.3 数据完整性与并发
+### 5.3 Data integrity and concurrency
 
-1. BLE-Eth `scp` 10 MB + `sha256sum`：连续 20 次全部一致。
-2. 隧道传输期间 100 Hz 发 HID 报文：数据仍一致，键鼠无卡顿。
-3. 隧道传输期间触发目标侧 IP 变更（重枚举）：客户端在 1 s 内收到 `CONN_CLOSED`，重连后数据完整。
-4. 隧道传输期间 Mac 睡眠/唤醒、USB 复位各 20 次：连接可恢复，无永久卡死。
-5. 把 ECM 队列故意压满（降低 `ECM_BRIDGE_QUEUE_DEPTH` 或注入大流量）：确认不再出现拼帧，`eth_tx_fail` 增长。
+1. BLE-Eth `scp` of 10 MB + `sha256sum`: 20 consecutive runs all match.
+2. Send 100 Hz HID reports during tunnel transfer: data still matches, no keyboard/mouse stutter.
+3. Trigger a target-side IP change (re-enumeration) during tunnel transfer: the client receives `CONN_CLOSED` within 1 s and data is intact after reconnecting.
+4. Mac sleep/wake and USB reset 20 times each during tunnel transfer: the connection recovers, no permanent lock-up.
+5. Deliberately saturate the ECM queue (reduce `ECM_BRIDGE_QUEUE_DEPTH` or inject heavy traffic): confirm no more spliced frames, and `eth_tx_fail` grows.
 
-### 5.4 链路与重枚举
+### 5.4 Link and re-enumeration
 
-1. BLE 1 s 连 / 1 s 断 100 次：无残留 parser、无 TX 事件空转、重连后立即可用。
-2. 200 次 `SET_ECM_IP`（相同/不同交替）：`GET 0x05` 的 `reenum_count` 与命令数一致，`detach_dp_level == 0`。
-3. 重枚举 detach 窗口内断电/复位：重启后状态机从 0 开始。
-4. 隧道中连续 20 次 `SET_ECM_IP` 目标侧地址：每次都能收到 CONN_CLOSED，设备不锁死。
+1. BLE connect for 1 s / disconnect for 1 s, 100 times: no residual parser, no idle TX events, usable immediately after reconnecting.
+2. 200 × `SET_ECM_IP` (alternating identical/different): `reenum_count` from `GET 0x05` matches the command count, `detach_dp_level == 0`.
+3. Cut power or reset during the re-enumeration detach window: the state machine restarts from 0 after the reboot.
+4. Change the target-side address 20 times in a row during a tunnel: `CONN_CLOSED` arrives every time, the device does not wedge.
 
-### 5.5 长稳
+### 5.5 Long-run stability
 
-1. 72 h 隧道 + 周期 HID + 每小时一次 IP 查询：无 IWDG 复位（4 s），无内存水位持续下降。
-2. 记录 `g_target_to_host.overflow`、`g_host_to_target.overflow`、`tx_queue_full_drop`、`frag_reassembly_abort`、`eth_tx_fail`，结束后均不持续增长。
+1. 72 h tunnel + periodic HID + an IP query every hour: no IWDG reset (4 s), no steady decline in the memory watermark.
+2. Record `g_target_to_host.overflow`, `g_host_to_target.overflow`, `tx_queue_full_drop`, `frag_reassembly_abort`, `eth_tx_fail`; none keeps growing afterwards.
 
 ---
 
-## 6. Phase 2（后续）
+## 6. Phase 2 (later)
 
-| 项 | 说明 |
+| Item | Description |
 |----|------|
-| TCP 重传/RTO | 为设备→目标方向增加 2 段发送缓存，3 次 dup-ACK 或 300 ms RTO 触发重传 |
-| BLE-Eth ACK 背压 | 最后一个分片的 ACK 延迟到 ECM 入队成功后发送；失败时让客户端重传整个 TCP 段 |
-| 重枚举看门狗 | attach 后等待 `g_*_ecm_data_if_active`，超时重试 1–2 次并上报 |
-| 主机侧重枚举 | 评估 USBD 复位时是否保留隧道；必要时同样关闭并通知客户端 |
-| Flash 语义校验 | `ECM_IPConfig_Init()` 加载后跑 `validate_config()`，失败回退默认值 |
-| 链接脚本 | 为 0x6B000/0x6C000 配置页增加 `ASSERT`/保留段 |
-| 协议标识 | 为 BLE-Eth 使用独立命令字节或 addr 标识，移除 0x22/0x23 形状判别 |
-| 诊断 | `GET 0x05` 追加队列溢出、发送失败、重传计数 |
+| TCP retransmission/RTO | add a 2-segment transmit cache for the device→target direction, retransmitting on 3 dup-ACKs or a 300 ms RTO |
+| BLE-Eth ACK back-pressure | delay the last fragment's ACK until the ECM enqueue succeeds; on failure have the client retransmit the whole TCP segment |
+| Re-enumeration watchdog | after attach, wait for `g_*_ecm_data_if_active`, retry 1–2 times on timeout and report |
+| Host-side re-enumeration | evaluate whether to keep tunnels across a USBD reset; close and notify the client if needed |
+| Flash semantic validation | run `validate_config()` after `ECM_IPConfig_Init()` loads, falling back to defaults on failure |
+| Linker script | add `ASSERT`/reserved sections for the 0x6B000/0x6C000 config pages |
+| Protocol identification | give BLE-Eth its own command byte or addr marker and drop the 0x22/0x23 shape discrimination |
+| Diagnostics | extend `GET 0x05` with queue overflow, transmit failure and retransmission counters |
 
 ---
 
-## 7. 验收标准（Phase 1）
+## 7. Acceptance criteria (Phase 1)
 
-- [ ] 四种构建目标全部编译通过，FLASH/RAM 不超限。
-- [ ] 协议隔离回归全部通过。
-- [ ] 10 MB 数据传输 20 次 sha256 一致。
-- [ ] BLE 断连风暴 100 次后无异常残留。
-- [ ] 目标侧重枚举后客户端收到关闭通知。
-- [ ] `send_tcp_frame` 栈用量 < 100 B。
-- [ ] 72 h 长稳无看门狗复位。
-
----
-
-## 8. 风险、兼容性与回滚
-
-**兼容性**
-
-- 不修改 BLE-Eth / CH9329 命令字节与 payload 格式。
-- `BLE_Eth_SetEcmtxCb()` 回调签名变化仅影响 `peripheral.c` 与 `ecm_bridge.c` 的内部连接。
-- `ECM_Bridge_SendRawFrame()` 返回值变化对现有调用者向后兼容（忽略返回值仍可编译）。
-
-**风险**
-
-- 临界区会短暂关闭中断（组帧 + 1.5 KB memcpy，约数十微秒），需确认 USB/BLE 无丢事件。
-- `queue_push()` 队满时改为丢新帧（存在在途帧时）可能让高负载下丢包更早暴露，但不会拼帧。
-- `BLE_Eth_OnLinkLost()` 会主动关闭所有隧道，依赖客户端重连。
-
-**回滚**
-
-- 每个问题独立提交，可按提交回滚。
-- 若临界区导致 USB 异常，先回滚 P0-1，再单独评估。
+- [ ] All four build targets compile, with FLASH/RAM within limits.
+- [ ] The protocol isolation regression passes in full.
+- [ ] 20 × 10 MB transfers produce matching sha256.
+- [ ] No anomalous residue after a 100× BLE disconnect storm.
+- [ ] The client receives a close notification after a target-side re-enumeration.
+- [ ] `send_tcp_frame` stack usage < 100 B.
+- [ ] 72 h long run with no watchdog reset.
 
 ---
 
-## 9. 提交拆分建议
+## 8. Risks, compatibility and rollback
+
+**Compatibility**
+
+- No change to BLE-Eth / CH9329 command bytes or payload formats.
+- The `BLE_Eth_SetEcmtxCb()` signature change only affects the internal wiring in `peripheral.c` and `ecm_bridge.c`.
+- The `ECM_Bridge_SendRawFrame()` return-type change is backward compatible for existing callers (code that ignores the return value still compiles).
+
+**Risks**
+
+- The critical sections briefly disable interrupts (frame building + a 1.5 KB memcpy, a few tens of microseconds); confirm that USB/BLE lose no events.
+- `queue_push()` dropping the new frame when the queue is full (with a frame in flight) may surface packet loss earlier under heavy load, but it cannot splice frames.
+- `BLE_Eth_OnLinkLost()` actively closes all tunnels and relies on the client reconnecting.
+
+**Rollback**
+
+- Each problem is committed separately and can be reverted per commit.
+- If the critical sections cause USB anomalies, revert P0-1 first and evaluate separately.
+
+---
+
+## 9. Suggested commit split
 
 1. `fix(ecm): serialize frame queues between USB ISRs and main loop`
 2. `fix(ble): route BLE-Eth frames away from legacy CH9329/USB path`

@@ -1,8 +1,8 @@
 # Firmware documentation
 
 Index for the KeyMod / KVM-GO firmware docs. **English is the documentation
-language**: new and updated documents are written in English; the Chinese-only
-ones are listed in §5 with their status.
+language**: every document in this folder is written in English. The set that was
+translated from earlier Chinese drafts is recorded in §6.
 
 Start with the document that matches your job, not with the folder listing.
 
@@ -66,9 +66,9 @@ for the WCH MounRiver Studio flow.
 | Document | Status | Covers |
 |---|---|---|
 | [controllable-usb-endpoint-modes.md](controllable-usb-endpoint-modes.md) | Design | mode model (build-time and runtime profiles), endpoint policy, verification matrix |
-| [usb-endpoint-map-mode7.md](usb-endpoint-map-mode7.md) | Reference (ZH) | Mode 7 endpoint map: HID + host ACM + host ECM + target ECM |
-| [usb-endpoint-map-mode8.md](usb-endpoint-map-mode8.md) | Reference (ZH) | Mode 8 endpoint map: HID + target CDC-NCM |
-| [usb-firmware-industrial-grade-optimization.md](usb-firmware-industrial-grade-optimization.md) | Plan (ZH) | robustness backlog for the USB stack |
+| [usb-endpoint-map-mode7.md](usb-endpoint-map-mode7.md) | Reference | Mode 7 endpoint map: HID + host ACM + host ECM + target ECM |
+| [usb-endpoint-map-mode8.md](usb-endpoint-map-mode8.md) | Reference | Mode 8 endpoint map: HID + target CDC-NCM |
+| [usb-firmware-industrial-grade-optimization.md](usb-firmware-industrial-grade-optimization.md) | Plan | robustness backlog for the USB stack |
 | [internal-memory-usage.md](internal-memory-usage.md) | Reference | RAM/flash budget per build configuration |
 
 ### Network side channel
@@ -81,8 +81,8 @@ for the WCH MounRiver Studio flow.
 | [ncm-descriptor-debug.md](ncm-descriptor-debug.md) | Superseded | NCM descriptor subtype, `GET_NTB_PARAMETERS`, MAC string fixes |
 | [openterface-ncm-troubleshooting-2026-11-24.md](openterface-ncm-troubleshooting-2026-11-24.md) | Record | Windows bring-up session (Code 10, host-port descriptor) |
 | [ecm-bridge-dhcp.md](ecm-bridge-dhcp.md) | Superseded | ECM predecessor; DHCP/ARP description still matches the NCM path |
-| [ecm-ip-config-design.md](ecm-ip-config-design.md) | Design (ZH) | flash layout, validation and migration of the IP config record |
-| [FIRMWARE_DHCP_DEBUG_GUIDE.md](FIRMWARE_DHCP_DEBUG_GUIDE.md) | Superseded (ZH) | field debugging recipes for the DHCP server |
+| [ecm-ip-config-design.md](ecm-ip-config-design.md) | Design | flash layout, validation and migration of the IP config record |
+| [FIRMWARE_DHCP_DEBUG_GUIDE.md](FIRMWARE_DHCP_DEBUG_GUIDE.md) | Superseded | field debugging recipes for the DHCP server |
 | [target-host-file-access.md](target-host-file-access.md) | Superseded | HTTP + WebDAV + discovery notes for the target |
 | [portal-host-served-page.md](portal-host-served-page.md) | Superseded | first write-up of the host-served portal page |
 
@@ -92,7 +92,7 @@ for the WCH MounRiver Studio flow.
 |---|---|---|
 | [ch9329-communication-protocol.md](ch9329-communication-protocol.md) | Reference | frame format, command map, status codes, project extensions |
 | [CH9329_EP3_FIX_SUMMARY.md](CH9329_EP3_FIX_SUMMARY.md) | Record | EP3 enable fix |
-| [bugfix-ch9329-command-response-failure.md](bugfix-ch9329-command-response-failure.md) | Record (ZH) | missing command responses |
+| [bugfix-ch9329-command-response-failure.md](bugfix-ch9329-command-response-failure.md) | Record | missing command responses |
 | [SET_COMMAND_TIMING_FIX.md](SET_COMMAND_TIMING_FIX.md) | Record | `SET` command timing |
 | [HID_QUEUE_RELIABILITY_FIX.md](HID_QUEUE_RELIABILITY_FIX.md) | Record | queue redesign for reliable HID delivery |
 | [h2t-ep2-double-buffer-fix.md](h2t-ep2-double-buffer-fix.md) | Record | host→target audio EP2 double buffer |
@@ -109,18 +109,18 @@ for the WCH MounRiver Studio flow.
 | [ble-eth-transport-plan.md](ble-eth-transport-plan.md) | Plan | transport improvements |
 | [ble-eth-changelog-2026-11-25-pipeline-flowcontrol.md](ble-eth-changelog-2026-11-25-pipeline-flowcontrol.md) | Record | pipelined sends, download flow control, idempotent retransmits |
 | [ble-eth-tunnel-test-report-2026-11-24.md](ble-eth-tunnel-test-report-2026-11-24.md) | Record | tunnel test report and fixes |
-| [ble-ip-tunnel-design.md](ble-ip-tunnel-design.md) | Design (ZH) | generic IP-over-BLE tunnel |
-| [ble-pairing-design.md](ble-pairing-design.md) | Design (ZH) | pairing and security model |
+| [ble-ip-tunnel-design.md](ble-ip-tunnel-design.md) | Design | generic IP-over-BLE tunnel |
+| [ble-pairing-design.md](ble-pairing-design.md) | Design | pairing and security model |
 | [ble-pairing-security-user-guide.md](ble-pairing-security-user-guide.md) | Guide | pairing code from the user's side |
-| [ble-ota-design.md](ble-ota-design.md) | Design (ZH) | BLE OTA update |
-| [BLE_ADV_PARAM_0x19_COMMAND_SPECIFICATION.md](BLE_ADV_PARAM_0x19_COMMAND_SPECIFICATION.md) | Reference (ZH) | advertising-parameter command `0x19` |
+| [ble-ota-design.md](ble-ota-design.md) | Design | BLE OTA update |
+| [BLE_ADV_PARAM_0x19_COMMAND_SPECIFICATION.md](BLE_ADV_PARAM_0x19_COMMAND_SPECIFICATION.md) | Reference | advertising-parameter command `0x19` |
 
 ### Performance, memory and stability
 
 | Document | Status | Covers |
 |---|---|---|
 | [queue-performance-optimization-plan.md](queue-performance-optimization-plan.md) | Plan | queue send-path optimisation and expected gains |
-| [STABILITY_FIX_PLAN.md](STABILITY_FIX_PLAN.md) | Plan (ZH) | stability workstream |
+| [STABILITY_FIX_PLAN.md](STABILITY_FIX_PLAN.md) | Plan | stability workstream |
 | [usb-serial-recovery-issue.md](usb-serial-recovery-issue.md) | Analysis | serial recovery failure and fix checklist |
 
 ---
@@ -144,19 +144,27 @@ relay), `35e358c` / `d228068` (portal UI: clickable icons, `no-store`).
 
 ---
 
-## 6. Chinese-only documents
+## 6. Translations
 
-These are accurate but not yet translated. When one is touched for content
-reasons, translate it and drop it from this list.
+The documents below were originally written in Chinese and were translated on
+2026-11-26. Identifiers, addresses, command bytes, tables and hex values were kept
+verbatim; only the prose changed. Nothing else in the folder is in another
+language, so no document needs a translation to be read.
 
-| Document | Subject | English replacement |
+| Document | Subject | Translation notes |
 |---|---|---|
-| [ecm-ip-config-design.md](ecm-ip-config-design.md) | IP config flash record | §7 of [ncm-bridge.md](ncm-bridge.md) |
-| [FIRMWARE_DHCP_DEBUG_GUIDE.md](FIRMWARE_DHCP_DEBUG_GUIDE.md) | DHCP debugging recipes | §4 and §10 of [ncm-bridge.md](ncm-bridge.md) |
-| [usb-endpoint-map-mode7.md](usb-endpoint-map-mode7.md), [usb-endpoint-map-mode8.md](usb-endpoint-map-mode8.md) | endpoint maps | none yet — tables are still authoritative |
-| [ble-ip-tunnel-design.md](ble-ip-tunnel-design.md), [ble-pairing-design.md](ble-pairing-design.md), [ble-ota-design.md](ble-ota-design.md) | BLE design | none yet |
-| [BLE_ADV_PARAM_0x19_COMMAND_SPECIFICATION.md](BLE_ADV_PARAM_0x19_COMMAND_SPECIFICATION.md) | advertising command `0x19` | none yet |
-| [bugfix-ch9329-command-response-failure.md](bugfix-ch9329-command-response-failure.md), [STABILITY_FIX_PLAN.md](STABILITY_FIX_PLAN.md), [usb-firmware-industrial-grade-optimization.md](usb-firmware-industrial-grade-optimization.md) | fixes / plans | none yet |
+| [ble-ip-tunnel-design.md](ble-ip-tunnel-design.md) | generic IP-over-BLE tunnel | design rejected in §11; kept for the reasoning |
+| [ble-pairing-design.md](ble-pairing-design.md) | pairing and security model | M1/M2/M3 status as of 2026-11-10 |
+| [ble-ota-design.md](ble-ota-design.md) | BLE OTA update | route A adopted; M0 not started |
+| [BLE_ADV_PARAM_0x19_COMMAND_SPECIFICATION.md](BLE_ADV_PARAM_0x19_COMMAND_SPECIFICATION.md) | advertising-parameter command `0x19` | all command codes and checksums reproduced exactly |
+| [usb-endpoint-map-mode7.md](usb-endpoint-map-mode7.md), [usb-endpoint-map-mode8.md](usb-endpoint-map-mode8.md) | endpoint maps | tables are authoritative; endpoint/pin values unchanged |
+| [ecm-ip-config-design.md](ecm-ip-config-design.md) | IP config flash record | struct layout and command codes unchanged |
+| [FIRMWARE_DHCP_DEBUG_GUIDE.md](FIRMWARE_DHCP_DEBUG_GUIDE.md) | DHCP debugging recipes | superseded by [ncm-bridge.md](ncm-bridge.md) §4 and §10 |
+| [STABILITY_FIX_PLAN.md](STABILITY_FIX_PLAN.md) | stability workstream | build sizes and test IDs unchanged |
+| [bugfix-ch9329-command-response-failure.md](bugfix-ch9329-command-response-failure.md) | missing command responses | commit hashes unchanged |
+
+When editing one of these, edit the English text directly; do not reintroduce a
+parallel translation.
 
 ---
 
