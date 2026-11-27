@@ -28,7 +28,7 @@ Traffic classes handled by the firmware:
 
 | Traffic | Handling |
 |---|---|
-| Unicast IPv4 frame between the two ports | forwarded verbatim, with proxy ARP for the peer |
+| Unicast IPv4 frame between the two ports | forwarded verbatim, with proxy ARP for the peer (configured *and* last-seen address) |
 | IPv4 broadcast (discovery protocols) | relayed to the other port |
 | DHCP (`0.0.0.0:68 → 255.255.255.255:67`) | answered locally by the bridge (§4) |
 | DNS (`UDP/53`, query) | answered locally inside the first-visit window, then passed through (§5) |
@@ -36,6 +36,38 @@ Traffic classes handled by the firmware:
 | Everything else | forwarded untouched |
 
 The peer OS therefore sees a plain Ethernet segment with one neighbour on it.
+
+### Proxy-ARP and forwarding follow the address the peer actually uses
+
+`target_host_ip` is the address the target is *expected* to use. A target whose
+IPv4 was set by hand on the far side answers on a different one, and the Host
+has no way to learn it — so everything that has to recognise "this frame belongs
+to the target" matches two addresses: the configured one, and the one the peer
+was last seen speaking from (`s_target_seen_ip`, filled by
+`target_learn_peer_ip()` from the ARP sender field or the IPv4 source of every
+frame the target sends).
+
+- proxy-ARP answers for either address, claiming **exactly the address that was
+  asked about** rather than the configured one;
+- the Host→Target unicast filter forwards frames addressed to either;
+- the silence probe asks the configured address first, then the learned one.
+
+Measured on the bench with the target moved to `192.168.20.77` while
+`target_host_ip` stayed `.2`: `ping` 0% loss, `ssh` login to `.77` succeeds,
+8 MiB target→host 0.55 MiB/s, 8 MiB host→target 0.52 MiB/s — both unchanged
+from the `.2` baseline, 0 duplicates. Before this change `.77` was unreachable
+while the pipe itself was fine: the Host's ARP for `.77` went unanswered and the
+unicast filter would have dropped the frames anyway.
+
+The learned address is cleared on target-side init, so a swapped or re-addressed
+machine starts from the configured address again instead of keeping the old one
+proxy-ARP'd.
+
+One caveat: the learned address can only be answered once the peer has spoken
+from it. A Host ARPing an address the target has never used gets no reply, and
+nothing on this side can force that first frame. In practice a Windows target
+emits traffic — and a gratuitous ARP — as soon as an address is assigned, so the
+window is about a second, and the Host's own ARP retries (1 s apart) cover it.
 
 ---
 

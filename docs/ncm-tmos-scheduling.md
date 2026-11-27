@@ -428,6 +428,14 @@ Two changes close that:
   The old code would have fired about five times over the same window, each fire
   worth one `tog_bad`. It stayed at 0.
 
+The learned address is not only a probe target: proxy-ARP and the Host→Target
+unicast filter match it too (see `ncm-bridge.md` §"Proxy-ARP and forwarding
+follow the address the peer actually uses"). Without that, the watchdog stopped
+torturing the link but the Host still could not reach a hand-addressed target —
+`ping .77` timed out and the ARP for `.77` went unanswered. With it: `ping` 0%
+loss, `ssh` to `.77` works, and both transfer directions run at their usual rate
+(0.55 / 0.52 MiB/s, 0 duplicates).
+
 ### When nothing answers, the bridge stops escalating
 
 If neither address answers, "dead pipe" and "peer living at an address we have

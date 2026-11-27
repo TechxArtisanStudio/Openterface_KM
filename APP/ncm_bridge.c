@@ -149,6 +149,16 @@ static uint8_t ncm_subnet_mask[4];
 static uint8_t ncm_target_host_ip[4];
 static uint8_t ncm_target_dev_ip[4];
 
+/* The address the peer was last seen speaking from, learned from the source
+ * field of every frame it sends (see target_learn_peer_ip()).  It exists
+ * because the configured `ncm_target_host_ip` is only what the Target is
+ * *expected* to use: a target whose IPv4 was changed by hand keeps talking,
+ * and this is the only way to know the address it actually answers on.  Both
+ * the silence probe and proxy-ARP have to cover it, otherwise the Host can
+ * never reach such a target.  Written from the USB interrupt, read from the
+ * main loop, so reads here are snapped with interrupts masked. */
+static uint8_t s_target_seen_ip[4];
+
 /* Firmware-side peer identity on the CDC NCM link.  Derived from the chip UID
  * (see mac_uid.h) so two units never share an address; distinct from the
  * address the Host adopts from the descriptor, otherwise the Host drops our
@@ -649,6 +659,37 @@ static void queue_clear(NCM_FrameQueue_t *queue)
 }
 
 /*******************************************************************************
+ * Target Address Matching
+ ******************************************************************************/
+/* Addresses the far side of the link answers for: the configured target
+ * address, plus the one the peer was last seen speaking from.  The second case
+ * is a target whose IPv4 was changed on the far side -- the Host has no way to
+ * learn that address, so everything that has to recognise "this frame belongs
+ * to the target" (proxy-ARP, the host->target unicast filter) must accept both,
+ * or such a target stays unreachable while the pipe itself is perfectly fine. */
+static uint8_t target_ip_matches(const uint8_t *ip)
+{
+    uint8_t seen[4];
+    uint32_t irq_state;
+
+    if (memcmp(ip, ncm_target_host_ip, 4) == 0) {
+        return 1u;
+    }
+
+    /* The learn side writes from the USB interrupt; snap the four bytes so a
+     * comparison cannot observe half an update.  The worst case if it did is
+     * one unanswered ARP request, but there is no reason to allow it. */
+    irq_state = ncm_irq_save();
+    memcpy(seen, s_target_seen_ip, 4);
+    ncm_irq_restore(irq_state);
+
+    if ((seen[0] | seen[1] | seen[2] | seen[3]) == 0u) {
+        return 0u;
+    }
+    return (uint8_t)(memcmp(ip, seen, 4) == 0);
+}
+
+/*******************************************************************************
  * ARP Handler
  ******************************************************************************/
 static uint8_t handle_arp_frame(const uint8_t *frame, uint16_t frame_len)
@@ -677,8 +718,12 @@ static uint8_t handle_arp_frame(const uint8_t *frame, uint16_t frame_len)
 
         if (!is_dev_ip) {
             /* Proxy-ARP for the target PC: tell the Host we own its IP so its
-             * HTTP packets are sent to us for bridging. */
-            if (s_bridge_enabled && memcmp(&frame[38], ncm_target_host_ip, 4) == 0) {
+             * HTTP packets are sent to us for bridging.  Covers the address
+             * the target was configured with and the address it was last seen
+             * speaking from -- a target re-addressed on the far side is only
+             * reachable if the Host can resolve it, and the Host has no other
+             * way to find out which address that is. */
+            if (s_bridge_enabled && target_ip_matches(&frame[38])) {
                 uint8_t reply[42];
                 memcpy(&reply[0], &frame[6], 6);
                 memcpy(&reply[6], NCM_DEV_MAC, 6);
@@ -688,7 +733,9 @@ static uint8_t handle_arp_frame(const uint8_t *frame, uint16_t frame_len)
                 reply[18] = 6; reply[19] = 4;
                 reply[20] = 0x00; reply[21] = 0x02;
                 memcpy(&reply[22], NCM_DEV_MAC, 6);
-                memcpy(&reply[28], ncm_target_host_ip, 4);
+                /* Claim exactly the address that was asked about, not the
+                 * configured one: the Host may be resolving either. */
+                memcpy(&reply[28], &frame[38], 4);
                 memcpy(&reply[32], &frame[22], 6);
                 memcpy(&reply[38], &frame[28], 4);
                 queue_push(&g_host_tx_queue, reply, sizeof(reply));
@@ -1618,10 +1665,12 @@ static uint8_t handle_host_frame(const uint8_t *data, uint16_t len)
                               NCM_DEV_MAC)) {
             return 1;
         }
-        /* L2 bridge: Host->Target frames (HTTP replies for the browser). */
+        /* L2 bridge: Host->Target frames (HTTP replies for the browser).
+         * Matches the proxy-ARP scope: whatever address the target answers on
+         * -- configured, or the one it was last seen using -- is delivered. */
         if (s_bridge_enabled && len >= NCM_ETH_HEADER_LEN + NCM_IPV4_MIN_HEADER_LEN) {
             const uint8_t *dst_ip = &data[NCM_ETH_HEADER_LEN + 16u];
-            if (memcmp(dst_ip, ncm_target_host_ip, 4) == 0) {
+            if (target_ip_matches(dst_ip)) {
                 queue_push_bridge(&g_target_tx_queue, data, len,
                                   s_target_peer_mac, NCM_TARGET_DEV_MAC);
                 g_bridge_host_to_target++;
@@ -1895,11 +1944,10 @@ uint16_t NCM_Bridge_GetHostDiagnostics(uint8_t *out, uint16_t max_len)
     return (i > max_len) ? max_len : i;
 }
 
-/* Two pieces of state the frame below reports that are owned by the silence
- * watchdog further down the file: declared here (tentatively) so the accessor
- * can read them without moving the watchdog state away from its code. */
+/* The silence interval is owned by the watchdog further down the file;
+ * declared here (tentatively) so the accessor can report it without moving the
+ * watchdog state away from its code. */
 static uint32_t s_wd_silence_ms;
-static uint8_t  s_target_seen_ip[4];
 
 /* Compact target-RX diagnostics (38 bytes, fits the 58B response limit).
  * Layout (v3):
@@ -2165,7 +2213,6 @@ static uint32_t s_wd_silence_ms = NCM_TARGET_SILENCE_MS;  /* adaptive */
 static uint8_t  s_wd_probe_stage;            /* 0 idle, 1 configured, 2 seen */
 static uint32_t s_wd_probe_ms;
 static uint16_t s_wd_probe_ep5;
-static uint8_t  s_target_seen_ip[4];         /* last source IPv4 of the peer */
 volatile uint16_t g_target_wd_probes;        /* 0x13 diag [30..31] */
 volatile uint16_t g_target_wd_probe_unproven;/* 0x13 diag [32..33] */
 
@@ -3317,6 +3364,15 @@ void NCM_Bridge_InitTarget(void)
     s_target_ntb_tx_off = 0;
     s_target_rx_len = 0;
     s_target_rx_need = 0;
+
+    /* Fresh far side: forget the address the previous peer spoke from, and
+     * start the silence ladder over.  Otherwise a target swapped for another
+     * machine (or re-addressed while we were not looking) would keep its old
+     * address proxy-ARP'd until the new peer happens to send its first frame. */
+    memset(s_target_seen_ip, 0, sizeof(s_target_seen_ip));
+    s_wd_probe_stage = 0;
+    s_wd_silence_ms = NCM_TARGET_SILENCE_MS;
+    g_target_wd_probe_unproven = 0;
 
     /* Start link notification sequence: DOWN -> UP -> SPEED -> BEACON */
     g_target_ncm_notify_state = NCM_NOTIFY_DOWN;
