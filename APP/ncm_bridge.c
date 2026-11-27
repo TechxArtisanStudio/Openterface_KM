@@ -1915,12 +1915,23 @@ uint16_t NCM_Bridge_GetHostDiagnostics(uint8_t *out, uint16_t max_len)
  *           EP4 completion landed inside a running poll body
  *  [25..26] duplicate re-arms refused (u16): chunks that would have gone on
  *           the wire twice
+ *  [26..27] EP5 OUT packets ACKed with a wrong data toggle (u16): each one
+ *           costs a 64-byte hole in the byte stream, i.e. the NTB it belonged
+ *           to.  Zero on a healthy pipe.
+ *  [28..29] SET_INTERFACE(IF5) count (u16, low bits): tells whether the host
+ *           really re-issued the alt-setting after a link bounce
+ *  [30..31] liveness probes sent (u16): ARP requests emitted because the link
+ *           went quiet.  A healthy idle link increments this and leaves
+ *           [19] alone.
  */
 uint16_t NCM_Bridge_GetBridgeDiagnostics(uint8_t *out, uint16_t max_len)
 {
     uint16_t i = 0;
     extern volatile uint16_t g_usbfs_ep5_in_count;  /* raw EP5 OUT interrupts */
+    extern volatile uint16_t g_usbfs_ep5_tog_bad_count;
+    extern volatile uint32_t g_usbfs_set_interface_if5_count;
     extern volatile uint8_t  g_target_wd_silence_fires;
+    extern volatile uint16_t g_target_wd_probes;
 
 #define BD_PUT8(v)  do { if (i < max_len) { out[i] = (uint8_t)(v); } i++; } while (0)
 #define BD_PUT16(v) do { if ((i + 1) < max_len) {                        \
@@ -1945,6 +1956,9 @@ uint16_t NCM_Bridge_GetBridgeDiagnostics(uint8_t *out, uint16_t max_len)
     BD_PUT16((uint16_t)g_target_tx_queue.overflow);
     BD_PUT16(g_host_diag.poll_skipped);
     BD_PUT16(g_host_feed_dup_blocks);
+    BD_PUT16(g_usbfs_ep5_tog_bad_count);
+    BD_PUT16((uint16_t)g_usbfs_set_interface_if5_count);
+    BD_PUT16(g_target_wd_probes);
 
 #undef BD_PUT8
 #undef BD_PUT16
@@ -2082,22 +2096,70 @@ void NCM_Bridge_HostRxPacket(const uint8_t *data, uint16_t len)
  * a USB suspend/resume glitch desynchronizes the EP5 OUT data toggles, or
  * NDIS paused the pipe after a missed link edge). Then no EP5 OUT interrupt
  * ever fires while all software state looks idle, and neither watchdog above
- * can detect it. A live Windows always emits *something* within seconds
- * (NCSI probes, discovery, ARP), so 10 s with zero EP5 OUT interrupts while
- * the path is idle means the pipe is dead: replay the alt=1 endpoint setup
- * (resets our expected toggles; at most one in-flight packet is lost before
- * the alternating sequences converge) and bounce the link notification
- * DOWN->UP so NDIS restarts the data interface and re-issues SET_INTERFACE.
+ * can detect it.
+ *
+ * The first version of this watchdog treated 10 s without an EP5 OUT
+ * interrupt as proof of a dead pipe.  That premise is wrong: a healthy,
+ * connected target goes quiet on its own whenever it has nothing to say, and
+ * the "recovery" itself is destructive.  Measured on hardware: one fire per
+ * ~60 s of ordinary idling, `tog_bad` +1 (the peer answers the reset R_TOG
+ * with the opposite toggle once, so exactly one 64-byte packet is ACKed and
+ * discarded), `set_if5` unchanged (the host did not re-issue SET_INTERFACE,
+ * so the reset was unilateral), and pings that succeeded before and after.
+ * A 64-byte hole in the middle of an NTB makes the reassembler drop that
+ * whole NTB, because it only resyncs on the 'NCMH' signature.
+ *
+ * So the watchdog now has to *prove* the pipe is dead before touching
+ * anything: it queues one ARP request for the target's own address -- the
+ * one frame a live IPv4 stack always answers, broadcast so it does not
+ * depend on any cached mapping -- and only resets the endpoints and bounces
+ * the link if nothing at all comes back within NCM_TARGET_PROBE_MS.  Frames
+ * the target owes us (replies, retransmits) also count, so the probe only
+ * has to prove the wire, not the ARP cache.
  ******************************************************************************/
 #define NCM_TARGET_WATCHDOG_MS  3000u
 #define NCM_TARGET_SILENCE_MS   10000u
+#define NCM_TARGET_PROBE_MS     1500u   /* ARP answer deadline before a reset */
 
 static volatile uint32_t g_target_last_rx_ms;
 static uint16_t s_wd_last_in_count;
 static uint32_t s_wd_last_in_change_ms;
 static uint16_t s_wd_last_ep5_count;
 static uint32_t s_wd_last_ep5_change_ms;
+static uint8_t  s_wd_probing;                /* probe queued, answer pending */
+static uint32_t s_wd_probe_ms;
+static uint16_t s_wd_probe_ep5;
 volatile uint8_t g_target_wd_silence_fires;  /* 0x13 diag [19] */
+volatile uint16_t g_target_wd_probes;        /* 0x13 diag [30..31] */
+
+/* Ask the target to prove it is listening: broadcast ARP request for its own
+ * configured address, sent from our target-side address so the reply is a
+ * plain unicast our EP5 path has to deliver. */
+static void target_probe_peer(void)
+{
+    uint8_t req[42];
+
+    if ((ncm_target_host_ip[0] | ncm_target_host_ip[1] |
+         ncm_target_host_ip[2] | ncm_target_host_ip[3]) == 0) {
+        return;   /* no address configured: nothing to ask for */
+    }
+
+    memset(req, 0xFF, 6);                      /* dst = broadcast */
+    memcpy(&req[6], NCM_TARGET_DEV_MAC, 6);
+    req[12] = 0x08; req[13] = 0x06;            /* EtherType = ARP */
+    req[14] = 0x00; req[15] = 0x01;            /* hw type = Ethernet */
+    req[16] = 0x08; req[17] = 0x00;            /* proto = IPv4 */
+    req[18] = 6;    req[19] = 4;
+    req[20] = 0x00; req[21] = 0x01;            /* op = request */
+    memcpy(&req[22], NCM_TARGET_DEV_MAC, 6);   /* sender MAC */
+    memcpy(&req[28], ncm_target_dev_ip, 4);    /* sender IP */
+    memset(&req[32], 0x00, 6);                 /* target MAC unknown */
+    memcpy(&req[38], ncm_target_host_ip, 4);   /* who has this */
+
+    if (queue_push(&g_target_tx_queue, req, sizeof(req))) {
+        g_target_wd_probes++;
+    }
+}
 
 /* Replay the SET_INTERFACE(alt=1) endpoint configuration: reset expected
  * data toggles to DATA0 and re-arm endpoint response so a desynchronized
@@ -2155,24 +2217,48 @@ static void target_watchdog(void)
     s_wd_last_in_count = in_count;
 
     /* Silence: no EP5 OUT interrupt at all while the whole target path is
-     * idle (no partial reassembly, no NTB in flight, empty TX queue). */
-    if (s_bridge_enabled && g_target_ncm_data_if_active &&
-        s_target_rx_need == 0 && s_target_ntb_tx_len == 0 &&
-        g_target_tx_queue.count == 0) {
+     * idle (no partial reassembly, no NTB in flight, empty TX queue).
+     * Silence on its own is not evidence of a fault -- the target is allowed
+     * to have nothing to say -- so probe before touching any endpoint. */
+    if (s_wd_probing) {
+        if (ep5_count != s_wd_probe_ep5) {
+            s_wd_probing = 0;                 /* answered: the wire is alive */
+            s_wd_last_ep5_change_ms = now;
+        }
+        else if ((uint32_t)(now - s_wd_probe_ms) > NCM_TARGET_PROBE_MS) {
+            s_wd_probing = 0;
+            s_wd_last_ep5_change_ms = now;
+            /* A busy EP7 means the queue is the problem, not the wire; the
+             * TX watchdog above owns that case and resets harder. */
+            if (USBFS_Endp_Busy[DEF_UEP7] == 0) {
+                target_ep_resync();
+                queue_clear(&g_target_tx_queue);
+                g_ncm_garp_sent = 0;  /* re-announce after the link bounce */
+                g_target_ncm_notify_state = NCM_NOTIFY_DOWN;
+                g_target_ncm_notify_hold_until_ms = now + 100;
+                g_target_wd_silence_fires++;
+                USB_DEBUG("NCM: silence watchdog reset\r\n");
+            }
+        }
+    }
+    else if (s_bridge_enabled && g_target_ncm_data_if_active &&
+             s_target_rx_need == 0 && s_target_ntb_tx_len == 0 &&
+             g_target_tx_queue.count == 0) {
         if (ep5_count != s_wd_last_ep5_count) {
             s_wd_last_ep5_change_ms = now;
         } else if ((uint32_t)(now - s_wd_last_ep5_change_ms) > NCM_TARGET_SILENCE_MS) {
-            target_ep_resync();
-            queue_clear(&g_target_tx_queue);
-            g_ncm_garp_sent = 0;  /* re-announce after the link bounce */
-            g_target_ncm_notify_state = NCM_NOTIFY_DOWN;
-            g_target_ncm_notify_hold_until_ms = now + 100;
-            g_target_wd_silence_fires++;
-            s_wd_last_ep5_change_ms = now;
-            USB_DEBUG("NCM: silence watchdog reset\r\n");
+            target_probe_peer();
+            s_wd_probing = 1;
+            s_wd_probe_ms = now;
+            s_wd_probe_ep5 = ep5_count;
+            s_wd_last_ep5_change_ms = now;   /* no re-probe storm if unanswered */
         }
-    } else {
+    }
+    else {
         s_wd_last_ep5_change_ms = now;
+        if (g_target_tx_queue.count == 0) {
+            s_wd_probing = 0;   /* traffic or a queued frame: nothing to prove */
+        }
     }
     s_wd_last_ep5_count = ep5_count;
 }

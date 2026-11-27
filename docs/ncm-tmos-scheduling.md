@@ -328,11 +328,14 @@ duplicate. What is established is that the suspect window was live and frequent,
 and that it is now impossible by construction rather than by luck.
 
 If duplicates reappear, the counters to read are, in this order: `dup_blocks`
-(non-zero means the ordering was broken again), then `silence_wd` — the
-target-facing RX re-arm in `target_ep_resync()` resets the expected data toggle
-to DATA0, and a peer that is one toggle ahead will then be mis-read for at most
-one packet. That path can corrupt an NTB, and a corrupted NTB is a candidate for
-a *shifted* duplicate that `dup_blocks` would never see.
+(non-zero means the ordering was broken again), then `silence_wd` and
+`tog_bad` — the target-facing RX re-arm in `target_ep_resync()` resets the
+expected data toggle to DATA0, and a peer sitting on the opposite toggle has
+its next packet ACKed and discarded. That is a **hole**, not a duplicate: the
+reassembler only resyncs on the `NCMH` signature and `NCM_ParseNtb()` checks
+three of them (NTB, NDP, and the descriptor bounds), so a shifted stream is
+rejected rather than delivered. The worst case is one lost NTB — one Ethernet
+frame — and TCP retransmits it.
 
 
 ## What was tried, and what it did
@@ -352,6 +355,57 @@ link the only lever is more buffer, and that buffer does not exist in this RAM
 budget. Everything else in the table either removes a hazard or changes nothing.
 
 
+## The silence watchdog was firing on idle
+
+The target-side silence watchdog assumed "a live Windows always emits something
+within seconds (NCSI probes, discovery, ARP)", so 10 s with no EP5 OUT interrupt
+was taken as proof of a dead pipe, and the recovery is destructive: reset both
+data toggles, clear the reply queue, send a link DOWN/UP notification so NDIS
+restarts the interface.
+
+That premise is false. A connected, healthy target simply has nothing to say
+sometimes, and the numbers, taken on an otherwise idle bench:
+
+| Before the fix | Counters |
+|---|---|
+| 60 s of idling, no traffic from either side | `silence_wd` 2 → 3, `tog_bad` 0 → 1, `set_if5` 2 → 2 |
+| 90 s more idling | `silence_wd` still 3, `tog_bad` still 1 |
+| `ping` before and after | 0% loss, 1.9–2.5 ms |
+
+Read it as: the watchdog fired because the link was quiet, not because it was
+broken. Each fire cost exactly one 64-byte packet — `tog_bad` counts EP5 OUT
+interrupts whose data toggle did not match, which the controller has already
+ACKed, so the payload is gone and the host never retransmits it. And
+`set_if5` did not move, i.e. the host never re-issued `SET_INTERFACE`: the
+toggle reset was unilateral, which is exactly what creates the one-packet hole.
+Whether the hole costs anything depends on where it lands: a fire only happens
+while the reassembler is empty, so it normally eats the first packet of a fresh
+NTB and that NTB is dropped.
+
+The fix keeps the recovery but makes it earn the evidence: after 10 s of
+silence the bridge now queues **one broadcast ARP request for the target's own
+address** (`target_probe_peer()`) and only resets the endpoints if nothing at
+all comes back within 1.5 s. A live IPv4 stack always answers ARP; a paused
+pipe or a desynced toggle cannot. Measured after the change, with the same
+bench:
+
+| After the fix | Counters |
+|---|---|
+| 90 s of idling | `probes` 2 → 9, `silence_wd` 0, `tog_bad` 0, `set_if5` 2 |
+| 8 MiB target→host + 150 probes | 0.55 MiB/s, 0% loss, 0 duplicates, `tog_bad` 0, `silence_wd` 0 |
+
+So an idle link now costs a 42-byte ARP request every ~10 s instead of a lost
+chunk plus a link bounce, and the "quiet but alive" case can no longer be
+mistaken for a fault. The one case the probe cannot cover is a target whose
+IPv4 address is not the configured `target_host_ip` (a manually changed
+address, say): the probe goes unanswered and behaviour falls back to the old
+bounce, one 1.5 s later.
+
+Caveat on interpretation: `silence_wd` in earlier diagnostics (it read 3 in the
+session that produced the duplicate-frame work) is **not** evidence that the
+target pipe was broken. It was this false positive, three times.
+
+
 ## How to verify
 
 1. Idle link, no load: `ping` both ways must stay at 0% loss, 1–2 ms (any loss
@@ -369,13 +423,14 @@ budget. Everything else in the table either removes a hazard or changes nothing.
 The `0x33/0x10` diagnostics frame exposes `host_frames`, `hq_overflow`,
 `poll_calls`, `tx_sent` and `zlp_sent` (58-byte reply payload — full, nothing
 else fits), which is enough to separate "arrived at the bridge" from "dropped on
-the way out". The target-facing queue's overflow counter, the re-entry skips and
-the duplicate re-arms are exported by `0x33/0x13` instead, at payload bytes
-21–26 (see `GetBridgeDiagnostics()` for the layout).
+the way out". The target-facing queue's overflow counter, the re-entry skips,
+the duplicate re-arms, the toggle-mismatch count and the probe count are
+exported by `0x33/0x13` instead, at payload bytes 20–31 (see
+`GetBridgeDiagnostics()` for the layout).
 
 Reading `0x13` over BLE has two traps worth knowing before blaming the firmware
 for silence: the response can take longer than 1.5 s while the BLE-Eth pump is
 busy, and a reconnect often lands on the stale duplicate `CBPeripheral` that
 negotiates **MTU 60** and then delivers no notification at all. Retry until the
-log shows MTU 247 (see `ble-eth-ssh-usage.md` §Common Failures); a 27-byte
+log shows MTU 247 (see `ble-eth-ssh-usage.md` §Common Failures); a 32-byte
 payload does not survive the MTU-60 identity.

@@ -299,7 +299,7 @@ channel (`0x33`, sub-command `0x10` for the host side, `0x13` for the bridge).
 | 20..27 | device IP, host IP |
 | 28..55 | u16 counters: `ep3_rx_pkts`, `ntb_sig_ok`, `ntb_sig_bad`, `ntb_parsed`, `host_frames`, `arp_req`, `arp_match`, `arp_reply`, `icmp_echo`, `dhcp_offer`, `tx_sent`, `zlp_sent`, `rx_oflow`, `poll_calls` |
 
-`0x33/0x13`, 27 bytes:
+`0x33/0x13`, 32 bytes:
 
 | Offset | Field |
 |---|---|
@@ -319,6 +319,16 @@ channel (`0x33`, sub-command `0x10` for the host side, `0x13` for the bridge).
 | 20..21 | target TX queue overflow (low 16 bits of the u32 counter) |
 | 22..23 | `poll_skipped` — poll re-entries refused by the guard |
 | 24..25 | duplicate re-arms refused (`dup_blocks`) |
+| 26..27 | `tog_bad` — EP5 OUT packets ACKed with the wrong data toggle |
+| 28..29 | `SET_INTERFACE(IF5)` count (low 16 bits) |
+| 30..31 | liveness probes sent (ARP requests after going quiet) |
+
+`tog_bad` is the counter to pair with `silence_wd`: each recovery resets the
+expected RX toggle to DATA0, and if the peer is on the other toggle its next
+packet is ACKed and discarded, so `tog_bad` rises by one per recovery that
+actually cost a chunk. `probes` should rise while `silence_wd` stays flat on a
+healthy idle link — the watchdog now asks the target to answer an ARP request
+before touching anything.
 
 Reading `g_portal_hijacked` is the quickest way to tell "the greeting is
 working" (it increments in bursts of ≤ 4 per peer) from "the peer is being

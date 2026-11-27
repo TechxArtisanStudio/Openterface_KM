@@ -306,6 +306,14 @@ volatile uint16_t g_usbfs_ep6_rx_len = 0;    /* last RX length */
 volatile uint32_t g_usbfs_ep6_rx_count = 0;  /* total EP6 OUT interrupts (any TOG state) */
 volatile uint16_t g_usbfs_ep7_in_count = 0;   /* total EP7 IN completions */
 volatile uint16_t g_usbfs_ep5_in_count = 0;   /* total EP5 IN (ECM notification) completions */
+/* EP5 OUT interrupts whose data toggle did not match the endpoint's expected
+ * toggle.  The controller has already ACKed the packet by then, so the host
+ * advances its toggle and never retransmits: the packet's payload is lost and
+ * only the *next* packet (with the matching toggle) gets through.  Counted to
+ * tell "the pipe is in sync" from "we lose one 64-byte chunk per event" --
+ * a lost chunk in the middle of an NTB discards the whole NTB, because the
+ * reassembler only resyncs on the 'NCMH' signature. */
+volatile uint16_t g_usbfs_ep5_tog_bad_count = 0;
 volatile uint32_t g_usbfs_set_interface_if5_count = 0;  /* total SET_INTERFACE for IF5 */
 
 /* NCM bridge diagnostic variables (from ncm_bridge.c) */
@@ -1086,6 +1094,14 @@ void USBFS_IRQHandler( void )
                             if (intst & USBFS_UIS_TOG_OK) {
                                 NCM_Bridge_TargetRxDone(EP5_DatabufHD, USBFSD->RX_LEN);
                                 USBFSD->UEP5_RX_CTRL ^= USBFS_UEP_R_TOG;
+                            }
+                            else {
+                                /* ACKed but discarded: one chunk of the NTB
+                                 * byte stream is gone (see the counter's
+                                 * comment).  Never flip the expected toggle
+                                 * here -- that is what makes the pipe
+                                 * converge again on the next packet. */
+                                g_usbfs_ep5_tog_bad_count++;
                             }
                             USBFSD->UEP5_RX_CTRL = (USBFSD->UEP5_RX_CTRL & ~USBFS_UEP_R_RES_MASK) | USBFS_UEP_R_RES_ACK;
                         }
