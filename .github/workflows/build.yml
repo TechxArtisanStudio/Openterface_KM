@@ -267,9 +267,15 @@ jobs:
         name: openterface-km-firmware-kvmgo
         if-no-files-found: error
         retention-days: 7
+        # ELF and MAP ride along so a CI binary can be disassembled and compared
+        # against a local build. GCC 8.2 (CI) and 15.x (bench) have already
+        # diverged in runtime behaviour with identical source, so the bench
+        # needs the symbols to tell the two compilations apart.
         path: |
           ${{ env.OUTPUT_DIR }}\openterface-km-firmware-kvmgo.hex
           ${{ env.OUTPUT_DIR }}\openterface-km-firmware-kvmgo.bin
+          ${{ env.OUTPUT_DIR }}\openterface-km-firmware-kvmgo.elf
+          ${{ env.OUTPUT_DIR }}\openterface-km-firmware-kvmgo.map
 
     - name: Upload KVMGo mode 8 firmware
       uses: actions/upload-artifact@v4
@@ -277,9 +283,13 @@ jobs:
         name: openterface-km-firmware-kvmgo-mode8
         if-no-files-found: error
         retention-days: 7
+        # This is the artifact the bench actually flashes and tests, so the ELF
+        # and MAP are mandatory here rather than nice-to-have.
         path: |
           ${{ env.OUTPUT_DIR }}\openterface-km-firmware-kvmgo-mode8.hex
           ${{ env.OUTPUT_DIR }}\openterface-km-firmware-kvmgo-mode8.bin
+          ${{ env.OUTPUT_DIR }}\openterface-km-firmware-kvmgo-mode8.elf
+          ${{ env.OUTPUT_DIR }}\openterface-km-firmware-kvmgo-mode8.map
 
     - name: Upload Mini-KVM v1.2 firmware
       uses: actions/upload-artifact@v4
@@ -290,6 +300,8 @@ jobs:
         path: |
           ${{ env.OUTPUT_DIR }}\openterface-km-firmware-mini-kvm.hex
           ${{ env.OUTPUT_DIR }}\openterface-km-firmware-mini-kvm.bin
+          ${{ env.OUTPUT_DIR }}\openterface-km-firmware-mini-kvm.elf
+          ${{ env.OUTPUT_DIR }}\openterface-km-firmware-mini-kvm.map
 
     - name: Upload KeyMod Plus firmware (external oscillator)
       uses: actions/upload-artifact@v4
@@ -300,6 +312,8 @@ jobs:
         path: |
           ${{ env.OUTPUT_DIR }}\openterface-km-firmware-keymod-plus.hex
           ${{ env.OUTPUT_DIR }}\openterface-km-firmware-keymod-plus.bin
+          ${{ env.OUTPUT_DIR }}\openterface-km-firmware-keymod-plus.elf
+          ${{ env.OUTPUT_DIR }}\openterface-km-firmware-keymod-plus.map
 
     - name: Upload KeyMod Mini firmware (internal RC oscillator)
       uses: actions/upload-artifact@v4
@@ -310,6 +324,8 @@ jobs:
         path: |
           ${{ env.OUTPUT_DIR }}\openterface-km-firmware-keymod-mini.hex
           ${{ env.OUTPUT_DIR }}\openterface-km-firmware-keymod-mini.bin
+          ${{ env.OUTPUT_DIR }}\openterface-km-firmware-keymod-mini.elf
+          ${{ env.OUTPUT_DIR }}\openterface-km-firmware-keymod-mini.map
 
     - name: Upload KeyMod Plus Beta firmware (internal RC oscillator)
       uses: actions/upload-artifact@v4
@@ -320,4 +336,6 @@ jobs:
         path: |
           ${{ env.OUTPUT_DIR }}\openterface-km-firmware-keymod-plus-beta.hex
           ${{ env.OUTPUT_DIR }}\openterface-km-firmware-keymod-plus-beta.bin
+          ${{ env.OUTPUT_DIR }}\openterface-km-firmware-keymod-plus-beta.elf
+          ${{ env.OUTPUT_DIR }}\openterface-km-firmware-keymod-plus-beta.map
 
