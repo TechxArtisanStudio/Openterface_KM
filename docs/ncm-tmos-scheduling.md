@@ -605,14 +605,23 @@ Two caveats worth keeping in mind:
   saturation it would have been dropped instead, and drops reorder TCP far more
   violently than a two-frame slip, but this is still a reordering, not a free
   win. Only frames ≤ 128 B are affected.
-- Only the target→host queue reserves a slot, because that is the direction
-  that saturates in this bench. The reverse path has the same shape under a
-  downstream transfer: uploading 8 MiB to the target (sink `more`/PowerShell
-  over `ssh`, ~0.09 MiB/s — this direction is ~6× slower than the other one)
-  lost 18–26 % of ICMP probes, and `tq_overflow` rose by 618 while
-  `small_used` did not move at all, which places the drops in the target TX
-  queue. A second slot would fix it and cost another 1516 bytes; it is not
+- Only the target→host queue reserves a slot. The reverse path has the same
+  shape and drops more: uploading 8 MiB to the target, 51 of 100 ICMP probes
+  were lost, `tq_overflow` rose by 659 while `small_used` did not move and the
+  host-facing queue kept `overflow=0`. All of it is the target TX queue, which
+  has no slot. A second slot would fix it for another 1516 bytes; it is not
   added until that direction matters as much as reads do.
+
+  An earlier run reported ~0.09 MiB/s for this direction and 18–26 % loss.
+  That number was the sink, not the link: the only sinks available were `more`
+  and a PowerShell stdin reader behind `ssh`, and the latter cannot absorb
+  faster than that. A `TcpListener` that discards into a 256 KiB buffer
+  reaches **0.554 MiB/s** (8 MiB in 14.43 s), the same as the read path, and
+  receives exactly 8 388 608 bytes. So there is no throughput asymmetry
+  between the directions — only the missing slot. Getting that sink to accept
+  connections at all needed an inbound firewall rule for the listening
+  process; loopback worked without it, which is what made the first attempt
+  look like a link problem.
 
 RAM: bss ends at 0x2000E478, stack starts at 0x2000F800, so the malloc arena
 goes from 6 536 to 5 000 bytes.

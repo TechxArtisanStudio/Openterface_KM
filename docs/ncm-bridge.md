@@ -425,7 +425,8 @@ These are consequences of the design, not bugs to file:
   target→host queue keeps one extra reserved slot for frames ≤ 128 B, so
   replies travelling against the load survive the saturated ring (measured 81 %
   → 0 % loss); the host→target queue has no slot, so a probe sent *into* the
-  load is still dropped. With the probe in the opposite direction to the load
+  load is still dropped (measured 51 % loss while uploading at 0.554 MiB/s).
+  With the probe in the opposite direction to the load
   the same link only queues (0–2 % loss, ~200 ms). The radio is not a factor —
   measured both ways. The mechanism, the measurements and what was tried are in
   [ncm-tmos-scheduling.md](ncm-tmos-scheduling.md).
