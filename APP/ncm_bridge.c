@@ -55,6 +55,15 @@ volatile uint32_t g_ncm_init_target_count = 0;
  * Extra depth buys nothing and costs 1.5 KB of the malloc arena, so it is
  * back to 2. See docs/ncm-tmos-scheduling.md. */
 #define NCM_BRIDGE_QUEUE_DEPTH          2u
+
+/* A saturated ring drops whole frames, and the frames it drops are almost
+ * never the ones filling it: a 1514-byte bulk segment is what occupies the
+ * ring, while the losses that matter are 98-byte ICMP replies, 42-byte ARP
+ * and bare TCP ACKs.  Frames at or below this length get one reserved slot
+ * outside the ring, so they can still be queued when the ring is full.
+ * 128 bytes covers those three with room for a small encapsulated frame and
+ * is far below a bulk segment, so bulk traffic can never claim the slot. */
+#define NCM_BRIDGE_SMALL_FRAME_MAX      128u
 #define NCM_BRIDGE_USBFS_PACKET_SIZE    64u
 /* Host-facing (USBLIB) bulk packet size — PMA buffers are 64 bytes. */
 #define NCM_BRIDGE_HOST_PACKET_SIZE     64u
@@ -191,6 +200,12 @@ typedef struct {
     volatile uint8_t in_flight;
     volatile uint16_t gen;
     volatile uint32_t overflow;
+    /* Optional reserved slot for a latency-critical frame that arrives when
+     * the ring is full (see NCM_BRIDGE_SMALL_FRAME_MAX).  A pointer rather
+     * than an embedded frame so only the queue that needs it pays the RAM. */
+    NCM_Frame_t *small;
+    volatile uint8_t small_pending;
+    volatile uint16_t small_used;      /* frames rescued by the slot */
 } NCM_FrameQueue_t;
 
 typedef struct {
@@ -241,6 +256,12 @@ typedef struct {
  * Global State Variables
  ******************************************************************************/
 static NCM_FrameQueue_t g_host_tx_queue;
+/* Reserved slot for the target->host path, the one that saturates: the large
+ * transfer runs upstream, so ICMP replies and ARP answers coming back from the
+ * target are what get dropped.  The reverse path has the same shape under a
+ * downstream transfer, but it is not worth another 1514 bytes of RAM until
+ * that is measured. */
+static NCM_Frame_t g_host_tx_small;
 static NCM_RxFrame_t g_host_rx_frame;
 static uint16_t g_host_tx_offset;
 static uint16_t g_host_tx_gen;
@@ -500,11 +521,40 @@ uint8_t NCM_ParseNtb(const uint8_t *ntb_buf, uint16_t ntb_len,
 /*******************************************************************************
  * Frame Queue Operations
  ******************************************************************************/
+/* Put a frame in the reserved slot.  Used only when the ring is already full,
+ * which is exactly the case the slot exists for; callers hold the critical
+ * section.  Returns 0 when the slot cannot take it, and the caller then
+ * counts the drop as it always did. */
+static uint8_t queue_push_small_locked(NCM_FrameQueue_t *queue,
+                                       const uint8_t *data, uint16_t len)
+{
+    if (queue->small == NULL || queue->small_pending ||
+        len > NCM_BRIDGE_SMALL_FRAME_MAX) {
+        return 0u;
+    }
+
+    memcpy(queue->small->data, data, len);
+    queue->small->len = len;
+    queue->small_pending = 1u;
+    queue->small_used++;
+    return 1u;
+}
+
 static uint8_t queue_push(NCM_FrameQueue_t *queue, const uint8_t *data, uint16_t len)
 {
     uint32_t irq_state = ncm_irq_save();
 
+    if (len > NCM_BRIDGE_MTU_FRAME_SIZE) {
+        queue->overflow++;
+        ncm_irq_restore(irq_state);
+        return 0;
+    }
+
     if (queue->count >= NCM_BRIDGE_QUEUE_DEPTH) {
+        if (queue_push_small_locked(queue, data, len)) {
+            ncm_irq_restore(irq_state);
+            return 1;
+        }
         queue->overflow++;
         ncm_irq_restore(irq_state);
         return 0;
@@ -539,7 +589,18 @@ static uint8_t queue_push_bridge(NCM_FrameQueue_t *queue, const uint8_t *data,
                                  const uint8_t *src_mac)
 {
     uint32_t irq_state = ncm_irq_save();
-    if (queue->count >= NCM_BRIDGE_QUEUE_DEPTH || len > NCM_BRIDGE_MTU_FRAME_SIZE) {
+    if (len > NCM_BRIDGE_MTU_FRAME_SIZE) {
+        queue->overflow++;
+        ncm_irq_restore(irq_state);
+        return 0;
+    }
+    if (queue->count >= NCM_BRIDGE_QUEUE_DEPTH) {
+        if (queue_push_small_locked(queue, data, len)) {
+            memcpy(&queue->small->data[0], dst_mac, 6);
+            memcpy(&queue->small->data[6], src_mac, 6);
+            ncm_irq_restore(irq_state);
+            return 1;
+        }
         queue->overflow++;
         ncm_irq_restore(irq_state);
         return 0;
@@ -660,7 +721,41 @@ static void queue_clear(NCM_FrameQueue_t *queue)
     queue->rd = 0;
     queue->wr = 0;
     queue->count = 0;
+    queue->small_pending = 0;
     queue->gen++;
+    ncm_irq_restore(irq_state);
+}
+
+/* Next frame to transmit, or NULL when the queue is empty.  The reserved slot
+ * wins whenever it holds a frame: the only way a frame lands there is that the
+ * ring was already full, so it has already waited behind a full ring of bulk
+ * segments and the alternative is dropping it.
+ *
+ * The head frame cannot be overwritten while it is being read: the ring head
+ * is still counted, and a push refuses at count == DEPTH; the reserved slot
+ * stays marked pending until queue_release(). */
+static NCM_Frame_t *queue_peek(NCM_FrameQueue_t *queue, uint8_t *from_small)
+{
+    if (queue->small_pending) {
+        *from_small = 1u;
+        return queue->small;
+    }
+    if (queue->count > 0u) {
+        *from_small = 0u;
+        return &queue->frames[queue->rd];
+    }
+    return NULL;
+}
+
+static void queue_release(NCM_FrameQueue_t *queue, uint8_t from_small)
+{
+    uint32_t irq_state = ncm_irq_save();
+    if (from_small) {
+        queue->small_pending = 0;
+    } else {
+        queue->count--;
+        queue->rd = (uint8_t)((queue->rd + 1u) % NCM_BRIDGE_QUEUE_DEPTH);
+    }
     ncm_irq_restore(irq_state);
 }
 
@@ -1786,6 +1881,7 @@ static uint16_t s_host_rx_need;
 void NCM_Bridge_Init(void)
 {
     memset(&g_host_tx_queue, 0, sizeof(g_host_tx_queue));
+    g_host_tx_queue.small = &g_host_tx_small;
     memset(&g_host_rx_frame, 0, sizeof(g_host_rx_frame));
     g_host_tx_offset = 0;
     g_host_tx_gen = 0;
@@ -2016,7 +2112,11 @@ uint16_t NCM_Bridge_GetBridgeDiagnostics(uint8_t *out, uint16_t max_len)
     BD_PUT16(g_portal_hijacked);          /* captive-portal DNS answers */
     BD_PUT16(g_usbfs_ep5_in_count);       /* raw EP5 OUT interrupts (detect toggle desync) */
     BD_PUT8((uint8_t)(s_wd_silence_ms / 1000u));  /* current probe interval, s */
-    BD_PUT8(0x00u);                       /* reserved */
+    /* Frames rescued by the host queue's reserved small-frame slot, saturating
+     * at 255.  Reuses the byte that used to be padding, so the layout and the
+     * frame length stay as they were. */
+    BD_PUT8((g_host_tx_queue.small_used > 0xFFu)
+                ? 0xFFu : (uint8_t)g_host_tx_queue.small_used);
     BD_PUT16((uint16_t)g_target_tx_queue.overflow);
     BD_PUT16(g_host_diag.poll_skipped);
     BD_PUT16(g_host_feed_dup_blocks);
@@ -2424,36 +2524,36 @@ static void ncm_bridge_poll_body(void)
     if (s_host_ntb_tx_len != 0) {
         host_tx_feed();
     }
-    else if (!USBD_Endp4_Busy && g_host_tx_queue.count > 0) {
+    else if (!USBD_Endp4_Busy) {
         /* Build NTB from one frame (single-frame NTBs for Phase 1) */
-        NCM_Frame_t *frame = &g_host_tx_queue.frames[g_host_tx_queue.rd];
+        uint8_t from_small = 0;
+        NCM_Frame_t *frame = queue_peek(&g_host_tx_queue, &from_small);
         uint8_t popped = 0;
 
-        if (frame->len > 0) {
-            const uint8_t *frame_ptrs[1] = { frame->data };
-            uint16_t frame_lens[1] = { frame->len };
-            uint16_t ntb_len = NCM_BuildNtb(s_host_ntb_tx, sizeof(s_host_ntb_tx),
-                                             frame_ptrs, frame_lens,
-                                             1, g_ncm_ntb_sequence);
-            g_ncm_ntb_sequence++;
+        if (frame != NULL) {
+            if (frame->len > 0) {
+                const uint8_t *frame_ptrs[1] = { frame->data };
+                uint16_t frame_lens[1] = { frame->len };
+                uint16_t ntb_len = NCM_BuildNtb(s_host_ntb_tx, sizeof(s_host_ntb_tx),
+                                                 frame_ptrs, frame_lens,
+                                                 1, g_ncm_ntb_sequence);
+                g_ncm_ntb_sequence++;
 
-            if (ntb_len > 0) {
-                s_host_ntb_tx_len = ntb_len;
-                s_host_ntb_tx_off = 0;
-                s_host_ntb_inst++;        /* new instance: dup check re-bases */
-                s_host_armed_valid = 0;
+                if (ntb_len > 0) {
+                    s_host_ntb_tx_len = ntb_len;
+                    s_host_ntb_tx_off = 0;
+                    s_host_ntb_inst++;        /* new instance: dup check re-bases */
+                    s_host_armed_valid = 0;
+                    popped = 1;
+                }
+            } else {
+                /* Zero-length frame: nothing to send, just drop it. */
                 popped = 1;
             }
-        } else {
-            /* Zero-length frame: nothing to send, just drop it. */
-            popped = 1;
         }
 
         if (popped) {
-            uint32_t csr = ncm_irq_save();
-            g_host_tx_queue.count--;
-            g_host_tx_queue.rd = (g_host_tx_queue.rd + 1) % NCM_BRIDGE_QUEUE_DEPTH;
-            ncm_irq_restore(csr);
+            queue_release(&g_host_tx_queue, from_small);
             host_tx_feed();
         }
     }
