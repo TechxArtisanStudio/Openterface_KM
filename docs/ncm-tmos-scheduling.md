@@ -258,14 +258,13 @@ Three conclusions:
    that direction queues, it does not drop.
 
 
-## Open issue: duplicate replies
+## Duplicate replies: the window is real, the mechanism is now impossible
 
 Earlier bench runs (before the changes below) reported up to 361 duplicate ICMP
 replies, +85 in a second run, in the target→host saturated case only.
 
-The suspect is the re-entry described above: `NCM_Bridge_Poll()` was called from
-both the EP4 IN ISR and the main loop with no guard, and `host_tx_feed()` arms
-the endpoint *before* it advances state:
+The suspect was the re-entry of `NCM_Bridge_Poll()` from the EP4 IN completion
+ISR. `host_tx_feed()` used to arm the endpoint *before* advancing state:
 
 ```c
 if (USBD_ENDPx_DataUp(ENDP4, &s_host_ntb_tx[s_host_ntb_tx_off], chunk) != USB_SUCCESS)
@@ -273,17 +272,67 @@ if (USBD_ENDPx_DataUp(ENDP4, &s_host_ntb_tx[s_host_ntb_tx_off], chunk) != USB_SU
 s_host_ntb_tx_off = ...;   /* state updated after the transfer is armed */
 ```
 
-If the completion ISR lands in that window the ISR sees the old offset and arms a
-chunk that was already sent. A repeat in the middle of an NTB shifts every
-following byte; a repeat at a boundary can put a whole NTB on the wire twice,
-which the host NCM driver delivers as a second copy of the same frame.
+The window between those two statements is as wide as the PMA copy, because
+`USBD_ENDPx_DataUp()` only sets `USBD_Endp4_Busy` **after** `USB_SIL_Write()`
+returns (`usb_endp.c`, the `ENDP4` branch). A second entry in that window finds
+the endpoint not busy and the old offset, so it queues the chunk that is already
+in the buffer. A repeat in the middle of an NTB shifts every following byte; a
+repeat at a boundary puts a whole NTB on the wire twice, which the host NCM
+driver delivers as a second copy of the same frame.
 
-The guard is now in place, but the symptom has **not been reproduced since**, so
-the guard is unproven as a cure: 50 probes at 5/s during a full target→host
-saturation gave 0 duplicates, and no run in this session produced any. Treat the
-guard as removing a real code hazard, not as a validated fix for a reproducible
-bug. If duplicates reappear, the counter to watch is `zlp_sent` versus
-`tx_sent` in the `0x33/0x10` frame.
+### The overlap is not hypothetical
+
+A new counter, `poll_skipped`, is incremented every time the guard refuses a
+re-entry. On the bench, four consecutive 8 MiB target→host transfers produced:
+
+| Counter | After run 1 | After run 5 | Delta over 4 runs |
+|---|---|---|---|
+| `poll_skipped` | 5 789 | 22 814 | 17 025 (≈ 4 250 per 14 s run) |
+| `dup_blocks` | 0 | 0 | 0 |
+| `t2h` frames | 6 639 | 24 611 | 17 972 |
+
+So the EP4 completion lands inside a running poll body roughly **300 times a
+second** under load. Every one of those is an occasion on which the old code
+would have re-armed the chunk in flight. This is the strongest statement the
+bench can make about the historical duplicates: the overlapping context was not
+rare, it was the normal case.
+
+### What actually closes it
+
+Two independent changes, either of which is sufficient:
+
+1. **The re-entry guard is claimed atomically.** `s_poll_busy` was tested and
+   set with a plain load followed by a plain store, which the EP4 ISR can split:
+   the ISR then also reads 0, runs the whole body, and the interrupted caller
+   resumes and runs it again. Interrupts are now masked across the test-and-set
+   only (`ncm_irq_save()` / `ncm_irq_restore()`), not across the body.
+2. **The offset advances before the arm and is rolled back on refusal.** A
+   second entry can no longer see the byte range it just queued, so correctness
+   no longer depends on the guard.
+
+The second change is also what makes `dup_blocks` meaningful: it counts attempts
+to arm an offset that is already in flight for the same NTB instance, and stays
+0 when the ordering holds. It is a tripwire for a regression, not a repair.
+
+### Verdict, and what it is not
+
+Four 8 MiB target→host transfers with 150 ICMP probes each in the same window:
+**0 duplicate replies**, 0.0–1.3% loss, 0.55 MiB/s — identical throughput to the
+build before the change, so the hardening costs nothing. `dup_blocks` stayed 0
+throughout.
+
+Treat the duplicate issue as **closed for the EP4 path**. Do not read this as
+"the 361 duplicates were explained": the guard landed before the counters
+existed, so nobody ever watched `dup_blocks` on a build that could still
+duplicate. What is established is that the suspect window was live and frequent,
+and that it is now impossible by construction rather than by luck.
+
+If duplicates reappear, the counters to read are, in this order: `dup_blocks`
+(non-zero means the ordering was broken again), then `silence_wd` — the
+target-facing RX re-arm in `target_ep_resync()` resets the expected data toggle
+to DATA0, and a peer that is one toggle ahead will then be mis-read for at most
+one packet. That path can corrupt an NTB, and a corrupted NTB is a candidate for
+a *shifted* duplicate that `dup_blocks` would never see.
 
 
 ## What was tried, and what it did
@@ -293,6 +342,8 @@ bug. If duplicates reappear, the counter to watch is `zlp_sent` versus
 | Call `NCM_Bridge_Poll()` **before** `TMOS_SystemProcess()` | take the BLE residency out of the bridge's iteration budget | no measurable change; kept (it removes a dependency that should not exist) |
 | Bound the tunnel pump to `BLE_ETH_TX_CHUNKS_PER_PASS` = 4, re-arm with `tmos_start_task(..., 1)` | cap `TMOS_SystemProcess()` residency instead of letting it run to buffer exhaustion | not exercised by these tests (the pump only runs with an active BLE link and tunnel traffic); kept as a latency bound |
 | Re-entry guard (`s_poll_busy`) in `NCM_Bridge_Poll()` | close the duplicate-NTB window and make ISR use safe | duplicates not reproduced either way; no throughput cost (0.55 MiB/s target→host before and after) |
+| Claim the guard atomically (`ncm_irq_save()` around the test-and-set) | a plain load/store pair can be split by the EP4 ISR, which then runs the body too | no measurable cost; `poll_skipped` now counts the refusals (≈4 250 per 8 MiB run) |
+| Advance `s_host_ntb_tx_off` **before** arming EP4, roll back on refusal | make a duplicate arm impossible even if the guard is ever broken again | `dup_blocks` stayed 0 across 4 runs; wire showed 0 duplicate replies |
 | *Rejected:* call `NCM_Bridge_Poll()` from the EP7 IN completion (mirroring EP4) | give the target-facing TX the same interrupt assist as the host-facing one | **made it worse** — 76.4% loss, RTT 10–21 ms, same 0.56 MiB/s. It put the whole poll body, including the host-side path and the two polls, into an ISR that fires every 64-byte chunk. Reverted. |
 | *Not tried:* `NCM_BRIDGE_QUEUE_DEPTH` 2 → 4 | the only change that can actually reduce same-direction loss | costs **+3028 B RAM** (89.17% → ~93.8%) on the current images |
 
@@ -316,7 +367,15 @@ budget. Everything else in the table either removes a hazard or changes nothing.
    is 15 points wide, wide enough to make a two-run comparison lie.
 
 The `0x33/0x10` diagnostics frame exposes `host_frames`, `hq_overflow`,
-`poll_calls`, `tx_sent` and `zlp_sent` (58-byte reply payload), which is enough to
-separate "arrived at the bridge" from "dropped on the way out". The
-target-facing queue's own overflow counter is *not* exported — that is the one
-gap worth closing if this is investigated further.
+`poll_calls`, `tx_sent` and `zlp_sent` (58-byte reply payload — full, nothing
+else fits), which is enough to separate "arrived at the bridge" from "dropped on
+the way out". The target-facing queue's overflow counter, the re-entry skips and
+the duplicate re-arms are exported by `0x33/0x13` instead, at payload bytes
+21–26 (see `GetBridgeDiagnostics()` for the layout).
+
+Reading `0x13` over BLE has two traps worth knowing before blaming the firmware
+for silence: the response can take longer than 1.5 s while the BLE-Eth pump is
+busy, and a reconnect often lands on the stale duplicate `CBPeripheral` that
+negotiates **MTU 60** and then delivers no notification at all. Retry until the
+log shows MTU 247 (see `ble-eth-ssh-usage.md` §Common Failures); a 27-byte
+payload does not survive the MTU-60 identity.

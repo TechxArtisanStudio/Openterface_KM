@@ -299,7 +299,7 @@ channel (`0x33`, sub-command `0x10` for the host side, `0x13` for the bridge).
 | 20..27 | device IP, host IP |
 | 28..55 | u16 counters: `ep3_rx_pkts`, `ntb_sig_ok`, `ntb_sig_bad`, `ntb_parsed`, `host_frames`, `arp_req`, `arp_match`, `arp_reply`, `icmp_echo`, `dhcp_offer`, `tx_sent`, `zlp_sent`, `rx_oflow`, `poll_calls` |
 
-`0x33/0x13`, 20 bytes:
+`0x33/0x13`, 27 bytes:
 
 | Offset | Field |
 |---|---|
@@ -316,10 +316,24 @@ channel (`0x33`, sub-command `0x10` for the host side, `0x13` for the bridge).
 | 16..17 | raw EP5 OUT interrupts (toggle-desync detector) |
 | 18 | silence-watchdog recoveries |
 | 19 | reserved |
+| 20..21 | target TX queue overflow (low 16 bits of the u32 counter) |
+| 22..23 | `poll_skipped` — poll re-entries refused by the guard |
+| 24..25 | duplicate re-arms refused (`dup_blocks`) |
 
 Reading `g_portal_hijacked` is the quickest way to tell "the greeting is
 working" (it increments in bursts of ≤ 4 per peer) from "the peer is being
 hijacked forever" (it climbs monotonically).
+
+`poll_skipped` is the load indicator that matters for the duplicate-frame
+question: it counts the times the EP4 IN completion landed inside a running
+`NCM_Bridge_Poll()` body. It rises by ~4 250 per 8 MiB target→host transfer
+(≈300/s), which is why that path needed a guard at all. `dup_blocks` counts
+chunks that would have been armed twice; it must stay 0 — a non-zero value means
+`host_tx_feed()` has been reordered back to arm-before-advance.
+
+Over BLE the `0x13` reply needs a connection that negotiated MTU 247; a
+reconnect that lands on the stale duplicate identity reports MTU 60 and returns
+nothing at all. It can also take longer than a second under load.
 
 ---
 

@@ -133,6 +133,7 @@ typedef struct {
     volatile uint16_t zlp_sent;      /* terminating ZLPs sent               */
     volatile uint16_t rx_oflow;      /* packets dropped (oversize)          */
     volatile uint16_t poll_calls;    /* NCM_Bridge_Poll invocations (hi 8)  */
+    volatile uint16_t poll_skipped;  /* re-entry attempts refused by guard  */
 } NCM_HostDiag_t;
 
 static NCM_HostDiag_t g_host_diag;
@@ -1712,7 +1713,18 @@ static uint8_t s_host_ntb_tx[NCM_NTB_MAX_SIZE];
 static uint16_t s_host_ntb_tx_len;   /* current host NTB length, 0 = idle */
 static uint16_t s_host_ntb_tx_off;   /* bytes already handed to the PMA */
 static uint8_t  s_host_ntb_zlp_pending;
-static uint8_t  s_host_rx_buf[NCM_NTB_MAX_SIZE];
+/* Offset of the chunk currently handed to EP4, plus the NTB instance it
+ * belongs to, so a second arm of the same byte range is detected instead of
+ * silently putting it on the wire twice.  Written only from the two contexts
+ * that run the poll body (main loop and the EP4 completion ISR); the
+ * poll-entry guard serialises those, so no extra locking is needed here. */
+static uint16_t s_host_armed_off;      /* offset of the chunk in flight */
+static uint16_t s_host_armed_inst;     /* NTB instance that chunk belongs to */
+static uint8_t  s_host_armed_valid;    /* 1 when the two fields above are set */
+static uint8_t  s_host_armed_is_zlp;   /* in-flight chunk is a terminating ZLP */
+static uint16_t s_host_ntb_inst;       /* bumped every time an NTB is built */
+static volatile uint16_t g_host_feed_dup_blocks;  /* same-offset re-arms refused */
+static uint8_t s_host_rx_buf[NCM_NTB_MAX_SIZE];
 static uint16_t s_host_rx_len;
 static uint16_t s_host_rx_need;
 
@@ -1729,6 +1741,10 @@ void NCM_Bridge_Init(void)
     s_host_ntb_tx_len = 0;
     s_host_ntb_tx_off = 0;
     s_host_ntb_zlp_pending = 0;
+    s_host_armed_valid = 0;
+    s_host_armed_is_zlp = 0;
+    s_host_ntb_inst++;
+    g_host_feed_dup_blocks = 0;
     s_host_rx_len = 0;
     s_host_rx_need = 0;
 
@@ -1775,6 +1791,11 @@ void NCM_Bridge_HostLinkReset(void)
     s_host_ntb_tx_len = 0;
     s_host_ntb_tx_off = 0;
     s_host_ntb_zlp_pending = 0;
+    /* The cancelled transfer never completed, so drop the in-flight record
+     * too: otherwise a re-arm of the same offset in the same instance would
+     * be refused as a duplicate. */
+    s_host_armed_valid = 0;
+    s_host_ntb_inst++;
     /* Replay DOWN -> UP -> SPEED -> BEACON via poll_host_notification(). */
     g_host_notify_state = NCM_NOTIFY_DOWN;
     g_host_notify_hold_until_ms = systick_ms + 50;
@@ -1889,6 +1910,11 @@ uint16_t NCM_Bridge_GetHostDiagnostics(uint8_t *out, uint16_t max_len)
  *  [17..18] raw EP5 OUT interrupt count (u16, wraps; counts toggle-mismatch too)
  *  [19]     silence-watchdog recovery count
  *  [20]     reserved
+ *  [21..22] target TX queue overflow (u16, low bits of the u32 counter)
+ *  [23..24] poll re-entry skips (u16): guard refusals, i.e. how often the
+ *           EP4 completion landed inside a running poll body
+ *  [25..26] duplicate re-arms refused (u16): chunks that would have gone on
+ *           the wire twice
  */
 uint16_t NCM_Bridge_GetBridgeDiagnostics(uint8_t *out, uint16_t max_len)
 {
@@ -1916,6 +1942,9 @@ uint16_t NCM_Bridge_GetBridgeDiagnostics(uint8_t *out, uint16_t max_len)
     BD_PUT16(g_usbfs_ep5_in_count);       /* raw EP5 OUT interrupts (detect toggle desync) */
     BD_PUT8(g_target_wd_silence_fires);   /* silence-watchdog recovery count */
     BD_PUT8(0x00u);                       /* reserved */
+    BD_PUT16((uint16_t)g_target_tx_queue.overflow);
+    BD_PUT16(g_host_diag.poll_skipped);
+    BD_PUT16(g_host_feed_dup_blocks);
 
 #undef BD_PUT8
 #undef BD_PUT16
@@ -1925,9 +1954,21 @@ uint16_t NCM_Bridge_GetBridgeDiagnostics(uint8_t *out, uint16_t max_len)
 
 /* One bulk packet per CTR: feed the next 64-byte chunk of the pending NTB
  * into the EP4 IN PMA buffer.  An NTB whose length is an exact multiple of
- * the packet size is terminated with a ZLP. */
+ * the packet size is terminated with a ZLP.
+ *
+ * The offset is advanced *before* the endpoint is armed and rolled back if the
+ * controller refuses, so the byte range in flight is never still "next" for a
+ * caller that arrives afterwards.  Arming first and advancing after (the
+ * original order) leaves a window as wide as the PMA copy -- USBD_ENDPx_DataUp
+ * only sets USBD_Endp4_Busy after USB_SIL_Write() returns -- in which a second
+ * entry sees the old offset, is not blocked by the busy flag, and re-queues the
+ * chunk that is already in the buffer.  The host NCM driver then delivers that
+ * Ethernet frame twice. */
 static void host_tx_feed(void)
 {
+    extern uint8_t USBD_ENDPx_DataUp(uint8_t endp, uint8_t *pbuf, uint16_t len);
+    uint16_t off;
+
     if (USBD_Endp4_Busy || s_host_ntb_tx_len == 0) {
         return;
     }
@@ -1936,31 +1977,51 @@ static void host_tx_feed(void)
         uint16_t remain = (uint16_t)(s_host_ntb_tx_len - s_host_ntb_tx_off);
         uint16_t chunk = (remain > NCM_BRIDGE_HOST_PACKET_SIZE)
                              ? NCM_BRIDGE_HOST_PACKET_SIZE : remain;
-        extern uint8_t USBD_ENDPx_DataUp(uint8_t endp, uint8_t *pbuf, uint16_t len);
-        if (USBD_ENDPx_DataUp(ENDP4, &s_host_ntb_tx[s_host_ntb_tx_off], chunk) != USB_SUCCESS) {
+
+        off = s_host_ntb_tx_off;
+
+        if (s_host_armed_valid && !s_host_armed_is_zlp &&
+            s_host_armed_inst == s_host_ntb_inst && s_host_armed_off == off) {
+            g_host_feed_dup_blocks++;
             return;
         }
-        s_host_ntb_tx_off = (uint16_t)(s_host_ntb_tx_off + chunk);
-        if (s_host_ntb_tx_off >= s_host_ntb_tx_len &&
-            (s_host_ntb_tx_len % NCM_BRIDGE_HOST_PACKET_SIZE) == 0) {
-            s_host_ntb_zlp_pending = 1;
+
+        s_host_ntb_tx_off = (uint16_t)(off + chunk);
+        s_host_ntb_zlp_pending = (s_host_ntb_tx_off >= s_host_ntb_tx_len &&
+                                  (s_host_ntb_tx_len % NCM_BRIDGE_HOST_PACKET_SIZE) == 0);
+
+        if (USBD_ENDPx_DataUp(ENDP4, &s_host_ntb_tx[off], chunk) != USB_SUCCESS) {
+            s_host_ntb_tx_off = off;
+            s_host_ntb_zlp_pending = 0;
+            return;
         }
+
+        s_host_armed_off = off;
+        s_host_armed_inst = s_host_ntb_inst;
+        s_host_armed_is_zlp = 0;
+        s_host_armed_valid = 1;
         return;
     }
 
     /* Whole NTB handed off: send a terminating ZLP when the length is an
      * exact multiple of the packet size, otherwise the transfer is done. */
     if (s_host_ntb_zlp_pending) {
-        extern uint8_t USBD_ENDPx_DataUp(uint8_t endp, uint8_t *pbuf, uint16_t len);
-        if (USBD_ENDPx_DataUp(ENDP4, s_host_ntb_tx, 0) == USB_SUCCESS) {
-            s_host_ntb_zlp_pending = 0;
-            s_host_ntb_tx_len = 0;
-            g_host_diag.zlp_sent++;
-            g_host_diag.tx_sent++;
+        s_host_ntb_zlp_pending = 0;
+        if (USBD_ENDPx_DataUp(ENDP4, s_host_ntb_tx, 0) != USB_SUCCESS) {
+            s_host_ntb_zlp_pending = 1;
+            return;
         }
+        s_host_armed_off = 0;
+        s_host_armed_inst = s_host_ntb_inst;
+        s_host_armed_is_zlp = 1;
+        s_host_armed_valid = 1;
+        s_host_ntb_tx_len = 0;
+        g_host_diag.zlp_sent++;
+        g_host_diag.tx_sent++;
     } else {
         /* Non-multiple length: the last chunk already ended the transfer. */
         s_host_ntb_tx_len = 0;
+        s_host_armed_valid = 0;
         g_host_diag.tx_sent++;
     }
 }
@@ -2145,6 +2206,8 @@ static void ncm_bridge_poll_body(void)
             if (ntb_len > 0) {
                 s_host_ntb_tx_len = ntb_len;
                 s_host_ntb_tx_off = 0;
+                s_host_ntb_inst++;        /* new instance: dup check re-bases */
+                s_host_armed_valid = 0;
                 popped = 1;
             }
         } else {
@@ -2227,19 +2290,31 @@ void NCM_Bridge_Poll(void)
     /* Two contexts call this: the main loop, and the EP4 IN completion ISR
      * (`usb_endp.c`), which needs the next NTB chunk queued as soon as the
      * previous one leaves. Running the body at the same time as the main loop
-     * is not merely wasteful -- `host_tx_feed()` hands the chunk to the
-     * controller and only then advances `s_host_ntb_tx_off`, so an ISR landing
-     * in that window re-sends the chunk it just queued, which the host sees as
-     * a duplicated Ethernet frame. The flag is set and cleared from both
-     * contexts, but the loser only ever skips work that the winner is already
-     * doing, so nothing is lost. */
+     * is not merely wasteful -- `host_tx_feed()` arms the controller, and an
+     * ISR landing inside that call would see the not-yet-advanced offset and
+     * queue the same chunk twice, which the host sees as a duplicated
+     * Ethernet frame. The loser only ever skips work the winner is doing:
+     * a completion it observes is serviced by the next main-loop pass, which
+     * is why the skip counter being non-zero is not itself a fault.
+     *
+     * The test-and-set has to be atomic. A plain read followed by a write is
+     * two instructions, and the EP4 ISR can fire between them: the ISR then
+     * also reads 0, runs the whole body, and the interrupted caller resumes
+     * and runs it again -- the guard would admit both. Interrupts are masked
+     * only for the two instructions that claim the flag, not for the body. */
     static volatile uint8_t s_poll_busy = 0;
+    uint32_t csr = ncm_irq_save();
 
     if (s_poll_busy) {
+        ncm_irq_restore(csr);
+        g_host_diag.poll_skipped++;
         return;
     }
     s_poll_busy = 1;
+    ncm_irq_restore(csr);
+
     ncm_bridge_poll_body();
+
     s_poll_busy = 0;
 }
 

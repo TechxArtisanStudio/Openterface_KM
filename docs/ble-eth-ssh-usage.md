@@ -341,10 +341,14 @@ that would is a deeper queue, which costs 3028 B of RAM per direction (89% -> 94
 on the current images).
 
 Duplicate replies were reported once in earlier runs (up to 361 in one run, +85
-in another) and have not reproduced since a re-entry guard was added to
-`NCM_Bridge_Poll()`; 50 probes at 5/s during full target -> host saturation gave
-0 duplicates. Treat that as an open item with a plausible fix rather than a
-closed one.
+in another). The re-entry guard in `NCM_Bridge_Poll()` now closes that window
+structurally — the offset advances before EP4 is armed, so the same chunk cannot
+be queued twice — and four 8 MiB target -> host runs with 150 probes each
+produced 0 duplicates. The overlap the guard protects against is not rare: the
+`poll_skipped` counter in the `0x33/0x13` frame rises by ~4 250 per run, i.e. the
+EP4 completion lands inside a poll body roughly 300 times a second under load.
+See [ncm-tmos-scheduling.md](ncm-tmos-scheduling.md) §Duplicate replies for what
+is established and what is not.
 
 One observation that has not been reproduced: after a long target -> host 8 MiB
 run followed by an echo test, host -> target fell to 0.07–0.09 MiB/s and stayed
