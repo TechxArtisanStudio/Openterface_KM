@@ -461,11 +461,24 @@ was broken — it was this false positive, three times. That byte now reports
 
 ## The CI artifact drops far more small frames than a local build
 
-Same source, same flags (`-Os -flto=full -fuse-linker-plugin -ffat-lto-objects`),
-different compiler: the CI runner uses GCC 8.2.0 (MounRiver), the bench build
-here uses GCC 15.2.0 (xpack). Under a saturated target→host transfer the two
-behave very differently, and this was found only by flashing the CI artifact
-and running the same script against it.
+Same source, *nearly* the same flags, different compiler: the CI runner uses
+GCC 8.2.0 (MounRiver), the bench build here uses GCC 15.2.0 (xpack). Under a
+saturated target→host transfer the two behave very differently, and this was
+found only by flashing the CI artifact and running the same script against it.
+
+"Nearly" matters, and an earlier version of this section wrongly said the flags
+were identical. The bench toolchain is reached through a wrapper
+(`~/tools/wch-wrappers/riscv-none-embed-gcc`) that rewrites two arguments
+because upstream GCC cannot accept them:
+
+| makefile says | bench build actually compiles |
+|---|---|
+| `-march=rv32imacxw` | `-march=rv32imac_zicsr` |
+| `-flto=full` | `-flto=auto` |
+
+So this is a three-way difference — compiler version, ISA string, and LTO
+partitioning (`auto` partitions the program and inlines only within a
+partition) — not a clean one-variable experiment.
 
 Test: 8 MiB TCP target→host, 100 ICMP probes at 10/s from the Host to the
 target address, 0 duplicate replies in every run.
@@ -490,12 +503,54 @@ target→host saturation" figure earlier in this document describes a locally
 built binary, not the one users flash. If you are re-measuring loss, record
 which compiler produced the image.
 
-The cause is not identified. Both builds run the same poll loop and the same
-2-frame queue, and the drain sits within a few percent of the arrival rate
-(§Slack arithmetic), which makes the drop rate sensitive to per-frame timing —
-but a 400× difference is more than "a few microseconds". Next step if this
-matters: disassemble `NCM_Bridge_Poll()`/`host_tx_feed()` from both ELFs and
-compare the hot path, or bisect by building locally with GCC 8.2.
+The cause is narrow. CI now uploads the ELF and MAP alongside hex/bin
+(`build.yml`), so the two images can be disassembled and compared instead of
+guessed at. Doing that rules out the obvious suspects:
+
+| Check (from the two ELFs) | local, GCC 15.2 | CI, GCC 8.2 + LTO |
+|---|---|---|
+| symbols / text total | 1 291 / 223 239 B | 1 311 / 224 422 B (+1 183 B) |
+| `NCM_Bridge_Poll()` size | 1 886 B, 31 calls | 1 950 B, 31 calls, same order |
+| `host_tx_feed()` | 314 B | 314 B |
+| call sites of `host_tx_feed()` | 1, in `NCM_Bridge_Poll()` | 1, in `NCM_Bridge_Poll()` |
+| callers of `NCM_Bridge_Poll()` | 1, `Main_Circulation()` | 1, `Main_Circulation()` |
+| `ncm_irq_save()` / `txq_lock()` | `csrr`/`csrc 0x800,0x88`, 5 ins | byte-identical, 5 ins |
+
+So there is no logic, queue-policy or critical-section difference to blame: the
+drain is still armed one 64-byte chunk per poll iteration from the single call
+site, and the interrupt guard is the same five instructions in both. What did
+change is per-iteration cost. Every hot function grew — `Main_Circulation()`
++352 B, `handle_target_frame()` +218 B, `handle_host_frame()` +182 B,
+`USBFS_IRQHandler()` +116 B, `NCM_Bridge_Poll()` +64 B (`dispatch_frame()`
+shrank 212 B) — and the library helpers changed character entirely: `memcpy`
+is a 22-byte byte loop locally versus a 178-byte word-copy in CI, `memset`
+16 B versus 168 B. That is the `-march` rewrite above: without the `xw`
+extension the newer newlib gives up on wider accesses and falls back to
+byte-wise copies.
+
+That is consistent with the slack arithmetic, and it is as far as the
+disassembly can take the argument: the target→host path has no build-specific
+branch, so a 400× drop-rate difference has to be read as a stability boundary
+being crossed, not as a bug that one build has and the other does not. The
+2-deep queue is drained at roughly the frame arrival rate, so a few percent
+more work per poll iteration is enough to flip a run from "keeps up" to "full
+queue, drop whole frames", and once it flips the drops are self-sustaining.
+
+Practical consequence: do not tune this by chasing the compiler. Buy margin
+instead, in a way that holds for either build — deepen
+`NCM_BRIDGE_QUEUE_DEPTH` to 3, or drain more than one chunk per poll
+iteration. If the mechanism still needs proving, the clean experiment is to
+build locally with GCC 8.2.1 (xpack publishes the same tarball CI downloads)
+and diff its ELF against the CI one; identical `.text` would confirm the
+toolchain alone is responsible.
+
+To reproduce the comparison:
+
+```sh
+gh run download <run-id> -n openterface-km-firmware-kvmgo-mode8 -D /tmp/ci8
+riscv-none-elf-nm -S --defined-only build/openterface-km-firmware.elf
+riscv-none-elf-objdump -d --disassemble=NCM_Bridge_Poll /tmp/ci8/*.elf
+```
 
 ## How to verify
 
