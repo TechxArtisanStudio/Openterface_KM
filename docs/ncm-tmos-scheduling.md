@@ -607,7 +607,12 @@ Two caveats worth keeping in mind:
   win. Only frames ≤ 128 B are affected.
 - Only the target→host queue reserves a slot, because that is the direction
   that saturates in this bench. The reverse path has the same shape under a
-  downstream transfer and would need another 1516 bytes.
+  downstream transfer: uploading 8 MiB to the target (sink `more`/PowerShell
+  over `ssh`, ~0.09 MiB/s — this direction is ~6× slower than the other one)
+  lost 18–26 % of ICMP probes, and `tq_overflow` rose by 618 while
+  `small_used` did not move at all, which places the drops in the target TX
+  queue. A second slot would fix it and cost another 1516 bytes; it is not
+  added until that direction matters as much as reads do.
 
 RAM: bss ends at 0x2000E478, stack starts at 0x2000F800, so the malloc arena
 goes from 6 536 to 5 000 bytes.
