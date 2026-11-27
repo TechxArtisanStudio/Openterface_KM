@@ -256,11 +256,11 @@ typedef struct {
  * Global State Variables
  ******************************************************************************/
 static NCM_FrameQueue_t g_host_tx_queue;
-/* Reserved slot for the target->host path, the one that saturates: the large
- * transfer runs upstream, so ICMP replies and ARP answers coming back from the
- * target are what get dropped.  The reverse path has the same shape under a
- * downstream transfer, but it is not worth another 1514 bytes of RAM until
- * that is measured. */
+/* One reserved slot per direction.  Whichever direction carries the bulk
+ * transfer saturates its 2-frame ring, so the small frames travelling against
+ * it -- ICMP replies, ARP, bare ACKs -- are what get dropped.  Each slot
+ * costs 1516 bytes and only ever holds a frame that would otherwise be
+ * thrown away, so ordering is untouched until the ring is actually full. */
 static NCM_Frame_t g_host_tx_small;
 static NCM_RxFrame_t g_host_rx_frame;
 static uint16_t g_host_tx_offset;
@@ -272,6 +272,7 @@ static uint32_t g_host_notify_hold_until_ms;
 
 /* Target-side NCM state (forward declarations for use in NCM_Bridge_Poll) */
 static NCM_FrameQueue_t g_target_tx_queue;
+static NCM_Frame_t g_target_tx_small;
 
 /* USBFS TX: NTB is built here and copied into the EP7 buffer by
  * USBFS_Endp_DataUp(); the controller may transfer after NCM_Bridge_Poll
@@ -2051,7 +2052,7 @@ uint16_t NCM_Bridge_GetHostDiagnostics(uint8_t *out, uint16_t max_len)
  * watchdog state away from its code. */
 static uint32_t s_wd_silence_ms;
 
-/* Compact target-RX diagnostics (38 bytes, fits the 58B response limit).
+/* Compact target-RX diagnostics (39 bytes, fits the 58B response limit).
  * Layout (v3):
  *  [0]      version (0x01)
  *  [1]      s_bridge_enabled
@@ -2128,6 +2129,11 @@ uint16_t NCM_Bridge_GetBridgeDiagnostics(uint8_t *out, uint16_t max_len)
     BD_PUT8(s_target_seen_ip[1]);
     BD_PUT8(s_target_seen_ip[2]);
     BD_PUT8(s_target_seen_ip[3]);
+    /* Same counter for the host->target direction (byte 19 is the target->host
+     * one).  Appended rather than folded into an existing field so readers of
+     * the first 38 bytes keep working. */
+    BD_PUT8((g_target_tx_queue.small_used > 0xFFu)
+                ? 0xFFu : (uint8_t)g_target_tx_queue.small_used);
 
 #undef BD_PUT8
 #undef BD_PUT16
@@ -2574,7 +2580,8 @@ static void ncm_bridge_poll_body(void)
     }
 
     if (s_target_ntb_tx_len == 0 && g_target_tx_queue.count > 0) {
-        NCM_Frame_t *frame = &g_target_tx_queue.frames[g_target_tx_queue.rd];
+        uint8_t from_small = 0;
+        NCM_Frame_t *frame = queue_peek(&g_target_tx_queue, &from_small);
         if (frame->len > 0) {
             const uint8_t *frame_ptrs[1] = { frame->data };
             uint16_t frame_lens[1] = { frame->len };
@@ -2584,11 +2591,11 @@ static void ncm_bridge_poll_body(void)
             if (ntb_len > 0) {
                 s_target_ntb_tx_len = ntb_len;
                 s_target_ntb_tx_off = 0;
-                uint32_t csr = ncm_irq_save();
-                g_target_tx_queue.count--;
-                g_target_tx_queue.rd = (g_target_tx_queue.rd + 1) % NCM_BRIDGE_QUEUE_DEPTH;
-                ncm_irq_restore(csr);
+                queue_release(&g_target_tx_queue, from_small);
             }
+        } else {
+            /* Zero-length frame: nothing to send, just drop it. */
+            queue_release(&g_target_tx_queue, from_small);
         }
     }
 
@@ -3464,6 +3471,7 @@ void NCM_Bridge_InitTarget(void)
 {
     USB_DEBUG("NCM: InitTarget called\r\n");
     memset(&g_target_tx_queue, 0, sizeof(g_target_tx_queue));
+    g_target_tx_queue.small = &g_target_tx_small;
     s_target_ntb_seq = 0;
     s_target_zlp_pending = 0;
     s_target_ntb_tx_len = 0;
