@@ -459,6 +459,44 @@ was broken — it was this false positive, three times. That byte now reports
 `probe_interval` instead, because the path it counted no longer resets.
 
 
+## The CI artifact drops far more small frames than a local build
+
+Same source, same flags (`-Os -flto=full -fuse-linker-plugin -ffat-lto-objects`),
+different compiler: the CI runner uses GCC 8.2.0 (MounRiver), the bench build
+here uses GCC 15.2.0 (xpack). Under a saturated target→host transfer the two
+behave very differently, and this was found only by flashing the CI artifact
+and running the same script against it.
+
+Test: 8 MiB TCP target→host, 100 ICMP probes at 10/s from the Host to the
+target address, 0 duplicate replies in every run.
+
+| Build | `ping` loss (7 / 6 runs) | `g_host_tx_queue.overflow` Δ per run | throughput |
+|---|---|---|---|
+| local, GCC 15.2 | 0, 0, 0, 0, 1, 1 % | +4 | 0.55 MiB/s |
+| CI, GCC 8.2 + LTO | 71, 74, 76, 76, 77, 79, 81 % | +1 585 | 0.53–0.54 MiB/s |
+
+Where the loss happens, measured rather than assumed: the target's own ICMP
+counters moved by exactly +100 received and +100 replies sent in a run where the
+Host received 29. So the requests crossed the link, the target answered every
+one, and the replies — 98-byte frames — were dropped inside the device on the
+way out. The `hq_overflow` delta above says where: the target→host queue is two
+frames deep and the transfer keeps it full, so a small frame arriving in a full
+queue is dropped whole.
+
+Throughput, retransmission behaviour, duplicates and link stability are
+unaffected; this is a loss-rate difference, not a correctness one. It matters
+because the shipped firmware *is* the CI artifact: the "0–1% ICMP loss under
+target→host saturation" figure earlier in this document describes a locally
+built binary, not the one users flash. If you are re-measuring loss, record
+which compiler produced the image.
+
+The cause is not identified. Both builds run the same poll loop and the same
+2-frame queue, and the drain sits within a few percent of the arrival rate
+(§Slack arithmetic), which makes the drop rate sensitive to per-frame timing —
+but a 400× difference is more than "a few microseconds". Next step if this
+matters: disassemble `NCM_Bridge_Poll()`/`host_tx_feed()` from both ELFs and
+compare the hot path, or bisect by building locally with GCC 8.2.
+
 ## How to verify
 
 1. Idle link, no load: `ping` both ways must stay at 0% loss, 1–2 ms (any loss
@@ -485,5 +523,5 @@ Reading `0x13` over BLE has two traps worth knowing before blaming the firmware
 for silence: the response can take longer than 1.5 s while the BLE-Eth pump is
 busy, and a reconnect often lands on the stale duplicate `CBPeripheral` that
 negotiates **MTU 60** and then delivers no notification at all. Retry until the
-log shows MTU 247 (see `ble-eth-ssh-usage.md` §Common Failures); a 32-byte
+log shows MTU 247 (see `ble-eth-ssh-usage.md` §Common Failures); the 38-byte
 payload does not survive the MTU-60 identity.

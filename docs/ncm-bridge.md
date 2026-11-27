@@ -384,6 +384,14 @@ question: it counts the times the EP4 IN completion landed inside a running
 chunks that would have been armed twice; it must stay 0 — a non-zero value means
 `host_tx_feed()` has been reordered back to arm-before-advance.
 
+Drop accounting lives in the *other* frame: `0x33/0x10` offsets 9..10 are
+`g_host_tx_queue.overflow`, which moves only when a frame was thrown away
+because both slots were busy. A run that loses ICMP replies without that counter
+moving lost them somewhere else; one where it moves by thousands lost them in
+the queue. The two builds in `ncm-tmos-scheduling.md` §"The CI artifact drops far
+more small frames than a local build" differ by exactly that counter (+4 vs
++1 585 per 8 MiB run), and that is how the drop was located instead of guessed.
+
 Over BLE the `0x13` reply needs a connection that negotiated MTU 247; a
 reconnect that lands on the stale duplicate identity reports MTU 60 and returns
 nothing at all. It can also take longer than a second under load.
