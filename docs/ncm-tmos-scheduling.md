@@ -328,14 +328,16 @@ duplicate. What is established is that the suspect window was live and frequent,
 and that it is now impossible by construction rather than by luck.
 
 If duplicates reappear, the counters to read are, in this order: `dup_blocks`
-(non-zero means the ordering was broken again), then `silence_wd` and
-`tog_bad` — the target-facing RX re-arm in `target_ep_resync()` resets the
-expected data toggle to DATA0, and a peer sitting on the opposite toggle has
-its next packet ACKed and discarded. That is a **hole**, not a duplicate: the
-reassembler only resyncs on the `NCMH` signature and `NCM_ParseNtb()` checks
-three of them (NTB, NDP, and the descriptor bounds), so a shifted stream is
-rejected rather than delivered. The worst case is one lost NTB — one Ethernet
-frame — and TCP retransmits it.
+(non-zero means the ordering was broken again), then `tog_bad` — the
+target-facing RX re-arm in `target_ep_resync()` (now only reached from the TX
+watchdog) resets the expected data toggle to DATA0, and a peer sitting on the
+opposite toggle has its next packet ACKed and discarded. That is a **hole**,
+not a duplicate: the reassembler only resyncs on the `NCMH` signature and
+`NCM_ParseNtb()` checks three of them (NTB, NDP, and the descriptor bounds), so
+a shifted stream is rejected rather than delivered. The worst case is one lost
+NTB — one Ethernet frame — and TCP retransmits it. `unproven` rising at the same
+time means the peer has gone quiet at every address we know, not that a frame
+was duplicated.
 
 
 ## What was tried, and what it did
@@ -396,14 +398,57 @@ bench:
 
 So an idle link now costs a 42-byte ARP request every ~10 s instead of a lost
 chunk plus a link bounce, and the "quiet but alive" case can no longer be
-mistaken for a fault. The one case the probe cannot cover is a target whose
-IPv4 address is not the configured `target_host_ip` (a manually changed
-address, say): the probe goes unanswered and behaviour falls back to the old
-bounce, one 1.5 s later.
+mistaken for a fault.
 
-Caveat on interpretation: `silence_wd` in earlier diagnostics (it read 3 in the
-session that produced the duplicate-frame work) is **not** evidence that the
-target pipe was broken. It was this false positive, three times.
+### The probed address is learned, not assumed
+
+`target_host_ip` is what the bridge *expects* the target to use, not what the
+target *does* use. A machine whose IPv4 was set by hand on the far side answers
+nothing for it, so the first version of this ladder went unanswered and then
+bounced a perfectly healthy link every 12 s.
+
+Two changes close that:
+
+- Every frame the target sends teaches the bridge the address it speaks from —
+  the ARP sender field or the IPv4 source, whichever the EtherType provides.
+  A peer cannot hide it, and it is read before any handler runs. DHCP DISCOVERs
+  (source `0.0.0.0`) are ignored, as is anything with a broadcast source.
+- An unanswered probe for `target_host_ip` is not a verdict. The ladder asks the
+  learned address next, and only then draws a conclusion. Measured with the
+  target moved to **192.168.20.77 by hand** while `target_host_ip` stayed `.2`:
+
+  | Counter | Δ over ~6 min at the "wrong" address |
+  |---|---|
+  | `seen_ip` | followed to 192.168.20.77 |
+  | `probes` | +8 over 58 s of idling, i.e. two per cycle: `.2` (unanswered) then `.77` (answered) |
+  | `unproven` | 0 — the second probe was always answered |
+  | `tog_bad` / `set_if5` | 0 / 2 — no toggle reset, no link bounce |
+  | `probe_interval` | stayed 10 s, so no back-off was entered |
+
+  The old code would have fired about five times over the same window, each fire
+  worth one `tog_bad`. It stayed at 0.
+
+### When nothing answers, the bridge stops escalating
+
+If neither address answers, "dead pipe" and "peer living at an address we have
+never seen" produce exactly the same evidence, and nothing here can tell them
+apart. So the watchdog no longer resets in that case: it counts `unproven` and
+doubles the silence interval (10 s → 20 → 40 → 80, capped at 120 s), returning
+to 10 s as soon as the peer sends anything at all.
+
+That is a deliberate trade. The reset was measured to cost a packet every time
+and has never been observed to fix anything — `set_if5` does not move, so the
+host does not even re-issue `SET_INTERFACE`, and the toggle reset is unilateral.
+The failure modes a reset could plausibly fix are signalled elsewhere: a host
+that stops reading leaves EP7 busy, which the TX watchdog owns, and a desynced
+toggle heals on the peer's very next packet, which also counts as an answer
+here. The price is that a pipe which is genuinely dead *and* silent needs a
+replug, because nothing on this side can distinguish it from an idle one.
+
+Caveat on interpretation: the old `silence_wd` byte (it read 3 in the session
+that produced the duplicate-frame work) is **not** evidence that the target pipe
+was broken — it was this false positive, three times. That byte now reports
+`probe_interval` instead, because the path it counted no longer resets.
 
 
 ## How to verify

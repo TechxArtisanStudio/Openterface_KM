@@ -1895,25 +1895,32 @@ uint16_t NCM_Bridge_GetHostDiagnostics(uint8_t *out, uint16_t max_len)
     return (i > max_len) ? max_len : i;
 }
 
-/* Compact target-RX diagnostics (20 bytes, fits the 58B response limit).
- * Layout (v2):
+/* Two pieces of state the frame below reports that are owned by the silence
+ * watchdog further down the file: declared here (tentatively) so the accessor
+ * can read them without moving the watchdog state away from its code. */
+static uint32_t s_wd_silence_ms;
+static uint8_t  s_target_seen_ip[4];
+
+/* Compact target-RX diagnostics (38 bytes, fits the 58B response limit).
+ * Layout (v3):
  *  [0]      version (0x01)
  *  [1]      s_bridge_enabled
- *  [2..3]   EP5 OUT status low (target RX endpoint)
- *  [4..5]   target RX in-flight len (u16)
- *  [6..7]   target RX expected NTB len (u16)
- *  [8..9]   frames delivered to handle_target_frame (u16)
- *  [10..11] discovery forwards (u16)
- *  [12..13] bridge target->host forwards (u16)
- *  [14]     target TX queue count
- *  [15..16] portal DNS hijack answers (u16)
- *  [17..18] raw EP5 OUT interrupt count (u16, wraps; counts toggle-mismatch too)
- *  [19]     silence-watchdog recovery count
- *  [20]     reserved
- *  [21..22] target TX queue overflow (u16, low bits of the u32 counter)
- *  [23..24] poll re-entry skips (u16): guard refusals, i.e. how often the
+ *  [2]      EP5 OUT status low (target RX endpoint)
+ *  [3..4]   target RX in-flight len (u16)
+ *  [5..6]   target RX expected NTB len (u16)
+ *  [7..8]   frames delivered to handle_target_frame (u16)
+ *  [9..10]  discovery forwards (u16)
+ *  [11..12] bridge target->host forwards (u16)
+ *  [13]     target TX queue count
+ *  [14..15] portal DNS hijack answers (u16)
+ *  [16..17] raw EP5 OUT interrupt count (u16, wraps; counts toggle-mismatch too)
+ *  [18]     current silence-probe interval in seconds (10..120): 120 means
+ *           probes keep going unanswered and the watchdog is backing off
+ *  [19]     reserved
+ *  [20..21] target TX queue overflow (u16, low bits of the u32 counter)
+ *  [22..23] poll re-entry skips (u16): guard refusals, i.e. how often the
  *           EP4 completion landed inside a running poll body
- *  [25..26] duplicate re-arms refused (u16): chunks that would have gone on
+ *  [24..25] duplicate re-arms refused (u16): chunks that would have gone on
  *           the wire twice
  *  [26..27] EP5 OUT packets ACKed with a wrong data toggle (u16): each one
  *           costs a 64-byte hole in the byte stream, i.e. the NTB it belonged
@@ -1921,8 +1928,11 @@ uint16_t NCM_Bridge_GetHostDiagnostics(uint8_t *out, uint16_t max_len)
  *  [28..29] SET_INTERFACE(IF5) count (u16, low bits): tells whether the host
  *           really re-issued the alt-setting after a link bounce
  *  [30..31] liveness probes sent (u16): ARP requests emitted because the link
- *           went quiet.  A healthy idle link increments this and leaves
- *           [19] alone.
+ *           went quiet.  A healthy idle link increments this and nothing else.
+ *  [32..33] probes that got no answer from any known address (u16).  Non-zero
+ *           means the peer is silent at both the configured and the last-seen
+ *           address; the watchdog backs off instead of resetting.
+ *  [34..37] last source IPv4 the peer was seen speaking from
  */
 uint16_t NCM_Bridge_GetBridgeDiagnostics(uint8_t *out, uint16_t max_len)
 {
@@ -1930,8 +1940,8 @@ uint16_t NCM_Bridge_GetBridgeDiagnostics(uint8_t *out, uint16_t max_len)
     extern volatile uint16_t g_usbfs_ep5_in_count;  /* raw EP5 OUT interrupts */
     extern volatile uint16_t g_usbfs_ep5_tog_bad_count;
     extern volatile uint32_t g_usbfs_set_interface_if5_count;
-    extern volatile uint8_t  g_target_wd_silence_fires;
     extern volatile uint16_t g_target_wd_probes;
+    extern volatile uint16_t g_target_wd_probe_unproven;
 
 #define BD_PUT8(v)  do { if (i < max_len) { out[i] = (uint8_t)(v); } i++; } while (0)
 #define BD_PUT16(v) do { if ((i + 1) < max_len) {                        \
@@ -1951,7 +1961,7 @@ uint16_t NCM_Bridge_GetBridgeDiagnostics(uint8_t *out, uint16_t max_len)
     BD_PUT8(g_target_tx_queue.count);
     BD_PUT16(g_portal_hijacked);          /* captive-portal DNS answers */
     BD_PUT16(g_usbfs_ep5_in_count);       /* raw EP5 OUT interrupts (detect toggle desync) */
-    BD_PUT8(g_target_wd_silence_fires);   /* silence-watchdog recovery count */
+    BD_PUT8((uint8_t)(s_wd_silence_ms / 1000u));  /* current probe interval, s */
     BD_PUT8(0x00u);                       /* reserved */
     BD_PUT16((uint16_t)g_target_tx_queue.overflow);
     BD_PUT16(g_host_diag.poll_skipped);
@@ -1959,6 +1969,11 @@ uint16_t NCM_Bridge_GetBridgeDiagnostics(uint8_t *out, uint16_t max_len)
     BD_PUT16(g_usbfs_ep5_tog_bad_count);
     BD_PUT16((uint16_t)g_usbfs_set_interface_if5_count);
     BD_PUT16(g_target_wd_probes);
+    BD_PUT16(g_target_wd_probe_unproven);
+    BD_PUT8(s_target_seen_ip[0]);
+    BD_PUT8(s_target_seen_ip[1]);
+    BD_PUT8(s_target_seen_ip[2]);
+    BD_PUT8(s_target_seen_ip[3]);
 
 #undef BD_PUT8
 #undef BD_PUT16
@@ -2116,32 +2131,92 @@ void NCM_Bridge_HostRxPacket(const uint8_t *data, uint16_t len)
  * the link if nothing at all comes back within NCM_TARGET_PROBE_MS.  Frames
  * the target owes us (replies, retransmits) also count, so the probe only
  * has to prove the wire, not the ARP cache.
+ *
+ * The configured address is not the only candidate.  It is what the bridge
+ * *expects* the target to use, not what the target *does* use: a machine
+ * whose IPv4 was set by hand on the far side answers nothing for
+ * ncm_target_host_ip, and the first version of this ladder then read "no
+ * answer" as "dead pipe" and bounced a perfectly healthy link every 12 s.
+ * So the source address of every frame the target sends is remembered
+ * (ARP sender, IPv4 source -- the peer cannot hide it), and a second probe
+ * asks that address before any conclusion is drawn.
+ *
+ * If neither address answers, the two candidate explanations -- dead pipe,
+ * or peer living at an address we have never seen -- cannot be told apart
+ * from here, so the watchdog stops escalating: it counts the unproven probe
+ * and doubles the silence interval up to NCM_TARGET_SILENCE_MAX_MS.  That
+ * is deliberate.  A reset that is not justified by evidence costs a packet
+ * and a link bounce (measured above) while fixing nothing; the failure modes
+ * a reset *can* fix are all signalled elsewhere -- a host that stops reading
+ * leaves EP7 busy, which the TX watchdog owns, and a toggle desync heals on
+ * the peer's very next packet, which also counts as an answer here.
  ******************************************************************************/
-#define NCM_TARGET_WATCHDOG_MS  3000u
-#define NCM_TARGET_SILENCE_MS   10000u
-#define NCM_TARGET_PROBE_MS     1500u   /* ARP answer deadline before a reset */
+#define NCM_TARGET_WATCHDOG_MS     3000u
+#define NCM_TARGET_SILENCE_MS      10000u
+#define NCM_TARGET_SILENCE_MAX_MS 120000u
+#define NCM_TARGET_PROBE_MS        1500u   /* ARP answer deadline per candidate */
 
 static volatile uint32_t g_target_last_rx_ms;
 static uint16_t s_wd_last_in_count;
 static uint32_t s_wd_last_in_change_ms;
 static uint16_t s_wd_last_ep5_count;
 static uint32_t s_wd_last_ep5_change_ms;
-static uint8_t  s_wd_probing;                /* probe queued, answer pending */
+static uint32_t s_wd_silence_ms = NCM_TARGET_SILENCE_MS;  /* adaptive */
+static uint8_t  s_wd_probe_stage;            /* 0 idle, 1 configured, 2 seen */
 static uint32_t s_wd_probe_ms;
 static uint16_t s_wd_probe_ep5;
-volatile uint8_t g_target_wd_silence_fires;  /* 0x13 diag [19] */
+static uint8_t  s_target_seen_ip[4];         /* last source IPv4 of the peer */
 volatile uint16_t g_target_wd_probes;        /* 0x13 diag [30..31] */
+volatile uint16_t g_target_wd_probe_unproven;/* 0x13 diag [32..33] */
 
-/* Ask the target to prove it is listening: broadcast ARP request for its own
- * configured address, sent from our target-side address so the reply is a
- * plain unicast our EP5 path has to deliver. */
-static void target_probe_peer(void)
+/* Remember the address the peer actually speaks from.  Called for every
+ * frame it sends, before any handler can consume it: DHCP DISCOVERs carry
+ * 0.0.0.0 and are skipped, and so is anything non-IPv4 (the point-to-point
+ * link has exactly one other host on it, and its source address is by
+ * definition the address to probe). */
+static void target_learn_peer_ip(const uint8_t *frame, uint16_t len,
+                                 uint16_t eth_type)
+{
+    const uint8_t *ip = NULL;
+
+    if (eth_type == 0x0806u) {
+        /* ARP: only the standard Ethernet/IPv4 layout carries the sender
+         * protocol address at a fixed offset. */
+        if (len >= 42u && frame[14] == 0x00u && frame[15] == 0x01u &&
+            frame[16] == 0x08u && frame[17] == 0x00u &&
+            frame[18] == 6u && frame[19] == 4u) {
+            ip = &frame[28];
+        }
+    } else if (eth_type == NCM_ETH_TYPE_IPV4) {
+        if (len >= 34u && (frame[14] >> 4) == 4u) {
+            ip = &frame[26];   /* IPv4 source, fixed even with options */
+        }
+    }
+
+    if (ip == NULL) {
+        return;
+    }
+    if ((ip[0] | ip[1] | ip[2] | ip[3]) == 0u) {
+        return;                    /* DHCP DISCOVER, address not bound yet */
+    }
+    if (ip[0] == 0xFFu) {
+        return;                    /* broadcast as source: not a host */
+    }
+    if (memcmp(ip, s_target_seen_ip, 4) == 0) {
+        return;
+    }
+    memcpy(s_target_seen_ip, ip, 4);
+}
+
+/* Ask the target to prove it is listening: broadcast ARP request for
+ * `dst_ip`, sent from our target-side address so the reply is a plain
+ * unicast our EP5 path has to deliver. */
+static uint8_t target_probe_peer(const uint8_t *dst_ip)
 {
     uint8_t req[42];
 
-    if ((ncm_target_host_ip[0] | ncm_target_host_ip[1] |
-         ncm_target_host_ip[2] | ncm_target_host_ip[3]) == 0) {
-        return;   /* no address configured: nothing to ask for */
+    if ((dst_ip[0] | dst_ip[1] | dst_ip[2] | dst_ip[3]) == 0) {
+        return 0;   /* no address: nothing to ask for */
     }
 
     memset(req, 0xFF, 6);                      /* dst = broadcast */
@@ -2154,11 +2229,13 @@ static void target_probe_peer(void)
     memcpy(&req[22], NCM_TARGET_DEV_MAC, 6);   /* sender MAC */
     memcpy(&req[28], ncm_target_dev_ip, 4);    /* sender IP */
     memset(&req[32], 0x00, 6);                 /* target MAC unknown */
-    memcpy(&req[38], ncm_target_host_ip, 4);   /* who has this */
+    memcpy(&req[38], dst_ip, 4);               /* who has this */
 
-    if (queue_push(&g_target_tx_queue, req, sizeof(req))) {
-        g_target_wd_probes++;
+    if (!queue_push(&g_target_tx_queue, req, sizeof(req))) {
+        return 0;
     }
+    g_target_wd_probes++;
+    return 1;
 }
 
 /* Replay the SET_INTERFACE(alt=1) endpoint configuration: reset expected
@@ -2219,25 +2296,38 @@ static void target_watchdog(void)
     /* Silence: no EP5 OUT interrupt at all while the whole target path is
      * idle (no partial reassembly, no NTB in flight, empty TX queue).
      * Silence on its own is not evidence of a fault -- the target is allowed
-     * to have nothing to say -- so probe before touching any endpoint. */
-    if (s_wd_probing) {
+     * to have nothing to say -- so probe before touching any endpoint, and
+     * try the address the peer actually uses before drawing a conclusion. */
+    if (s_wd_probe_stage != 0) {
         if (ep5_count != s_wd_probe_ep5) {
-            s_wd_probing = 0;                 /* answered: the wire is alive */
+            s_wd_probe_stage = 0;             /* answered: the wire is alive */
             s_wd_last_ep5_change_ms = now;
-        }
-        else if ((uint32_t)(now - s_wd_probe_ms) > NCM_TARGET_PROBE_MS) {
-            s_wd_probing = 0;
+        } else if ((uint32_t)(now - s_wd_probe_ms) > NCM_TARGET_PROBE_MS) {
             s_wd_last_ep5_change_ms = now;
-            /* A busy EP7 means the queue is the problem, not the wire; the
-             * TX watchdog above owns that case and resets harder. */
-            if (USBFS_Endp_Busy[DEF_UEP7] == 0) {
-                target_ep_resync();
-                queue_clear(&g_target_tx_queue);
-                g_ncm_garp_sent = 0;  /* re-announce after the link bounce */
-                g_target_ncm_notify_state = NCM_NOTIFY_DOWN;
-                g_target_ncm_notify_hold_until_ms = now + 100;
-                g_target_wd_silence_fires++;
-                USB_DEBUG("NCM: silence watchdog reset\r\n");
+            if (s_wd_probe_stage == 1 &&
+                memcmp(s_target_seen_ip, ncm_target_host_ip, 4) != 0 &&
+                target_probe_peer(s_target_seen_ip)) {
+                /* The peer may not be living at the configured address at
+                 * all -- set by hand on the far side.  Ask the address it
+                 * last spoke from before concluding anything. */
+                s_wd_probe_stage = 2;
+                s_wd_probe_ms = now;
+                s_wd_probe_ep5 = ep5_count;
+            } else {
+                s_wd_probe_stage = 0;
+                /* Nothing answered.  A dead pipe and a healthy peer at an
+                 * address we have never seen produce exactly this, so there
+                 * is no evidence here to justify resetting the endpoints and
+                 * bouncing the link -- that costs a packet every time and
+                 * has never been observed to fix anything (set_if5 does not
+                 * move, so the host does not even re-issue SET_INTERFACE).
+                 * Count it, back off, and wait for the peer to say anything
+                 * at all: its next frame re-arms the normal silence timer. */
+                g_target_wd_probe_unproven++;
+                s_wd_silence_ms = (s_wd_silence_ms >= NCM_TARGET_SILENCE_MAX_MS / 2u)
+                                      ? NCM_TARGET_SILENCE_MAX_MS
+                                      : (uint32_t)(s_wd_silence_ms + s_wd_silence_ms);
+                USB_DEBUG("NCM: silence probe unanswered\r\n");
             }
         }
     }
@@ -2246,9 +2336,8 @@ static void target_watchdog(void)
              g_target_tx_queue.count == 0) {
         if (ep5_count != s_wd_last_ep5_count) {
             s_wd_last_ep5_change_ms = now;
-        } else if ((uint32_t)(now - s_wd_last_ep5_change_ms) > NCM_TARGET_SILENCE_MS) {
-            target_probe_peer();
-            s_wd_probing = 1;
+        } else if ((uint32_t)(now - s_wd_last_ep5_change_ms) > s_wd_silence_ms) {
+            s_wd_probe_stage = target_probe_peer(ncm_target_host_ip) ? 1u : 0u;
             s_wd_probe_ms = now;
             s_wd_probe_ep5 = ep5_count;
             s_wd_last_ep5_change_ms = now;   /* no re-probe storm if unanswered */
@@ -2257,8 +2346,14 @@ static void target_watchdog(void)
     else {
         s_wd_last_ep5_change_ms = now;
         if (g_target_tx_queue.count == 0) {
-            s_wd_probing = 0;   /* traffic or a queued frame: nothing to prove */
+            s_wd_probe_stage = 0;   /* traffic or a queued frame: nothing to prove */
         }
+    }
+
+    /* Any traffic from the peer restores the normal silence deadline, which
+     * is what makes the back-off above self-clearing rather than sticky. */
+    if (ep5_count != s_wd_last_ep5_count) {
+        s_wd_silence_ms = NCM_TARGET_SILENCE_MS;
     }
     s_wd_last_ep5_count = ep5_count;
 }
@@ -3098,6 +3193,13 @@ static uint8_t handle_target_frame(const uint8_t *data, uint16_t len)
     if (s_bridge_enabled) memcpy(s_target_peer_mac, &data[6], 6);
 
     eth_type = (uint16_t)(data[12] << 8) | data[13];
+
+    /* Learn where the peer actually lives before any handler runs: the
+     * silence watchdog needs a second address to probe when the configured
+     * one is not the one in use. */
+    if (s_bridge_enabled) {
+        target_learn_peer_ip(data, len, eth_type);
+    }
 
     /* DHCP first.  A DISCOVER is an IPv4 broadcast, so the discovery relay
      * below would forward it to the Host and return before the local DHCP

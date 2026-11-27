@@ -299,7 +299,7 @@ channel (`0x33`, sub-command `0x10` for the host side, `0x13` for the bridge).
 | 20..27 | device IP, host IP |
 | 28..55 | u16 counters: `ep3_rx_pkts`, `ntb_sig_ok`, `ntb_sig_bad`, `ntb_parsed`, `host_frames`, `arp_req`, `arp_match`, `arp_reply`, `icmp_echo`, `dhcp_offer`, `tx_sent`, `zlp_sent`, `rx_oflow`, `poll_calls` |
 
-`0x33/0x13`, 32 bytes:
+`0x33/0x13`, 38 bytes:
 
 | Offset | Field |
 |---|---|
@@ -314,7 +314,7 @@ channel (`0x33`, sub-command `0x10` for the host side, `0x13` for the bridge).
 | 13 | target TX queue depth |
 | 14..15 | **`g_portal_hijacked`** — DNS answers spoofed since boot |
 | 16..17 | raw EP5 OUT interrupts (toggle-desync detector) |
-| 18 | silence-watchdog recoveries |
+| 18 | current silence-probe interval in seconds (10..120) |
 | 19 | reserved |
 | 20..21 | target TX queue overflow (low 16 bits of the u32 counter) |
 | 22..23 | `poll_skipped` — poll re-entries refused by the guard |
@@ -322,13 +322,24 @@ channel (`0x33`, sub-command `0x10` for the host side, `0x13` for the bridge).
 | 26..27 | `tog_bad` — EP5 OUT packets ACKed with the wrong data toggle |
 | 28..29 | `SET_INTERFACE(IF5)` count (low 16 bits) |
 | 30..31 | liveness probes sent (ARP requests after going quiet) |
+| 32..33 | `unproven` — probes that got no answer from any known address |
+| 34..37 | last source IPv4 the peer was seen speaking from |
 
-`tog_bad` is the counter to pair with `silence_wd`: each recovery resets the
+`tog_bad` pairs with the TX watchdog: each `target_ep_resync()` resets the
 expected RX toggle to DATA0, and if the peer is on the other toggle its next
-packet is ACKed and discarded, so `tog_bad` rises by one per recovery that
-actually cost a chunk. `probes` should rise while `silence_wd` stays flat on a
-healthy idle link — the watchdog now asks the target to answer an ARP request
-before touching anything.
+packet is ACKed and discarded, so `tog_bad` rises by one per reset that actually
+cost a chunk.
+
+The silence path reads differently. On a healthy idle link `probes` rises
+(one 42-byte ARP request every 10 s) and nothing else moves: no bounce, so
+`set_if5` and `tog_bad` stay flat, and `probe_interval` stays 10. Two probes per
+cycle means the configured `target_host_ip` went unanswered and the address in
+`seen_ip` — learned from the peer's own frames — was used instead; that is the
+normal state of affairs for a target whose IPv4 was set by hand. `unproven`
+rising means neither address answered, in which case the interval doubles
+(10 s → 120 s cap) and the endpoints are left alone rather than reset on a
+guess. `probe_interval` reading 120 is therefore the "peer is silent at every
+address we know" state, not a fault counter.
 
 Reading `g_portal_hijacked` is the quickest way to tell "the greeting is
 working" (it increments in bursts of ≤ 4 per peer) from "the peer is being
