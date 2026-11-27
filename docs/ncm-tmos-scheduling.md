@@ -573,14 +573,47 @@ That leaves two candidate levers, and they are not equivalent:
   never queues behind a bulk frame. This fixes `ping` loss under saturation
   by design, rather than by outpacing the producer.
 
-The second is the cheaper and more robust one, and it is what the numbers
-point at: the drops are almost entirely 98-byte ICMP replies arriving while
-the queue is full of 1 514-byte bulk frames.
+The second was implemented and measured — see the next section.
 
-If the mechanism still needs proving, the clean experiment is to build
-locally with GCC 8.2.1 (xpack publishes the same tarball CI downloads) and
-diff its ELF against the CI one; identical `.text` would confirm the
-toolchain alone is responsible.
+### One reserved slot for small frames (measured 2026-11-27)
+
+The ring stays at 2. A frame of at most `NCM_BRIDGE_SMALL_FRAME_MAX` (128 B —
+ICMP reply 98 B, ARP 42–60 B, bare ACK 54 B) that arrives while the ring is
+full goes into one reserved slot instead of being dropped, and the drain sends
+that slot first. Ordering in the normal case is untouched: the slot is only
+reachable when the ring is already full, and the frames that fill the ring are
+1514-byte bulk segments, which can never claim it.
+
+Same harness, same artifact source (CI GCC 8.2, the build that lost 81 %):
+
+| build | `ping` loss | `small_used` / run | `hq_overflow` / run | throughput |
+|---|---|---|---|---|
+| CI, no slot | 81 % | — | +1 626 | 0.499 MiB/s |
+| CI, reserved slot | **0 %** (2 runs) | +81, +86 | +1 544 | 0.504–0.506 MiB/s |
+| local, reserved slot | 0 % | 0 | +11 | 0.505 MiB/s |
+
+`small_used` is the point of the measurement: 81 of the 100 replies needed the
+slot, and all 100 arrived. Bulk frames are still dropped at the same rate —
+the ring is still saturated — but a dropped 1514-byte TCP segment costs a
+retransmission, which is why throughput did not move (0.499 → 0.504). Payload
+integrity was checked end to end after a run: `sha256` of the 8 MiB streamed
+over the bridge matched `certutil -hashfile … SHA256` on the target.
+
+Two caveats worth keeping in mind:
+
+- A small frame that reaches the slot overtakes up to two bulk frames. Under
+  saturation it would have been dropped instead, and drops reorder TCP far more
+  violently than a two-frame slip, but this is still a reordering, not a free
+  win. Only frames ≤ 128 B are affected.
+- Only the target→host queue reserves a slot, because that is the direction
+  that saturates in this bench. The reverse path has the same shape under a
+  downstream transfer and would need another 1516 bytes.
+
+RAM: bss ends at 0x2000E478, stack starts at 0x2000F800, so the malloc arena
+goes from 6 536 to 5 000 bytes.
+
+The slot is readable as payload byte 19 of `0x33/0x13`, which used to be
+padding: it saturates at 255.
 
 To reproduce the comparison:
 
@@ -598,8 +631,11 @@ riscv-none-elf-objdump -d --disassemble=NCM_Bridge_Poll /tmp/ci8/*.elf
    expect 40–60% loss and RTT equal to the 2-frame drain time (~5 ms). This is the
    baseline behaviour, not a fault.
 3. Repeat with the probe in the **opposite** direction: expect 0–2% loss and
-   RTT 110–230 ms. If this instead shows loss, something other than queue depth
-   is wrong and the counters below will say which side.
+   RTT 110–230 ms. This relies on the reserved small-frame slot
+   (§One reserved slot for small frames); before it existed a slower build lost
+   most of those replies (81 %) because they lost the race for the full ring.
+   If this shows loss now, check `small_used` at `0x13` byte 19 — zero means the
+   replies never reached the slot, which points at the host→target leg instead.
 4. If a change claims to reduce loss, it has to move item 2 below ~40%, and it
    has to do so across at least four runs — the run-to-run spread on this metric
    is 15 points wide, wide enough to make a two-run comparison lie.
@@ -608,9 +644,9 @@ The `0x33/0x10` diagnostics frame exposes `host_frames`, `hq_overflow`,
 `poll_calls`, `tx_sent` and `zlp_sent` (58-byte reply payload — full, nothing
 else fits), which is enough to separate "arrived at the bridge" from "dropped on
 the way out". The target-facing queue's overflow counter, the re-entry skips,
-the duplicate re-arms, the toggle-mismatch count and the probe count are
-exported by `0x33/0x13` instead, at payload bytes 20–31 (see
-`GetBridgeDiagnostics()` for the layout).
+the duplicate re-arms, the toggle-mismatch count, the probe count and the
+small-frame rescues are exported by `0x33/0x13` instead, at payload bytes
+19–33 (see `GetBridgeDiagnostics()` for the layout).
 
 Reading `0x13` over BLE has two traps worth knowing before blaming the firmware
 for silence: the response can take longer than 1.5 s while the BLE-Eth pump is

@@ -347,7 +347,7 @@ channel (`0x33`, sub-command `0x10` for the host side, `0x13` for the bridge).
 | 14..15 | **`g_portal_hijacked`** — DNS answers spoofed since boot |
 | 16..17 | raw EP5 OUT interrupts (toggle-desync detector) |
 | 18 | current silence-probe interval in seconds (10..120) |
-| 19 | reserved |
+| 19 | small-frame rescues in the host TX queue, saturating at 255 (was padding) |
 | 20..21 | target TX queue overflow (low 16 bits of the u32 counter) |
 | 22..23 | `poll_skipped` — poll re-entries refused by the guard |
 | 24..25 | duplicate re-arms refused (`dup_blocks`) |
@@ -421,10 +421,13 @@ These are consequences of the design, not bugs to file:
 * **One greeting per power-on.** A replug does not re-arm it (§5).
 * **Saturation drops small packets, in either direction, with or without BLE.**
   Each direction owns a 2-frame queue; TCP keeps it full, so an ICMP request
-  arriving at a full queue is tail-dropped (~5 ms of queue, hence low RTT). With
-  the probe in the opposite direction to the load the same link only queues
-  (0–2% loss, ~200 ms). The radio is not a factor — measured both ways. The
-  mechanism, the measurements and what was tried are in
+  arriving at a full queue is tail-dropped (~5 ms of queue, hence low RTT). The
+  target→host queue keeps one extra reserved slot for frames ≤ 128 B, so
+  replies travelling against the load survive the saturated ring (measured 81 %
+  → 0 % loss); the host→target queue has no slot, so a probe sent *into* the
+  load is still dropped. With the probe in the opposite direction to the load
+  the same link only queues (0–2 % loss, ~200 ms). The radio is not a factor —
+  measured both ways. The mechanism, the measurements and what was tried are in
   [ncm-tmos-scheduling.md](ncm-tmos-scheduling.md).
 
 ---
