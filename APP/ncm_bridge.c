@@ -48,7 +48,13 @@ volatile uint32_t g_ncm_init_target_count = 0;
  * NCM Protocol Constants
  ******************************************************************************/
 #define NCM_BRIDGE_MTU_FRAME_SIZE       1514u
-#define NCM_BRIDGE_QUEUE_DEPTH          2u
+/* Two frames is enough to keep a link busy but leaves nothing for a burst:
+ * with the queue full, an arriving frame is dropped whole, and the drop rate
+ * is extremely sensitive to per-poll-iteration cost (a CI build of the same
+ * source drops ~1600 frames per 8 MiB where a local build drops 4, see
+ * docs/ncm-tmos-scheduling.md). Three frames buys the burst margin without
+ * changing the drain policy. */
+#define NCM_BRIDGE_QUEUE_DEPTH          3u
 #define NCM_BRIDGE_USBFS_PACKET_SIZE    64u
 /* Host-facing (USBLIB) bulk packet size — PMA buffers are 64 bytes. */
 #define NCM_BRIDGE_HOST_PACKET_SIZE     64u
